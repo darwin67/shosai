@@ -45,7 +45,7 @@ impl ZoomMode {
 // State
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct State {
     /// Path to the currently opened file.
     file_path: Option<PathBuf>,
@@ -63,8 +63,8 @@ pub struct State {
     page_input: String,
     /// Error message to display.
     error: Option<String>,
-    /// Persisted reading state store.
-    reading_state: ReadingStateStore,
+    /// Persisted reading state store (SQLite-backed).
+    reading_state: Option<ReadingStateStore>,
 }
 
 impl Default for ZoomMode {
@@ -104,10 +104,24 @@ pub enum Message {
 // ---------------------------------------------------------------------------
 
 pub fn boot() -> (State, Task<Message>) {
-    let reading_state = ReadingStateStore::load().unwrap_or_default();
+    let reading_state = match ReadingStateStore::open() {
+        Ok(store) => Some(store),
+        Err(e) => {
+            eprintln!("warning: failed to open reading state database: {e}");
+            None
+        }
+    };
+
     let state = State {
+        file_path: None,
+        document: None,
+        current_page: 0,
+        total_pages: 0,
+        zoom: ZoomMode::default(),
+        rendered_page: None,
+        page_input: String::new(),
+        error: None,
         reading_state,
-        ..State::default()
     };
     (state, Task::none())
 }
@@ -141,7 +155,11 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                     state.document = Some(doc);
 
                     // Restore reading position if we've read this file before.
-                    if let Some(saved) = state.reading_state.get(&path) {
+                    let saved = state
+                        .reading_state
+                        .as_ref()
+                        .and_then(|store| store.get(&path));
+                    if let Some(saved) = saved {
                         state.current_page = saved.page.min(state.total_pages.saturating_sub(1));
                         state.zoom = ZoomMode::Manual(saved.zoom);
                     } else {
@@ -282,18 +300,15 @@ fn render_current_page(state: &mut State) {
     }
 }
 
-/// Save the current reading position to disk.
-fn save_reading_state(state: &mut State) {
-    if let Some(path) = &state.file_path {
-        state.reading_state.set(
-            path,
-            FileReadingState {
-                page: state.current_page,
-                zoom: state.zoom.scale(),
-            },
-        );
+/// Save the current reading position to the database.
+fn save_reading_state(state: &State) {
+    if let (Some(path), Some(store)) = (&state.file_path, &state.reading_state) {
+        let reading = FileReadingState {
+            page: state.current_page,
+            zoom: state.zoom.scale(),
+        };
         // Best-effort save; don't crash the app on write failure.
-        if let Err(e) = state.reading_state.save() {
+        if let Err(e) = store.set(path, &reading) {
             eprintln!("warning: failed to save reading state: {e}");
         }
     }
