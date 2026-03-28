@@ -76,19 +76,12 @@ impl ReadingStateStore {
         Ok(store)
     }
 
-    /// Run database migrations.
+    /// Run database migrations from the `migrations/` directory.
     async fn migrate(&self) -> Result<()> {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS reading_state (
-                file_path TEXT PRIMARY KEY NOT NULL,
-                page      INTEGER NOT NULL DEFAULT 0,
-                zoom      REAL    NOT NULL DEFAULT 1.0,
-                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )",
-        )
-        .execute(&self.pool)
-        .await
-        .context("failed to create reading_state table")?;
+        sqlx::migrate!("./migrations")
+            .run(&self.pool)
+            .await
+            .context("failed to run database migrations")?;
 
         Ok(())
     }
