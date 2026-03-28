@@ -81,44 +81,45 @@ The separation of ~shosai-core~ and ~shosai-app~ ensures:
 * Phase 1 — Foundation & PDF Viewer (MVP)
 :PROPERTIES:
 :PHASE: 1
-:STATUS: TODO
+:STATUS: DONE
 :END:
 
 *Goal*: Open and read a PDF file with basic navigation.
 
-** TODO Project scaffold
-- [ ] Convert to Cargo workspace structure (~shosai-core~ + ~shosai-app~)
-- [ ] Add dependencies: ~pdfium-render~, ~iced~, ~rfd~, ~image~
-- [ ] Set up PDFium library bundling (download script or ~build.rs~)
-- [ ] Add Apache-2.0 LICENSE file
-- [ ] Update ~flake.nix~ with system dependencies (PDFium, etc.)
+** DONE Project scaffold
+- [X] Convert to Cargo workspace structure (~shosai-core~ + ~shosai-app~)
+- [X] Add dependencies: ~pdfium-render~, ~iced~, ~rfd~, ~image~
+- [X] Set up PDFium library bundling (download script)
+- [X] Add Apache-2.0 LICENSE file
+- [X] Update ~flake.nix~ with system dependencies
 
-** TODO Core document abstraction
-- [ ] Define ~Document~ trait:
+** DONE Core document abstraction
+- [X] Define ~Document~ trait:
   - ~page_count() -> usize~
-  - ~render_page(index: usize, scale: f32) -> RgbaImage~
+  - ~render_page(index: usize, scale: f32) -> RenderedPage~
   - ~page_size(index: usize) -> (f32, f32)~
   - ~metadata() -> DocumentMetadata~
   - ~title() -> Option<String>~
-- [ ] Implement ~PdfDocument~ wrapping ~pdfium-render~
-- [ ] Page rendering to RGBA pixel buffers
-- [ ] Unit tests for PDF loading and rendering
+- [X] Implement ~PdfDocument~ wrapping ~pdfium-render~
+- [X] Page rendering to RGBA pixel buffers
+- [X] Unit tests for PDF loading and rendering (10 tests)
 
-** TODO Basic Iced application
-- [ ] Main window with title bar
-- [ ] "Open File" dialog integration (via ~rfd~)
-- [ ] Single-page display using ~iced::widget::image~ with ~Handle::Rgba~
-- [ ] Page navigation: previous / next / jump to page number
-- [ ] Zoom controls: fit width, fit page, manual percentage
-- [ ] Keyboard shortcuts:
+** DONE Basic Iced application
+- [X] Main window with title bar
+- [X] "Open File" dialog integration (via ~rfd~)
+- [X] Single-page display using ~iced::widget::image~ with ~Handle::Rgba~
+- [X] Page navigation: previous / next / jump to page number
+- [X] Zoom controls: fit width, fit page, manual percentage
+- [X] Keyboard shortcuts:
   - Arrow keys / PgUp / PgDn for navigation
   - ~+~ / ~-~ for zoom
   - ~Ctrl+O~ for open file
 
-** TODO Reading state persistence
-- [ ] Track current page position per file
-- [ ] Persist last-read position (SQLite or JSON file)
-- [ ] Restore position when reopening a file
+** DONE Reading state persistence
+- [X] Track current page position per file
+- [X] Persist last-read position (JSON file in XDG config dir)
+- [X] Restore position when reopening a file
+- [X] Unit tests for reading state (5 tests)
 
 * Phase 2 — EPUB Support
 :PROPERTIES:
