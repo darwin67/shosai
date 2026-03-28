@@ -1,20 +1,44 @@
 use std::path::Path;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use pdfium_render::prelude::*;
 
 use crate::document::{Document, DocumentMetadata, RenderedPage};
 
+/// Global Pdfium instance. PDFium is a C library that should only be loaded once.
+/// With the `thread_safe` feature enabled, Pdfium is Send + Sync.
+static PDFIUM: OnceLock<Pdfium> = OnceLock::new();
+
+/// Get or initialize the global Pdfium instance.
+fn pdfium() -> Result<&'static Pdfium> {
+    if let Some(p) = PDFIUM.get() {
+        return Ok(p);
+    }
+
+    let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
+        .or_else(|_| Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./lib")))
+        .or_else(|_| Pdfium::bind_to_system_library())
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to load PDFium library: {e}. \
+                 Run `./scripts/download-pdfium.sh` to download it, \
+                 or see https://github.com/bblanchon/pdfium-binaries"
+            )
+        })?;
+
+    let pdfium = Pdfium::new(bindings);
+    // Ignore the error if another thread initialized it first
+    let _ = PDFIUM.set(pdfium);
+    Ok(PDFIUM.get().unwrap())
+}
+
 /// A PDF document backed by pdfium-render.
 pub struct PdfDoc {
-    // We hold the Pdfium instance alongside the document to keep them alive together.
-    // The document borrows from pdfium internally, so we store them in the order
-    // that ensures correct drop order: document first, then pdfium.
-    _pdfium: Pdfium,
     page_count: usize,
     page_sizes: Vec<(f32, f32)>,
     metadata: DocumentMetadata,
-    // We store the raw bytes so we can re-open for rendering.
+    /// Raw PDF bytes, kept for re-opening during render calls.
     data: Vec<u8>,
 }
 
@@ -29,7 +53,7 @@ impl PdfDoc {
 
     /// Open a PDF from raw bytes.
     pub fn from_bytes(data: Vec<u8>) -> Result<Self> {
-        let pdfium = create_pdfium()?;
+        let pdfium = pdfium()?;
         let document = pdfium
             .load_pdf_from_byte_slice(&data, None)
             .map_err(|e| anyhow::anyhow!("failed to load PDF: {e}"))?;
@@ -63,10 +87,10 @@ impl PdfDoc {
                 .map(|t| t.value().to_string()),
         };
 
+        // Drop the document before moving `data` into the struct.
         drop(document);
 
         Ok(Self {
-            _pdfium: pdfium,
             page_count,
             page_sizes,
             metadata,
@@ -95,7 +119,11 @@ impl Document for PdfDoc {
             );
         }
 
-        let pdfium = create_pdfium()?;
+        let pdfium = pdfium()?;
+
+        // Re-open the document from stored bytes for rendering.
+        // This is necessary because PdfDocument borrows from Pdfium and cannot
+        // be stored alongside it due to lifetime constraints.
         let document = pdfium
             .load_pdf_from_byte_slice(&self.data, None)
             .map_err(|e| anyhow::anyhow!("failed to load PDF for rendering: {e}"))?;
@@ -131,19 +159,4 @@ impl Document for PdfDoc {
     fn metadata(&self) -> DocumentMetadata {
         self.metadata.clone()
     }
-}
-
-/// Create a Pdfium instance, trying local bundled library first, then system.
-fn create_pdfium() -> Result<Pdfium> {
-    let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
-        .or_else(|_| Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./lib")))
-        .or_else(|_| Pdfium::bind_to_system_library())
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "failed to load PDFium library: {e}. \
-                 Run `./scripts/download-pdfium.sh` to download it, \
-                 or see https://github.com/bblanchon/pdfium-binaries"
-            )
-        })?;
-    Ok(Pdfium::new(bindings))
 }

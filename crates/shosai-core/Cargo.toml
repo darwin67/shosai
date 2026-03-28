@@ -9,3 +9,6 @@ anyhow.workspace = true
 thiserror.workspace = true
 bytes.workspace = true
 pdfium-render = { version = "0.8", features = ["thread_safe", "sync", "image"] }
+
+[dev-dependencies]
+serial_test = "3.4.0"
