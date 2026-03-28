@@ -3934,6 +3934,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "iced",
+ "image",
  "rfd",
  "shosai-core",
  "tokio",

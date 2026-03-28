@@ -592,8 +592,13 @@ fn epub_chapter_view(state: &State) -> Element<'_, Message> {
         content_col = content_col.push(text(title.clone()).size(font_size * 1.5).color(text_color));
     }
 
+    let resources = match &state.document {
+        Some(OpenDocument::Epub(doc)) => &doc.content.resources,
+        _ => &std::collections::HashMap::new(),
+    };
+
     for node in &state.chapter_content {
-        content_col = content_col.push(render_content_node(node, font_size, text_color));
+        content_col = content_col.push(render_content_node(node, font_size, text_color, resources));
     }
 
     let padded = container(content_col)
@@ -617,6 +622,7 @@ fn render_content_node<'a>(
     node: &ContentNode,
     font_size: f32,
     text_color: iced::Color,
+    resources: &std::collections::HashMap<String, Vec<u8>>,
 ) -> Element<'a, Message> {
     match node {
         ContentNode::Heading { level, text: t } => {
@@ -635,7 +641,7 @@ fn render_content_node<'a>(
         ContentNode::BlockQuote(children) => {
             let mut col = column![].spacing(8).padding(20);
             for child in children {
-                col = col.push(render_content_node(child, font_size, text_color));
+                col = col.push(render_content_node(child, font_size, text_color, resources));
             }
             container(col).padding(16).width(Length::Fill).into()
         }
@@ -670,12 +676,8 @@ fn render_content_node<'a>(
             col.into()
         }
 
-        ContentNode::Image { alt, .. } => {
-            // TODO: load image from epub resources and display
-            text(format!("[Image: {alt}]"))
-                .size(font_size)
-                .color(text_color)
-                .into()
+        ContentNode::Image { src, alt } => {
+            render_epub_image(src, alt, font_size, text_color, resources)
         }
 
         ContentNode::HorizontalRule => text("───────────────────")
@@ -683,6 +685,39 @@ fn render_content_node<'a>(
             .color(text_color)
             .into(),
     }
+}
+
+/// Render an EPUB image from the resource map, falling back to alt text.
+fn render_epub_image<'a>(
+    src: &str,
+    alt: &str,
+    font_size: f32,
+    text_color: iced::Color,
+    resources: &std::collections::HashMap<String, Vec<u8>>,
+) -> Element<'a, Message> {
+    if let Some(data) = resources.get(src) {
+        // Try to decode the image and display as RGBA via iced::widget::image.
+        if let Ok(img) = ::image::load_from_memory(data) {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            let handle = image::Handle::from_rgba(w, h, rgba.into_raw());
+
+            return container(
+                image(handle)
+                    .content_fit(iced::ContentFit::ScaleDown)
+                    .width(Length::Fill),
+            )
+            .width(Length::Fill)
+            .center_x(Length::Fill)
+            .into();
+        }
+    }
+
+    // Fallback: show alt text placeholder.
+    text(format!("[Image: {alt}]"))
+        .size(font_size)
+        .color(text_color)
+        .into()
 }
 
 fn render_spans<'a>(
