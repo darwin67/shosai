@@ -1,0 +1,331 @@
+#+TITLE: Shōsai (書斎) — Ebook Reader Roadmap
+#+AUTHOR: darwin
+#+DATE: 2026-03-28
+#+STARTUP: showall
+
+* Overview
+
+Shōsai (書斎, "study/reading room") is a desktop ebook reader supporting EPUB,
+PDF, and CBZ formats, built in Rust with a native GUI.
+
+** Goals
+
+- Fast, native desktop ebook reader
+- Support for EPUB, PDF, and CBZ/CBR formats
+- Clean library management for book collections
+- Customizable reading experience (fonts, themes, layout)
+- Permissively licensed (Apache-2.0)
+- Potential future mobile support
+
+* Technology Stack
+
+| Component     | Crate/Tool          | License          | Notes                                             |
+|---------------+---------------------+------------------+---------------------------------------------------|
+| Language      | Rust (edition 2024) | —                | Rust 1.94.0 via Nix flake                         |
+| GUI framework | ~iced~ 0.14         | MIT              | Native GPU-accelerated GUI                        |
+| PDF rendering | ~pdfium-render~     | Apache-2.0 / MIT | Bindings to Google's PDFium engine                |
+| EPUB parsing  | ~zip~ + ~roxmltree~ | MIT              | Custom parser (~300 LOC)                          |
+| EPUB display  | Custom renderer     | —                | Simplified HTML to Iced widgets                   |
+| CBZ support   | ~zip~ + ~image~     | MIT / Apache-2.0 | Extract images from ZIP archive                   |
+| File dialogs  | ~rfd~               | MIT              | Native OS file dialogs                            |
+| Database      | ~sqlx~              | MIT / Apache-2.0 | Async SQLite for library metadata & reading state |
+| Text shaping  | ~cosmic-text~       | MIT / Apache-2.0 | If needed for advanced text layout                |
+| Build/Dev     | Nix flake           | —                | Reproducible dev environment                      |
+
+** Licensing Decisions
+
+- *MuPDF ruled out*: AGPL-3.0 copyleft would infect the entire application.
+- *Poppler ruled out*: GPL-2.0 via the C library, despite MIT Rust bindings.
+- *~epub~ crate ruled out*: GPL-3.0 licensed.
+- *PDFium selected*: Apache-2.0 licensed, battle-tested (used in Chromium).
+- *EPUB parser*: Custom implementation to avoid all GPL dependencies.
+
+** Architecture — Cargo Workspace
+
+#+begin_src
+shosai/
+├── Cargo.toml              (workspace root)
+├── crates/
+│   ├── shosai-core/        (document traits, format parsers, library DB)
+│   │   ├── src/
+│   │   │   ├── lib.rs
+│   │   │   ├── document.rs     (Document trait)
+│   │   │   ├── pdf.rs          (PDF via pdfium-render)
+│   │   │   ├── epub/
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── parser.rs   (EPUB ZIP/XML parsing)
+│   │   │   │   └── renderer.rs (simplified HTML → widget model)
+│   │   │   ├── cbz.rs          (CBZ support)
+│   │   │   └── library.rs      (SQLite library management)
+│   │   └── Cargo.toml
+│   └── shosai-app/         (Iced GUI application)
+│       ├── src/
+│       │   ├── main.rs
+│       │   ├── app.rs          (top-level Iced Application)
+│       │   ├── views/
+│       │   │   ├── reader.rs   (document reading view)
+│       │   │   ├── library.rs  (library grid/list view)
+│       │   │   └── settings.rs
+│       │   ├── widgets/        (custom Iced widgets)
+│       │   └── theme.rs
+│       └── Cargo.toml
+├── flake.nix
+└── LICENSE
+#+end_src
+
+The separation of ~shosai-core~ and ~shosai-app~ ensures:
+- Core logic (parsing, rendering, DB) is testable independently
+- Alternative frontends can be added later (e.g., mobile, TUI)
+- Clear dependency boundaries
+
+* Phase 1 — Foundation & PDF Viewer (MVP)
+:PROPERTIES:
+:PHASE: 1
+:STATUS: TODO
+:END:
+
+*Goal*: Open and read a PDF file with basic navigation.
+
+** TODO Project scaffold
+- [ ] Convert to Cargo workspace structure (~shosai-core~ + ~shosai-app~)
+- [ ] Add dependencies: ~pdfium-render~, ~iced~, ~rfd~, ~image~
+- [ ] Set up PDFium library bundling (download script or ~build.rs~)
+- [ ] Add Apache-2.0 LICENSE file
+- [ ] Update ~flake.nix~ with system dependencies (PDFium, etc.)
+
+** TODO Core document abstraction
+- [ ] Define ~Document~ trait:
+  - ~page_count() -> usize~
+  - ~render_page(index: usize, scale: f32) -> RgbaImage~
+  - ~page_size(index: usize) -> (f32, f32)~
+  - ~metadata() -> DocumentMetadata~
+  - ~title() -> Option<String>~
+- [ ] Implement ~PdfDocument~ wrapping ~pdfium-render~
+- [ ] Page rendering to RGBA pixel buffers
+- [ ] Unit tests for PDF loading and rendering
+
+** TODO Basic Iced application
+- [ ] Main window with title bar
+- [ ] "Open File" dialog integration (via ~rfd~)
+- [ ] Single-page display using ~iced::widget::image~ with ~Handle::Rgba~
+- [ ] Page navigation: previous / next / jump to page number
+- [ ] Zoom controls: fit width, fit page, manual percentage
+- [ ] Keyboard shortcuts:
+  - Arrow keys / PgUp / PgDn for navigation
+  - ~+~ / ~-~ for zoom
+  - ~Ctrl+O~ for open file
+
+** TODO Reading state persistence
+- [ ] Track current page position per file
+- [ ] Persist last-read position (SQLite or JSON file)
+- [ ] Restore position when reopening a file
+
+* Phase 2 — EPUB Support
+:PROPERTIES:
+:PHASE: 2
+:STATUS: TODO
+:END:
+
+*Goal*: Open and read EPUB files with basic formatting.
+
+** TODO EPUB parser module
+- [ ] Extract ZIP contents using ~zip~ crate
+- [ ] Parse ~META-INF/container.xml~ to locate OPF file
+- [ ] Parse OPF file:
+  - Metadata: title, author, language, publisher, cover image ref
+  - Spine: reading order of content documents
+  - Manifest: all resources (XHTML, CSS, images, fonts)
+- [ ] Extract chapter XHTML content
+- [ ] Extract embedded images and CSS
+- [ ] Implement ~Document~ trait for EPUB (page count = chapter count)
+- [ ] Unit tests for EPUB parsing with sample files
+
+** TODO Simplified EPUB renderer
+- [ ] Parse XHTML into simplified document model:
+  - Paragraphs (~<p>~)
+  - Headings (~<h1>~ through ~<h6>~)
+  - Inline formatting: bold (~<b>~, ~<strong>~), italic (~<i>~, ~<em>~)
+  - Images (~<img>~)
+  - Links (~<a>~)
+  - Lists (~<ul>~, ~<ol>~, ~<li>~)
+  - Block quotes (~<blockquote>~)
+- [ ] Strip complex CSS, extract basic styling (font weight, style, alignment)
+- [ ] Render using Iced widgets: ~text~, ~rich_text~, ~image~, ~column~ / ~row~
+- [ ] Scrollable content view per chapter
+- [ ] Chapter navigation via table of contents sidebar
+
+** TODO EPUB reading features
+- [ ] Reading progress tracking (chapter + scroll position)
+- [ ] Basic customization:
+  - Font size adjustment
+  - Line height / spacing
+  - Margins / padding
+- [ ] Theme support: light, dark, sepia
+
+* Phase 3 — CBZ Support & Library Management
+:PROPERTIES:
+:PHASE: 3
+:STATUS: TODO
+:END:
+
+*Goal*: Comic book viewing and a proper library to manage collections.
+
+** TODO CBZ viewer
+- [ ] Extract images from ZIP archive
+- [ ] Sort entries by filename (natural sort order)
+- [ ] Display modes:
+  - Single page
+  - Double-page spread (side by side)
+- [ ] Fit modes: fit-to-width, fit-to-height, fit-to-page
+- [ ] Preload adjacent pages for smooth navigation
+- [ ] Implement ~Document~ trait for CBZ
+
+** TODO Library management
+- [ ] SQLite database schema:
+  - Books table: id, title, author, format, file_path, cover_blob, reading_progress, date_added, last_read
+  - Bookmarks table (for Phase 4)
+- [ ] Import books:
+  - Individual file import
+  - Directory scan (recursive)
+- [ ] Library views:
+  - Grid view with cover thumbnails
+  - List view with metadata columns
+- [ ] Search by title / author
+- [ ] Filter by format (PDF / EPUB / CBZ)
+- [ ] "Recently read" and "Currently reading" sections
+- [ ] Delete / remove from library
+
+** TODO Cover extraction
+- [ ] PDF: render first page as thumbnail (scaled down)
+- [ ] EPUB: extract cover image from OPF metadata
+- [ ] CBZ: use first image in archive as cover
+- [ ] Cache covers in SQLite as BLOBs or on disk
+
+* Phase 4 — Polish & Advanced Features
+:PROPERTIES:
+:PHASE: 4
+:STATUS: TODO
+:END:
+
+*Goal*: Make it a daily-driver reader.
+
+** TODO Bookmarks & annotations
+- [ ] Bookmark pages / chapters
+- [ ] Text highlighting:
+  - PDF: overlay-based highlighting on rendered page
+  - EPUB: text selection within rendered content
+- [ ] Notes attached to bookmarks / highlights
+- [ ] Store in SQLite database
+- [ ] Export bookmarks / notes (plain text, JSON, or Markdown)
+
+** TODO In-document search
+- [ ] PDF: text extraction from pages, search across document
+- [ ] EPUB: full-text search across chapters
+- [ ] Search results panel with navigation to matches
+- [ ] Highlight search matches in the reader view
+
+** TODO Performance optimization
+- [ ] Async page rendering (background thread / ~tokio::task::spawn_blocking~)
+- [ ] LRU page cache (keep N rendered pages in memory)
+- [ ] Background thumbnail generation for library view
+- [ ] Lazy loading for large libraries (virtualized list)
+- [ ] Profile and optimize startup time
+
+** TODO Reading experience improvements
+- [ ] Continuous scroll mode (vs. paginated mode)
+- [ ] Keyboard-driven navigation throughout the app
+- [ ] Remember window size and position
+- [ ] Multiple open documents (tabs or separate windows)
+- [ ] Status bar: current page, total pages, reading progress percentage
+
+* Phase 5 — Future & Stretch Goals
+:PROPERTIES:
+:PHASE: 5
+:STATUS: TODO
+:END:
+
+*Goal*: Extended format support, mobile, and distribution.
+
+** TODO Enhanced EPUB rendering
+- [ ] Evaluate embedding ~wry~ webview for full HTML/CSS fidelity
+- [ ] Or build custom text layout engine using ~cosmic-text~
+- [ ] Support complex EPUB layouts (tables, embedded fonts, MathML)
+- [ ] CSS ~@font-face~ support with embedded fonts
+
+** TODO Additional ebook formats
+- [ ] MOBI / AZW3 (Amazon Kindle) — evaluate legal feasibility
+- [ ] FB2 (FictionBook)
+- [ ] DjVu
+- [ ] Plain text / Markdown
+- [ ] CBR (RAR-based comic archives) — note: ~unrar~ has restrictive license
+
+** TODO Cloud sync (optional)
+- [ ] Design sync protocol for reading progress + bookmarks
+- [ ] Evaluate backends (self-hosted, WebDAV, etc.)
+- [ ] Conflict resolution for concurrent reading on multiple devices
+- [ ] Start with local storage, architecture should support sync later
+
+** TODO Mobile support
+- [ ] Evaluate Iced's future mobile story
+- [ ] Consider companion app approach
+- [ ] Sync reading progress across desktop and mobile
+
+** TODO Distribution & packaging
+- [ ] Nix package (leverage existing flake infrastructure)
+- [ ] AppImage for Linux
+- [ ] Flatpak for Linux
+- [ ] macOS ~.app~ bundle
+- [ ] Windows installer (NSIS or WiX)
+- [ ] CI/CD pipeline for automated builds and releases
+
+* Key Technical Risks & Mitigations
+
+| Risk                                        | Impact | Mitigation                                                       |
+|---------------------------------------------+--------+------------------------------------------------------------------|
+| Iced is "experimental" software             | High   | Pin to 0.14, abstract GUI layer, monitor upstream closely        |
+| PDFium binary distribution complexity       | Medium | Download script, document bundling process, consider static link |
+| No pure-Rust HTML/CSS renderer for EPUB     | High   | Simplified renderer for MVP, webview fallback in Phase 5         |
+| Iced text rendering quality on non-HiDPI    | Medium | Test early, may need custom text rendering via canvas            |
+| Iced slow startup on Linux (font loading)   | Low    | Known issue #2455, may be fixed upstream; can lazy-load fonts    |
+| ~pdfium-render~ types thread safety         | Medium | Investigate early, may need message-passing architecture         |
+| Complex PDFs rendering incorrectly          | Medium | PDFium is battle-tested (Chromium), low risk in practice         |
+| EPUB content diversity (tables, math, etc.) | Medium | Simplified renderer won't handle all content; phase 5 addresses  |
+
+* Research Notes
+
+** MuPDF (ruled out)
+- Crate: ~mupdf~ v0.6.0 on crates.io (repo: ~mupdf-rs~ on GitHub)
+- Supports PDF, EPUB, CBZ, SVG, HTML, XPS natively
+- Renders to pixmaps with raw RGBA access
+- *License: AGPL-3.0* — copyleft, would require entire app to be AGPL
+- Types are ~!Send + !Sync~
+- Would have been the simplest solution (one library for all formats)
+
+** PDFium (selected)
+- Crate: ~pdfium-render~ v0.8.37
+- Apache-2.0 / MIT dual license
+- Rust wrapper around Google's PDFium (used in Chromium)
+- Full PDF page rendering to pixel buffers
+- Requires bundling ~libpdfium~ shared library at runtime
+- Actively maintained, 84 releases
+
+** EPUB format
+- EPUB is a ZIP archive containing XHTML, CSS, images, and XML metadata
+- Structure: ~META-INF/container.xml~ → OPF file → spine + manifest
+- Simple enough to parse with ~zip~ + ~roxmltree~ (~300 lines)
+- All existing Rust EPUB parser crates are GPL-licensed
+
+** CBZ format
+- CBZ is a ZIP archive containing images (JPEG/PNG), sorted by filename
+- Trivial to implement with ~zip~ + ~image~ crates
+- CBR uses RAR (restrictive license for extraction library)
+- Recommend supporting CBZ only initially
+
+** Iced GUI framework
+- v0.14, self-described as "experimental"
+- Supports ~Handle::Rgba~ for displaying raw pixel data — critical for our use case
+- Has ~Canvas~ widget for custom 2D drawing
+- No built-in webview widget
+- No built-in virtualized list (use ~Scrollable~ + ~Sensor~ + ~Lazy~)
+- File dialogs via external ~rfd~ crate
+- Known issues: slow Linux startup (#2455), text rendering on non-HiDPI (#2254)
