@@ -136,11 +136,13 @@ impl Document for PdfDoc {
 /// Create a Pdfium instance, trying local bundled library first, then system.
 fn create_pdfium() -> Result<Pdfium> {
     let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
+        .or_else(|_| Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./lib")))
         .or_else(|_| Pdfium::bind_to_system_library())
         .map_err(|e| {
             anyhow::anyhow!(
                 "failed to load PDFium library: {e}. \
-                 Make sure libpdfium is available (see https://github.com/nicehash/pdfium-binaries)"
+                 Run `./scripts/download-pdfium.sh` to download it, \
+                 or see https://github.com/bblanchon/pdfium-binaries"
             )
         })?;
     Ok(Pdfium::new(bindings))
