@@ -34,6 +34,7 @@ fn pdfium() -> Result<&'static Pdfium> {
 }
 
 /// A PDF document backed by pdfium-render.
+#[derive(Debug)]
 pub struct PdfDoc {
     page_count: usize,
     page_sizes: Vec<(f32, f32)>,
