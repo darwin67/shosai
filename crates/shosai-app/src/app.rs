@@ -6,6 +6,7 @@ use iced::{Element, Length, Subscription, Task};
 
 use shosai_core::document::{Document, RenderedPage};
 use shosai_core::pdf::PdfDoc;
+use shosai_core::reading_state::{FileReadingState, ReadingStateStore};
 
 // ---------------------------------------------------------------------------
 // Zoom
@@ -62,6 +63,8 @@ pub struct State {
     page_input: String,
     /// Error message to display.
     error: Option<String>,
+    /// Persisted reading state store.
+    reading_state: ReadingStateStore,
 }
 
 impl Default for ZoomMode {
@@ -101,7 +104,12 @@ pub enum Message {
 // ---------------------------------------------------------------------------
 
 pub fn boot() -> (State, Task<Message>) {
-    (State::default(), Task::none())
+    let reading_state = ReadingStateStore::load().unwrap_or_default();
+    let state = State {
+        reading_state,
+        ..State::default()
+    };
+    (state, Task::none())
 }
 
 // ---------------------------------------------------------------------------
@@ -130,9 +138,18 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             match PdfDoc::open(&path) {
                 Ok(doc) => {
                     state.total_pages = doc.page_count();
-                    state.current_page = 0;
-                    state.page_input = "1".to_string();
                     state.document = Some(doc);
+
+                    // Restore reading position if we've read this file before.
+                    if let Some(saved) = state.reading_state.get(&path) {
+                        state.current_page = saved.page.min(state.total_pages.saturating_sub(1));
+                        state.zoom = ZoomMode::Manual(saved.zoom);
+                    } else {
+                        state.current_page = 0;
+                        state.zoom = ZoomMode::Manual(1.0);
+                    }
+
+                    state.page_input = format!("{}", state.current_page + 1);
                     state.file_path = Some(path);
                     render_current_page(state);
                 }
@@ -147,12 +164,11 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         }
 
         Message::NextPage => {
-            if let Some(_doc) = &state.document {
-                if state.current_page + 1 < state.total_pages {
-                    state.current_page += 1;
-                    state.page_input = format!("{}", state.current_page + 1);
-                    render_current_page(state);
-                }
+            if state.document.is_some() && state.current_page + 1 < state.total_pages {
+                state.current_page += 1;
+                state.page_input = format!("{}", state.current_page + 1);
+                render_current_page(state);
+                save_reading_state(state);
             }
         }
 
@@ -161,6 +177,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 state.current_page -= 1;
                 state.page_input = format!("{}", state.current_page + 1);
                 render_current_page(state);
+                save_reading_state(state);
             }
         }
 
@@ -173,6 +190,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 if page_num >= 1 && page_num <= state.total_pages {
                     state.current_page = page_num - 1;
                     render_current_page(state);
+                    save_reading_state(state);
                 }
             }
             // Reset input to current page
@@ -184,6 +202,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             let new_scale = (current + 0.25).min(5.0);
             state.zoom = ZoomMode::Manual(new_scale);
             render_current_page(state);
+            save_reading_state(state);
         }
 
         Message::ZoomOut => {
@@ -191,27 +210,30 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             let new_scale = (current - 0.25).max(0.25);
             state.zoom = ZoomMode::Manual(new_scale);
             render_current_page(state);
+            save_reading_state(state);
         }
 
         Message::SetZoomFitWidth => {
             state.zoom = ZoomMode::FitWidth;
             render_current_page(state);
+            save_reading_state(state);
         }
 
         Message::SetZoomFitPage => {
             state.zoom = ZoomMode::FitPage;
             render_current_page(state);
+            save_reading_state(state);
         }
 
         Message::KeyPressed(event) => {
-            return handle_key_event(state, event);
+            return handle_key_event(event);
         }
     }
 
     Task::none()
 }
 
-fn handle_key_event(_state: &mut State, event: keyboard::Event) -> Task<Message> {
+fn handle_key_event(event: keyboard::Event) -> Task<Message> {
     if let keyboard::Event::KeyPressed { key, modifiers, .. } = event {
         match key.as_ref() {
             // Navigation
@@ -255,6 +277,23 @@ fn render_current_page(state: &mut State) {
                 state.error = Some(format!("Failed to render page: {e}"));
                 state.rendered_page = None;
             }
+        }
+    }
+}
+
+/// Save the current reading position to disk.
+fn save_reading_state(state: &mut State) {
+    if let Some(path) = &state.file_path {
+        state.reading_state.set(
+            path,
+            FileReadingState {
+                page: state.current_page,
+                zoom: state.zoom.scale(),
+            },
+        );
+        // Best-effort save; don't crash the app on write failure.
+        if let Err(e) = state.reading_state.save() {
+            eprintln!("warning: failed to save reading state: {e}");
         }
     }
 }
