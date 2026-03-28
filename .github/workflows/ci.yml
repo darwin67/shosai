@@ -121,4 +121,9 @@ jobs:
           tar -xzf pdfium-win-x64.tgz
           Copy-Item "bin/pdfium.dll" -Destination "./"
 
+      # Add pdfium.dll to PATH so LoadLibraryExW can find it
+      - name: Add Pdfium to PATH
+        shell: pwsh
+        run: echo "${{ github.workspace }}" | Out-File -FilePath $env:GITHUB_PATH -Append
+
       - run: cargo test
