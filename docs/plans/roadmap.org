@@ -279,12 +279,30 @@ The separation of ~shosai-core~ and ~shosai-app~ ensures:
 - [ ] Windows installer (NSIS or WiX)
 - [ ] CI/CD pipeline for automated builds and releases
 
+*Note — PDFium bundling*: The app depends on ~libpdfium~ at runtime (a C
+shared library). For development this is handled by the Nix dev shell
+(~pdfium-binaries~ in ~flake.nix~), but every distribution format must
+solve this independently:
+- *Nix package*: Add ~pdfium-binaries~ as a runtime dependency and patch
+  ~RPATH~ / wrap with ~LD_LIBRARY_PATH~.
+- *AppImage / Flatpak*: Bundle ~libpdfium.so~ alongside the binary inside
+  the container.
+- *macOS .app*: Embed ~libpdfium.dylib~ in the bundle's ~Frameworks/~
+  directory and set ~@rpath~ accordingly.
+- *Windows*: Ship ~pdfium.dll~ next to the ~.exe~ (DLL search order finds it
+  automatically).
+- Alternatively, investigate ~pdfium-render~'s ~static~ feature or building
+  PDFium from source as a static library to eliminate the shared-library
+  dependency entirely.
+- The ~bblanchon/pdfium-binaries~ GitHub repo provides pre-built binaries
+  for all major platforms that CI can download during the release build.
+
 * Key Technical Risks & Mitigations
 
 | Risk                                        | Impact | Mitigation                                                       |
 |---------------------------------------------+--------+------------------------------------------------------------------|
 | Iced is "experimental" software             | High   | Pin to 0.14, abstract GUI layer, monitor upstream closely        |
-| PDFium binary distribution complexity       | Medium | Download script, document bundling process, consider static link |
+| PDFium binary distribution complexity       | Medium | Nix handles dev; each distro format must bundle libpdfium       |
 | No pure-Rust HTML/CSS renderer for EPUB     | High   | Simplified renderer for MVP, webview fallback in Phase 5         |
 | Iced text rendering quality on non-HiDPI    | Medium | Test early, may need custom text rendering via canvas            |
 | Iced slow startup on Linux (font loading)   | Low    | Known issue #2455, may be fixed upstream; can lazy-load fonts    |
