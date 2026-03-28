@@ -22,47 +22,55 @@
         rustToolchain = pkgs.rust-bin.stable."1.94.0".default.override {
           extensions = [ "rust-src" "rust-analyzer" "clippy" "rustfmt" ];
         };
-      in {
-        devShells.default = pkgs.mkShell {
-          nativeBuildInputs = with pkgs; [
-            rustToolchain
 
-            # tools
-            git-cliff
+        # Common dependencies across all platforms
+        commonDeps = with pkgs; [
+          rustToolchain
 
-            # build deps
-            pkg-config
-            cmake
-            clang
+          # tools
+          git-cliff
 
-            # runtime deps
-            openssl
+          # build deps
+          pkg-config
+          cmake
+          clang
 
+          # runtime deps
+          openssl
+
+          # LSP
+          rust-analyzer
+          nodePackages.yaml-language-server
+        ];
+
+        # Linux-specific dependencies
+        linuxDeps = with pkgs;
+          pkgs.lib.optionals pkgs.stdenv.isLinux [
             # GUI deps (iced / wgpu)
             libxkbcommon
             wayland
-            xorg.libX11
-            xorg.libXcursor
-            xorg.libXrandr
-            xorg.libXi
+            libx11
+            libxcursor
+            libxrandr
+            libxi
             vulkan-loader
             vulkan-headers
-
-            # LSP
-            rust-analyzer
-            nodePackages.yaml-language-server
           ];
+      in {
+        devShells.default = pkgs.mkShell {
+          nativeBuildInputs = commonDeps ++ linuxDeps;
 
-          # Ensure iced can find GPU drivers and Wayland/X11 libs at runtime
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [
-            libxkbcommon
-            wayland
-            xorg.libX11
-            xorg.libXcursor
-            xorg.libXrandr
-            xorg.libXi
-            vulkan-loader
-          ]);
+          # Ensure iced can find GPU drivers and Wayland/X11 libs at runtime (Linux only)
+          LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux
+            (pkgs.lib.makeLibraryPath (with pkgs; [
+              libxkbcommon
+              wayland
+              libx11
+              libxcursor
+              libxrandr
+              libxi
+              vulkan-loader
+            ]));
 
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
         };
