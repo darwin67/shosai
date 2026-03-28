@@ -186,12 +186,13 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         }
 
         Message::GoToPage => {
-            if let Ok(page_num) = state.page_input.parse::<usize>() {
-                if page_num >= 1 && page_num <= state.total_pages {
-                    state.current_page = page_num - 1;
-                    render_current_page(state);
-                    save_reading_state(state);
-                }
+            if let Ok(page_num) = state.page_input.parse::<usize>()
+                && page_num >= 1
+                && page_num <= state.total_pages
+            {
+                state.current_page = page_num - 1;
+                render_current_page(state);
+                save_reading_state(state);
             }
             // Reset input to current page
             state.page_input = format!("{}", state.current_page + 1);
@@ -250,7 +251,7 @@ fn handle_key_event(event: keyboard::Event) -> Task<Message> {
             keyboard::Key::Character(c) if c == "=" || c == "+" => {
                 return Task::done(Message::ZoomIn);
             }
-            keyboard::Key::Character(c) if c == "-" => {
+            keyboard::Key::Character("-") => {
                 return Task::done(Message::ZoomOut);
             }
 
