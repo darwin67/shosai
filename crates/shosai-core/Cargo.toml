@@ -1,0 +1,11 @@
+[package]
+name = "shosai-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+pdfium-render = { version = "0.8", features = ["thread_safe", "sync", "image"] }

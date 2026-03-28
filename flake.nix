@@ -1,5 +1,5 @@
 {
-  description = "Shōsai (書斎)";
+  description = "Shōsai (書斎) — Ebook Reader";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -30,14 +30,39 @@
             # tools
             git-cliff
 
-            # deps
+            # build deps
             pkg-config
+            cmake
+            clang
+
+            # runtime deps
             openssl
+
+            # GUI deps (iced / wgpu)
+            libxkbcommon
+            wayland
+            xorg.libX11
+            xorg.libXcursor
+            xorg.libXrandr
+            xorg.libXi
+            vulkan-loader
+            vulkan-headers
 
             # LSP
             rust-analyzer
             nodePackages.yaml-language-server
           ];
+
+          # Ensure iced can find GPU drivers and Wayland/X11 libs at runtime
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [
+            libxkbcommon
+            wayland
+            xorg.libX11
+            xorg.libXcursor
+            xorg.libXrandr
+            xorg.libXi
+            vulkan-loader
+          ]);
 
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
         };
