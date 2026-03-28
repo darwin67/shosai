@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      # Cache Cargo dependencies
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-fmt-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-fmt-cargo-
+            ${{ runner.os }}-cargo-
+
+      - run: nix develop --command cargo fmt --all -- --check
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      # Cache Cargo dependencies
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-lint-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-lint-cargo-
+            ${{ runner.os }}-cargo-
+
+      - run: nix develop --command make lint
+
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      # Cache Cargo dependencies
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-test-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-test-cargo-
+            ${{ runner.os }}-cargo-
+
+      - run: nix develop --command make test
+
+  test-windows:
+    name: Test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Cache Cargo dependencies
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # Cache Pdfium library
+      - name: Cache Pdfium library
+        id: cache-pdfium
+        uses: actions/cache@v4
+        with:
+          path: pdfium.dll
+          key: pdfium-win-x64-${{ hashFiles('.github/workflows/ci.yml') }}
+
+      # Download pre-built Pdfium library for Windows (only if not cached)
+      - name: Download Pdfium library
+        if: steps.cache-pdfium.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-win-x64.tgz"
+          Invoke-WebRequest -Uri $url -OutFile "pdfium-win-x64.tgz"
+          tar -xzf pdfium-win-x64.tgz
+          Copy-Item "bin/pdfium.dll" -Destination "./"
+
+      # Add pdfium.dll to PATH so LoadLibraryExW can find it
+      - name: Add Pdfium to PATH
+        shell: pwsh
+        run: echo "${{ github.workspace }}" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - run: cargo test

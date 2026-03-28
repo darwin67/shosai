@@ -81,44 +81,45 @@ The separation of ~shosai-core~ and ~shosai-app~ ensures:
 * Phase 1 — Foundation & PDF Viewer (MVP)
 :PROPERTIES:
 :PHASE: 1
-:STATUS: TODO
+:STATUS: DONE
 :END:
 
 *Goal*: Open and read a PDF file with basic navigation.
 
-** TODO Project scaffold
-- [ ] Convert to Cargo workspace structure (~shosai-core~ + ~shosai-app~)
-- [ ] Add dependencies: ~pdfium-render~, ~iced~, ~rfd~, ~image~
-- [ ] Set up PDFium library bundling (download script or ~build.rs~)
-- [ ] Add Apache-2.0 LICENSE file
-- [ ] Update ~flake.nix~ with system dependencies (PDFium, etc.)
+** DONE Project scaffold
+- [X] Convert to Cargo workspace structure (~shosai-core~ + ~shosai-app~)
+- [X] Add dependencies: ~pdfium-render~, ~iced~, ~rfd~, ~image~
+- [X] Set up PDFium library bundling (download script)
+- [X] Add Apache-2.0 LICENSE file
+- [X] Update ~flake.nix~ with system dependencies
 
-** TODO Core document abstraction
-- [ ] Define ~Document~ trait:
+** DONE Core document abstraction
+- [X] Define ~Document~ trait:
   - ~page_count() -> usize~
-  - ~render_page(index: usize, scale: f32) -> RgbaImage~
+  - ~render_page(index: usize, scale: f32) -> RenderedPage~
   - ~page_size(index: usize) -> (f32, f32)~
   - ~metadata() -> DocumentMetadata~
   - ~title() -> Option<String>~
-- [ ] Implement ~PdfDocument~ wrapping ~pdfium-render~
-- [ ] Page rendering to RGBA pixel buffers
-- [ ] Unit tests for PDF loading and rendering
+- [X] Implement ~PdfDocument~ wrapping ~pdfium-render~
+- [X] Page rendering to RGBA pixel buffers
+- [X] Unit tests for PDF loading and rendering (10 tests)
 
-** TODO Basic Iced application
-- [ ] Main window with title bar
-- [ ] "Open File" dialog integration (via ~rfd~)
-- [ ] Single-page display using ~iced::widget::image~ with ~Handle::Rgba~
-- [ ] Page navigation: previous / next / jump to page number
-- [ ] Zoom controls: fit width, fit page, manual percentage
-- [ ] Keyboard shortcuts:
+** DONE Basic Iced application
+- [X] Main window with title bar
+- [X] "Open File" dialog integration (via ~rfd~)
+- [X] Single-page display using ~iced::widget::image~ with ~Handle::Rgba~
+- [X] Page navigation: previous / next / jump to page number
+- [X] Zoom controls: fit width, fit page, manual percentage
+- [X] Keyboard shortcuts:
   - Arrow keys / PgUp / PgDn for navigation
   - ~+~ / ~-~ for zoom
   - ~Ctrl+O~ for open file
 
-** TODO Reading state persistence
-- [ ] Track current page position per file
-- [ ] Persist last-read position (SQLite or JSON file)
-- [ ] Restore position when reopening a file
+** DONE Reading state persistence
+- [X] Track current page position per file
+- [X] Persist last-read position (JSON file in XDG config dir)
+- [X] Restore position when reopening a file
+- [X] Unit tests for reading state (5 tests)
 
 * Phase 2 — EPUB Support
 :PROPERTIES:
@@ -278,12 +279,30 @@ The separation of ~shosai-core~ and ~shosai-app~ ensures:
 - [ ] Windows installer (NSIS or WiX)
 - [ ] CI/CD pipeline for automated builds and releases
 
+*Note — PDFium bundling*: The app depends on ~libpdfium~ at runtime (a C
+shared library). For development this is handled by the Nix dev shell
+(~pdfium-binaries~ in ~flake.nix~), but every distribution format must
+solve this independently:
+- *Nix package*: Add ~pdfium-binaries~ as a runtime dependency and patch
+  ~RPATH~ / wrap with ~LD_LIBRARY_PATH~.
+- *AppImage / Flatpak*: Bundle ~libpdfium.so~ alongside the binary inside
+  the container.
+- *macOS .app*: Embed ~libpdfium.dylib~ in the bundle's ~Frameworks/~
+  directory and set ~@rpath~ accordingly.
+- *Windows*: Ship ~pdfium.dll~ next to the ~.exe~ (DLL search order finds it
+  automatically).
+- Alternatively, investigate ~pdfium-render~'s ~static~ feature or building
+  PDFium from source as a static library to eliminate the shared-library
+  dependency entirely.
+- The ~bblanchon/pdfium-binaries~ GitHub repo provides pre-built binaries
+  for all major platforms that CI can download during the release build.
+
 * Key Technical Risks & Mitigations
 
 | Risk                                        | Impact | Mitigation                                                       |
 |---------------------------------------------+--------+------------------------------------------------------------------|
 | Iced is "experimental" software             | High   | Pin to 0.14, abstract GUI layer, monitor upstream closely        |
-| PDFium binary distribution complexity       | Medium | Download script, document bundling process, consider static link |
+| PDFium binary distribution complexity       | Medium | Nix handles dev; each distro format must bundle libpdfium       |
 | No pure-Rust HTML/CSS renderer for EPUB     | High   | Simplified renderer for MVP, webview fallback in Phase 5         |
 | Iced text rendering quality on non-HiDPI    | Medium | Test early, may need custom text rendering via canvas            |
 | Iced slow startup on Linux (font loading)   | Low    | Known issue #2455, may be fixed upstream; can lazy-load fonts    |
