@@ -7,6 +7,7 @@
 //! - CSS stylesheets, images, fonts, and other resources
 
 mod parser;
+pub mod render;
 mod types;
 
 pub use parser::EpubDoc;
