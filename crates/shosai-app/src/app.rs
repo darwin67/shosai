@@ -654,6 +654,7 @@ fn render_content_node<'a>(
                     text: bullet_text,
                     bold: false,
                     italic: false,
+                    monospace: false,
                 }];
                 all_spans.extend(item_spans.iter().cloned());
                 col = col.push(render_spans(&all_spans, font_size, text_color));
@@ -669,11 +670,29 @@ fn render_content_node<'a>(
                     text: num_text,
                     bold: false,
                     italic: false,
+                    monospace: false,
                 }];
                 all_spans.extend(item_spans.iter().cloned());
                 col = col.push(render_spans(&all_spans, font_size, text_color));
             }
             col.into()
+        }
+
+        ContentNode::CodeBlock { code, language } => {
+            render_code_block(code, language.as_deref(), font_size, text_color)
+        }
+
+        ContentNode::InlineCode(code_text) => {
+            // Render as monospace span inline
+            let mono_font = Font {
+                family: iced::font::Family::Monospace,
+                ..Font::DEFAULT
+            };
+            text(code_text.clone())
+                .size(font_size * 0.9)
+                .font(mono_font)
+                .color(text_color)
+                .into()
         }
 
         ContentNode::Image { src, alt } => {
@@ -720,6 +739,91 @@ fn render_epub_image<'a>(
         .into()
 }
 
+/// Render a code block with optional syntax highlighting.
+fn render_code_block<'a>(
+    code: &str,
+    language: Option<&str>,
+    font_size: f32,
+    text_color: iced::Color,
+) -> Element<'a, Message> {
+    use shosai_core::highlight;
+
+    let mono_font = Font {
+        family: iced::font::Family::Monospace,
+        ..Font::DEFAULT
+    };
+    let code_size = font_size * 0.85;
+
+    // Try syntax highlighting.
+    let theme_name = highlight::syntect_theme_for_reader(
+        text_color.r > 0.5, // dark theme = light text
+    );
+
+    if let Some(highlighted_lines) = highlight::highlight_code(code, language, theme_name) {
+        let bg_color = highlight::theme_background(theme_name)
+            .map(|(r, g, b)| iced::Color::from_rgb8(r, g, b))
+            .unwrap_or(iced::Color::from_rgb(0.15, 0.15, 0.18));
+
+        let mut lines_col = column![].spacing(0);
+
+        for line_spans in &highlighted_lines {
+            let rich_spans: Vec<iced::widget::text::Span<'_, Message>> = line_spans
+                .iter()
+                .map(|hs| {
+                    let (r, g, b) = hs.color;
+                    let mut font = mono_font;
+                    if hs.bold {
+                        font.weight = iced::font::Weight::Bold;
+                    }
+                    if hs.italic {
+                        font.style = iced::font::Style::Italic;
+                    }
+                    span(hs.text.clone())
+                        .size(code_size)
+                        .font(font)
+                        .color(iced::Color::from_rgb8(r, g, b))
+                })
+                .collect();
+
+            lines_col = lines_col.push(rich_text(rich_spans));
+        }
+
+        return container(lines_col)
+            .padding(12)
+            .width(Length::Fill)
+            .style(move |_theme| container::Style {
+                background: Some(iced::Background::Color(bg_color)),
+                border: iced::Border {
+                    radius: 4.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into();
+    }
+
+    // Fallback: plain monospace text.
+    container(
+        text(code.to_string())
+            .size(code_size)
+            .font(mono_font)
+            .color(text_color),
+    )
+    .padding(12)
+    .width(Length::Fill)
+    .style(move |_theme| container::Style {
+        background: Some(iced::Background::Color(iced::Color::from_rgb(
+            0.15, 0.15, 0.18,
+        ))),
+        border: iced::Border {
+            radius: 4.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
 fn render_spans<'a>(
     spans: &[shosai_core::epub::render::TextSpan],
     font_size: f32,
@@ -728,21 +832,24 @@ fn render_spans<'a>(
     let rich_spans: Vec<iced::widget::text::Span<'a, Message>> = spans
         .iter()
         .map(|s| {
-            let font = match (s.bold, s.italic) {
-                (true, true) => Font {
-                    weight: iced::font::Weight::Bold,
-                    style: iced::font::Style::Italic,
-                    ..Font::DEFAULT
+            let family = if s.monospace {
+                iced::font::Family::Monospace
+            } else {
+                iced::font::Family::default()
+            };
+            let font = Font {
+                family,
+                weight: if s.bold {
+                    iced::font::Weight::Bold
+                } else {
+                    iced::font::Weight::Normal
                 },
-                (true, false) => Font {
-                    weight: iced::font::Weight::Bold,
-                    ..Font::DEFAULT
+                style: if s.italic {
+                    iced::font::Style::Italic
+                } else {
+                    iced::font::Style::Normal
                 },
-                (false, true) => Font {
-                    style: iced::font::Style::Italic,
-                    ..Font::DEFAULT
-                },
-                (false, false) => Font::DEFAULT,
+                ..Font::DEFAULT
             };
             span(s.text.clone())
                 .size(font_size)

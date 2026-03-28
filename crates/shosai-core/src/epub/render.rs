@@ -10,6 +10,7 @@ pub struct TextSpan {
     pub text: String,
     pub bold: bool,
     pub italic: bool,
+    pub monospace: bool,
 }
 
 /// A content node in the simplified document model.
@@ -31,6 +32,15 @@ pub enum ContentNode {
         src: String,
         alt: String,
     },
+    /// A code block (`<pre>`, `<code>` block-level, or `<pre><code>`).
+    CodeBlock {
+        /// The raw code text.
+        code: String,
+        /// Optional language hint from class (e.g. "language-rust", "python").
+        language: Option<String>,
+    },
+    /// Inline code (`<code>` inside a paragraph).
+    InlineCode(String),
     /// A horizontal rule / thematic break.
     HorizontalRule,
 }
@@ -68,6 +78,7 @@ fn parse_block_children(parent: roxmltree::Node, base_path: &str) -> Vec<Content
                         text: text.to_string(),
                         bold: false,
                         italic: false,
+                        monospace: false,
                     }]));
                 }
             }
@@ -107,6 +118,29 @@ fn parse_block_children(parent: roxmltree::Node, base_path: &str) -> Vec<Content
                 let items = parse_list_items(&child);
                 if !items.is_empty() {
                     nodes.push(ContentNode::OrderedList(items));
+                }
+            }
+
+            "pre" => {
+                let language = extract_language_hint(&child);
+                let code = collect_text_content(&child);
+                if !code.trim().is_empty() {
+                    nodes.push(ContentNode::CodeBlock {
+                        code: code.trim().to_string(),
+                        language,
+                    });
+                }
+            }
+
+            "code" => {
+                // Block-level <code> (not inside <p>) — treat as code block.
+                let language = extract_language_hint(&child);
+                let code = collect_text_content(&child);
+                if !code.trim().is_empty() {
+                    nodes.push(ContentNode::CodeBlock {
+                        code: code.trim().to_string(),
+                        language,
+                    });
                 }
             }
 
@@ -168,7 +202,7 @@ fn parse_list_items(list: &roxmltree::Node) -> Vec<Vec<TextSpan>> {
 /// Collect inline text spans with bold/italic formatting from an element.
 fn collect_inline_spans(element: &roxmltree::Node) -> Vec<TextSpan> {
     let mut spans = Vec::new();
-    collect_inline_spans_recursive(element, false, false, &mut spans);
+    collect_inline_spans_recursive(element, false, false, false, &mut spans);
 
     // Merge adjacent spans with the same formatting.
     merge_spans(&mut spans);
@@ -179,6 +213,7 @@ fn collect_inline_spans_recursive(
     node: &roxmltree::Node,
     bold: bool,
     italic: bool,
+    monospace: bool,
     spans: &mut Vec<TextSpan>,
 ) {
     for child in node.children() {
@@ -189,16 +224,18 @@ fn collect_inline_spans_recursive(
                     text: text.to_string(),
                     bold,
                     italic,
+                    monospace,
                 });
             }
         } else if child.is_element() {
-            let (b, i) = match child.tag_name().name() {
-                "b" | "strong" => (true, italic),
-                "i" | "em" | "cite" => (bold, true),
-                "bi" => (true, true),
-                _ => (bold, italic),
+            let (b, i, m) = match child.tag_name().name() {
+                "b" | "strong" => (true, italic, monospace),
+                "i" | "em" | "cite" => (bold, true, monospace),
+                "bi" => (true, true, monospace),
+                "code" | "tt" | "samp" | "kbd" => (bold, italic, true),
+                _ => (bold, italic, monospace),
             };
-            collect_inline_spans_recursive(&child, b, i, spans);
+            collect_inline_spans_recursive(&child, b, i, m, spans);
         }
     }
 }
@@ -207,7 +244,10 @@ fn collect_inline_spans_recursive(
 fn merge_spans(spans: &mut Vec<TextSpan>) {
     let mut i = 0;
     while i + 1 < spans.len() {
-        if spans[i].bold == spans[i + 1].bold && spans[i].italic == spans[i + 1].italic {
+        if spans[i].bold == spans[i + 1].bold
+            && spans[i].italic == spans[i + 1].italic
+            && spans[i].monospace == spans[i + 1].monospace
+        {
             let next_text = spans[i + 1].text.clone();
             spans[i].text.push_str(&next_text);
             spans.remove(i + 1);
@@ -228,6 +268,39 @@ fn collect_text_content(node: &roxmltree::Node) -> String {
         }
     }
     text
+}
+
+/// Extract a language hint from a `class` attribute.
+///
+/// Looks for patterns like `language-rust`, `lang-python`, `code-erlang`,
+/// `sourceCode erlang`, or bare language names in the class of the element
+/// or its first `<code>` child.
+fn extract_language_hint(node: &roxmltree::Node) -> Option<String> {
+    // Check the node itself and its first <code> child.
+    let classes = [
+        node.attribute("class"),
+        node.children()
+            .find(|c| c.is_element() && c.tag_name().name() == "code")
+            .and_then(|c| c.attribute("class")),
+    ];
+
+    for class_attr in classes.into_iter().flatten() {
+        for cls in class_attr.split_whitespace() {
+            let lang = cls
+                .strip_prefix("language-")
+                .or_else(|| cls.strip_prefix("lang-"))
+                .or_else(|| cls.strip_prefix("code-"))
+                .or_else(|| cls.strip_prefix("sourceCode"));
+
+            if let Some(l) = lang
+                && !l.is_empty()
+            {
+                return Some(l.to_lowercase());
+            }
+        }
+    }
+
+    None
 }
 
 /// Resolve a relative path against a base directory.
@@ -346,5 +419,65 @@ mod tests {
         let nodes = parse_chapter_xhtml(xhtml, "");
         assert_eq!(nodes.len(), 1);
         assert!(matches!(&nodes[0], ContentNode::Paragraph(_)));
+    }
+
+    #[test]
+    fn test_parse_pre_code_block() {
+        let xhtml = r#"<html><body><pre class="language-rust">fn main() {
+    println!("hello");
+}</pre></body></html>"#;
+        let nodes = parse_chapter_xhtml(xhtml, "");
+        assert_eq!(nodes.len(), 1);
+        match &nodes[0] {
+            ContentNode::CodeBlock { code, language } => {
+                assert!(code.contains("fn main()"), "code should contain fn main()");
+                assert_eq!(language.as_deref(), Some("rust"));
+            }
+            other => panic!("expected CodeBlock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pre_without_language() {
+        let xhtml = r#"<html><body><pre>some plain text</pre></body></html>"#;
+        let nodes = parse_chapter_xhtml(xhtml, "");
+        assert_eq!(nodes.len(), 1);
+        match &nodes[0] {
+            ContentNode::CodeBlock { code, language } => {
+                assert_eq!(code, "some plain text");
+                assert!(language.is_none());
+            }
+            other => panic!("expected CodeBlock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_pre_code_nested() {
+        let xhtml =
+            r#"<html><body><pre><code class="lang-python">print("hi")</code></pre></body></html>"#;
+        let nodes = parse_chapter_xhtml(xhtml, "");
+        assert_eq!(nodes.len(), 1);
+        match &nodes[0] {
+            ContentNode::CodeBlock { code, language } => {
+                assert!(code.contains("print"));
+                assert_eq!(language.as_deref(), Some("python"));
+            }
+            other => panic!("expected CodeBlock, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_inline_code() {
+        let xhtml = r#"<html><body><p>Use <code>println!</code> to print</p></body></html>"#;
+        let nodes = parse_chapter_xhtml(xhtml, "");
+        assert_eq!(nodes.len(), 1);
+        match &nodes[0] {
+            ContentNode::Paragraph(spans) => {
+                let mono_span = spans.iter().find(|s| s.monospace);
+                assert!(mono_span.is_some(), "should have a monospace span");
+                assert_eq!(mono_span.unwrap().text, "println!");
+            }
+            other => panic!("expected Paragraph, got {other:?}"),
+        }
     }
 }
