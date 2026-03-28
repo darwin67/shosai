@@ -81,6 +81,53 @@ pub struct State {
     reading_state: Option<ReadingStateStore>,
     /// EPUB font size in pixels.
     font_size: f32,
+    /// EPUB line spacing multiplier (1.0 = normal).
+    line_spacing: f32,
+    /// Reader color theme.
+    theme: ReaderTheme,
+}
+
+/// Color theme for the EPUB reader.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ReaderTheme {
+    #[default]
+    Light,
+    Dark,
+    Sepia,
+}
+
+impl ReaderTheme {
+    fn background(&self) -> iced::Color {
+        match self {
+            ReaderTheme::Light => iced::Color::WHITE,
+            ReaderTheme::Dark => iced::Color::from_rgb(0.12, 0.12, 0.14),
+            ReaderTheme::Sepia => iced::Color::from_rgb(0.96, 0.92, 0.84),
+        }
+    }
+
+    fn text_color(&self) -> iced::Color {
+        match self {
+            ReaderTheme::Light => iced::Color::from_rgb(0.1, 0.1, 0.1),
+            ReaderTheme::Dark => iced::Color::from_rgb(0.85, 0.85, 0.85),
+            ReaderTheme::Sepia => iced::Color::from_rgb(0.3, 0.2, 0.1),
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            ReaderTheme::Light => "Light",
+            ReaderTheme::Dark => "Dark",
+            ReaderTheme::Sepia => "Sepia",
+        }
+    }
+
+    fn next(&self) -> Self {
+        match self {
+            ReaderTheme::Light => ReaderTheme::Dark,
+            ReaderTheme::Dark => ReaderTheme::Sepia,
+            ReaderTheme::Sepia => ReaderTheme::Light,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -105,9 +152,10 @@ pub enum Message {
     SetZoomFitWidth,
     SetZoomFitPage,
 
-    // EPUB font size
+    // EPUB reading controls
     FontSizeUp,
     FontSizeDown,
+    CycleTheme,
 
     // Keyboard
     KeyPressed(keyboard::Event),
@@ -138,6 +186,8 @@ pub fn boot() -> (State, Task<Message>) {
         error: None,
         reading_state,
         font_size: 16.0,
+        line_spacing: 1.6,
+        theme: ReaderTheme::default(),
     };
     (state, Task::none())
 }
@@ -241,6 +291,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
 
         Message::FontSizeDown => {
             state.font_size = (state.font_size - 2.0).max(8.0);
+        }
+
+        Message::CycleTheme => {
+            state.theme = state.theme.next();
         }
 
         Message::KeyPressed(event) => {
@@ -465,12 +519,17 @@ fn toolbar(state: &State) -> Element<'_, Message> {
         toolbar_items.push(fit_p.into());
     }
 
-    // EPUB: font size controls
+    // EPUB: font size + theme controls
     if is_epub {
         let size_label = text(format!("{}px", state.font_size as u32)).width(50);
         toolbar_items.push(button("A-").on_press(Message::FontSizeDown).into());
         toolbar_items.push(size_label.into());
         toolbar_items.push(button("A+").on_press(Message::FontSizeUp).into());
+        toolbar_items.push(
+            button(state.theme.label())
+                .on_press(Message::CycleTheme)
+                .into(),
+        );
     }
 
     let toolbar_row = row(toolbar_items)
@@ -520,18 +579,21 @@ fn pdf_page_view(state: &State) -> Element<'_, Message> {
 
 fn epub_chapter_view(state: &State) -> Element<'_, Message> {
     let font_size = state.font_size;
-    let mut content_col = column![].spacing(12).padding(20).width(Length::Fill);
+    let text_color = state.theme.text_color();
+    let line_gap = state.font_size * state.line_spacing;
+
+    let mut content_col = column![].spacing(line_gap).padding(20).width(Length::Fill);
 
     // Chapter title from the TOC if available.
     if let Some(OpenDocument::Epub(doc)) = &state.document
         && let Some(chapter) = doc.chapter(state.current_page)
         && let Some(title) = &chapter.title
     {
-        content_col = content_col.push(text(title.clone()).size(font_size * 1.5));
+        content_col = content_col.push(text(title.clone()).size(font_size * 1.5).color(text_color));
     }
 
     for node in &state.chapter_content {
-        content_col = content_col.push(render_content_node(node, font_size));
+        content_col = content_col.push(render_content_node(node, font_size, text_color));
     }
 
     let padded = container(content_col)
@@ -539,13 +601,23 @@ fn epub_chapter_view(state: &State) -> Element<'_, Message> {
         .width(Length::Fill)
         .center_x(Length::Fill);
 
-    scrollable(padded)
+    let bg = state.theme.background();
+
+    container(scrollable(padded).width(Length::Fill).height(Length::Fill))
+        .style(move |_theme| container::Style {
+            background: Some(iced::Background::Color(bg)),
+            ..Default::default()
+        })
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
 }
 
-fn render_content_node<'a>(node: &ContentNode, font_size: f32) -> Element<'a, Message> {
+fn render_content_node<'a>(
+    node: &ContentNode,
+    font_size: f32,
+    text_color: iced::Color,
+) -> Element<'a, Message> {
     match node {
         ContentNode::Heading { level, text: t } => {
             let size = match level {
@@ -555,17 +627,17 @@ fn render_content_node<'a>(node: &ContentNode, font_size: f32) -> Element<'a, Me
                 4 => font_size * 1.1,
                 _ => font_size,
             };
-            text(t.clone()).size(size).into()
+            text(t.clone()).size(size).color(text_color).into()
         }
 
-        ContentNode::Paragraph(spans) => render_spans(spans, font_size),
+        ContentNode::Paragraph(spans) => render_spans(spans, font_size, text_color),
 
         ContentNode::BlockQuote(children) => {
             let mut col = column![].spacing(8).padding(20);
             for child in children {
-                col = col.push(render_content_node(child, font_size));
+                col = col.push(render_content_node(child, font_size, text_color));
             }
-            container(col).padding([8, 16]).width(Length::Fill).into()
+            container(col).padding(16).width(Length::Fill).into()
         }
 
         ContentNode::UnorderedList(items) => {
@@ -578,7 +650,7 @@ fn render_content_node<'a>(node: &ContentNode, font_size: f32) -> Element<'a, Me
                     italic: false,
                 }];
                 all_spans.extend(item_spans.iter().cloned());
-                col = col.push(render_spans(&all_spans, font_size));
+                col = col.push(render_spans(&all_spans, font_size, text_color));
             }
             col.into()
         }
@@ -593,26 +665,30 @@ fn render_content_node<'a>(node: &ContentNode, font_size: f32) -> Element<'a, Me
                     italic: false,
                 }];
                 all_spans.extend(item_spans.iter().cloned());
-                col = col.push(render_spans(&all_spans, font_size));
+                col = col.push(render_spans(&all_spans, font_size, text_color));
             }
             col.into()
         }
 
         ContentNode::Image { alt, .. } => {
             // TODO: load image from epub resources and display
-            text(format!("[Image: {alt}]")).size(font_size).into()
+            text(format!("[Image: {alt}]"))
+                .size(font_size)
+                .color(text_color)
+                .into()
         }
 
-        ContentNode::HorizontalRule => {
-            // Simple text-based separator
-            text("───────────────────").size(font_size).into()
-        }
+        ContentNode::HorizontalRule => text("───────────────────")
+            .size(font_size)
+            .color(text_color)
+            .into(),
     }
 }
 
 fn render_spans<'a>(
     spans: &[shosai_core::epub::render::TextSpan],
     font_size: f32,
+    text_color: iced::Color,
 ) -> Element<'a, Message> {
     let rich_spans: Vec<iced::widget::text::Span<'a, Message>> = spans
         .iter()
@@ -633,7 +709,10 @@ fn render_spans<'a>(
                 },
                 (false, false) => Font::DEFAULT,
             };
-            span(s.text.clone()).size(font_size).font(font)
+            span(s.text.clone())
+                .size(font_size)
+                .font(font)
+                .color(text_color)
         })
         .collect();
 
