@@ -1,6 +1,3 @@
-LIB_PATH := $(CURDIR)/lib
-export LD_LIBRARY_PATH := $(LIB_PATH):$(LD_LIBRARY_PATH)
-
 .PHONY: dev lint fmt test
 
 ## Run the application in debug mode

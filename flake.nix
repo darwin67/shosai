@@ -37,6 +37,7 @@
 
           # runtime deps
           openssl
+          pdfium-binaries
 
           # LSP
           rust-analyzer
@@ -60,9 +61,9 @@
         devShells.default = pkgs.mkShell {
           nativeBuildInputs = commonDeps ++ linuxDeps;
 
-          # Ensure iced can find GPU drivers and Wayland/X11 libs at runtime (Linux only)
-          LD_LIBRARY_PATH = pkgs.lib.optionalString pkgs.stdenv.isLinux
-            (pkgs.lib.makeLibraryPath (with pkgs; [
+          # Ensure iced + pdfium can find shared libs at runtime
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath ([ pkgs.pdfium-binaries ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux (with pkgs; [
               libxkbcommon
               wayland
               libx11

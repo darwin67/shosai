@@ -11,21 +11,21 @@ use crate::document::{Document, DocumentMetadata, RenderedPage};
 static PDFIUM: OnceLock<Pdfium> = OnceLock::new();
 
 /// Get or initialize the global Pdfium instance.
+///
+/// PDFium is loaded via the system library path (`LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH`).
+/// In the Nix dev shell, `pdfium-binaries` is automatically available.
 fn pdfium() -> Result<&'static Pdfium> {
     if let Some(p) = PDFIUM.get() {
         return Ok(p);
     }
 
-    let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
-        .or_else(|_| Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./lib")))
-        .or_else(|_| Pdfium::bind_to_system_library())
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "failed to load PDFium library: {e}. \
-                 Run `./scripts/download-pdfium.sh` to download it, \
-                 or see https://github.com/bblanchon/pdfium-binaries"
-            )
-        })?;
+    let bindings = Pdfium::bind_to_system_library().map_err(|e| {
+        anyhow::anyhow!(
+            "failed to load PDFium library: {e}. \
+             Ensure pdfium-binaries is available via LD_LIBRARY_PATH \
+             (enter the Nix dev shell with `nix develop`)"
+        )
+    })?;
 
     let pdfium = Pdfium::new(bindings);
     // Ignore the error if another thread initialized it first
