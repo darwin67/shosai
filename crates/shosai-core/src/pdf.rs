@@ -1,24 +1,19 @@
 use std::path::Path;
-use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use pdfium_render::prelude::*;
 
 use crate::document::{Document, DocumentMetadata, RenderedPage};
 
-/// Global Pdfium instance. PDFium is a C library that should only be loaded once.
-/// With the `thread_safe` feature enabled, Pdfium is Send + Sync.
-static PDFIUM: OnceLock<Pdfium> = OnceLock::new();
-
-/// Get or initialize the global Pdfium instance.
+/// Create a short-lived Pdfium instance.
 ///
-/// PDFium is loaded via the system library path (`LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH`).
-/// In the Nix dev shell, `pdfium-binaries` is automatically available.
-fn pdfium() -> Result<&'static Pdfium> {
-    if let Some(p) = PDFIUM.get() {
-        return Ok(p);
-    }
-
+/// `pdfium-render`'s `thread_safe` feature serializes all PDFium access behind a
+/// global mutex. The lock is acquired on `FPDF_InitLibrary` (when a `Pdfium` is
+/// created) and released on `FPDF_DestroyLibrary` (when it is dropped). Creating
+/// a `Pdfium`, doing work, and dropping it promptly is the intended usage pattern
+/// — it keeps the lock held only as long as needed and allows other threads to
+/// proceed in between.
+fn create_pdfium() -> Result<Pdfium> {
     let bindings = Pdfium::bind_to_system_library().map_err(|e| {
         anyhow::anyhow!(
             "failed to load PDFium library: {e}. \
@@ -27,10 +22,7 @@ fn pdfium() -> Result<&'static Pdfium> {
         )
     })?;
 
-    let pdfium = Pdfium::new(bindings);
-    // Ignore the error if another thread initialized it first
-    let _ = PDFIUM.set(pdfium);
-    Ok(PDFIUM.get().unwrap())
+    Ok(Pdfium::new(bindings))
 }
 
 /// A PDF document backed by pdfium-render.
@@ -54,7 +46,7 @@ impl PdfDoc {
 
     /// Open a PDF from raw bytes.
     pub fn from_bytes(data: Vec<u8>) -> Result<Self> {
-        let pdfium = pdfium()?;
+        let pdfium = create_pdfium()?;
         let document = pdfium
             .load_pdf_from_byte_slice(&data, None)
             .map_err(|e| anyhow::anyhow!("failed to load PDF: {e}"))?;
@@ -88,8 +80,10 @@ impl PdfDoc {
                 .map(|t| t.value().to_string()),
         };
 
-        // Drop the document before moving `data` into the struct.
+        // Explicitly drop document and pdfium before moving `data` into the struct.
+        // This releases the borrow on `data` and the global PDFium mutex lock.
         drop(document);
+        drop(pdfium);
 
         Ok(Self {
             page_count,
@@ -120,11 +114,11 @@ impl Document for PdfDoc {
             );
         }
 
-        let pdfium = pdfium()?;
+        let pdfium = create_pdfium()?;
 
         // Re-open the document from stored bytes for rendering.
-        // This is necessary because PdfDocument borrows from Pdfium and cannot
-        // be stored alongside it due to lifetime constraints.
+        // PdfDocument borrows from Pdfium, so both must live together
+        // and are dropped at the end of this call, releasing the lock.
         let document = pdfium
             .load_pdf_from_byte_slice(&self.data, None)
             .map_err(|e| anyhow::anyhow!("failed to load PDF for rendering: {e}"))?;

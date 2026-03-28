@@ -1,4 +1,3 @@
-use serial_test::serial;
 use shosai_core::document::Document;
 use shosai_core::pdf::PdfDoc;
 use std::path::PathBuf;
@@ -11,21 +10,18 @@ fn fixture_path(name: &str) -> PathBuf {
 }
 
 #[test]
-#[serial]
 fn test_open_pdf() {
     let doc = PdfDoc::open(fixture_path("sample.pdf"));
     assert!(doc.is_ok(), "failed to open PDF: {:?}", doc.err());
 }
 
 #[test]
-#[serial]
 fn test_page_count() {
     let doc = PdfDoc::open(fixture_path("sample.pdf")).unwrap();
     assert_eq!(doc.page_count(), 2);
 }
 
 #[test]
-#[serial]
 fn test_page_size() {
     let doc = PdfDoc::open(fixture_path("sample.pdf")).unwrap();
 
@@ -41,14 +37,12 @@ fn test_page_size() {
 }
 
 #[test]
-#[serial]
 fn test_page_size_out_of_range() {
     let doc = PdfDoc::open(fixture_path("sample.pdf")).unwrap();
     assert!(doc.page_size(99).is_err());
 }
 
 #[test]
-#[serial]
 fn test_render_page() {
     let doc = PdfDoc::open(fixture_path("sample.pdf")).unwrap();
     let page = doc.render_page(0, 1.0).unwrap();
@@ -66,7 +60,6 @@ fn test_render_page() {
 }
 
 #[test]
-#[serial]
 fn test_render_page_scaled() {
     let doc = PdfDoc::open(fixture_path("sample.pdf")).unwrap();
 
@@ -89,14 +82,12 @@ fn test_render_page_scaled() {
 }
 
 #[test]
-#[serial]
 fn test_render_page_out_of_range() {
     let doc = PdfDoc::open(fixture_path("sample.pdf")).unwrap();
     assert!(doc.render_page(99, 1.0).is_err());
 }
 
 #[test]
-#[serial]
 fn test_metadata() {
     let doc = PdfDoc::open(fixture_path("sample.pdf")).unwrap();
     let _meta = doc.metadata();
@@ -104,7 +95,6 @@ fn test_metadata() {
 }
 
 #[test]
-#[serial]
 fn test_from_bytes() {
     let data = std::fs::read(fixture_path("sample.pdf")).unwrap();
     let doc = PdfDoc::from_bytes(data);
