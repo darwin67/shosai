@@ -1,24 +1,35 @@
 use std::path::PathBuf;
 
 use iced::keyboard;
-use iced::widget::{button, center, column, container, image, row, scrollable, text, text_input};
-use iced::{Element, Length, Subscription, Task};
+use iced::widget::{
+    button, center, column, container, image, rich_text, row, scrollable, span, text, text_input,
+};
+use iced::{Element, Font, Length, Subscription, Task};
 
 use shosai_core::document::{Document, RenderedPage};
+use shosai_core::epub::EpubDoc;
+use shosai_core::epub::render::{ContentNode, parse_chapter_xhtml};
 use shosai_core::pdf::PdfDoc;
 use shosai_core::reading_state::{FileReadingState, ReadingStateStore};
 
 // ---------------------------------------------------------------------------
-// Zoom
+// Open document wrapper
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+enum OpenDocument {
+    Pdf(PdfDoc),
+    Epub(EpubDoc),
+}
+
+// ---------------------------------------------------------------------------
+// Zoom (PDF only)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ZoomMode {
-    /// Manual zoom percentage (1.0 = 100%).
     Manual(f32),
-    /// Fit page width to the window (not yet implemented — falls back to manual).
     FitWidth,
-    /// Fit entire page in the window (not yet implemented — falls back to manual).
     FitPage,
 }
 
@@ -26,7 +37,6 @@ impl ZoomMode {
     fn scale(&self) -> f32 {
         match self {
             ZoomMode::Manual(s) => *s,
-            // TODO: calculate from window/page dimensions
             ZoomMode::FitWidth => 1.0,
             ZoomMode::FitPage => 1.0,
         }
@@ -41,36 +51,36 @@ impl ZoomMode {
     }
 }
 
+impl Default for ZoomMode {
+    fn default() -> Self {
+        ZoomMode::Manual(1.0)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub struct State {
-    /// Path to the currently opened file.
     file_path: Option<PathBuf>,
-    /// The loaded PDF document.
-    document: Option<PdfDoc>,
-    /// Current page index (0-based).
+    document: Option<OpenDocument>,
+    /// Current page (PDF) or chapter (EPUB) index (0-based).
     current_page: usize,
-    /// Total number of pages.
+    /// Total pages (PDF) or chapters (EPUB).
     total_pages: usize,
-    /// Current zoom mode.
+    /// Zoom mode (PDF only).
     zoom: ZoomMode,
-    /// The rendered page image (cached).
+    /// Cached rendered PDF page.
     rendered_page: Option<RenderedPage>,
-    /// Text content of the page-number input field.
+    /// Cached parsed EPUB chapter content nodes.
+    chapter_content: Vec<ContentNode>,
+    /// Page/chapter input field text.
     page_input: String,
-    /// Error message to display.
     error: Option<String>,
-    /// Persisted reading state store (SQLite-backed).
     reading_state: Option<ReadingStateStore>,
-}
-
-impl Default for ZoomMode {
-    fn default() -> Self {
-        ZoomMode::Manual(1.0)
-    }
+    /// EPUB font size in pixels.
+    font_size: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -89,11 +99,15 @@ pub enum Message {
     PageInputChanged(String),
     GoToPage,
 
-    // Zoom
+    // Zoom (PDF)
     ZoomIn,
     ZoomOut,
     SetZoomFitWidth,
     SetZoomFitPage,
+
+    // EPUB font size
+    FontSizeUp,
+    FontSizeDown,
 
     // Keyboard
     KeyPressed(keyboard::Event),
@@ -119,9 +133,11 @@ pub fn boot() -> (State, Task<Message>) {
         total_pages: 0,
         zoom: ZoomMode::default(),
         rendered_page: None,
+        chapter_content: Vec::new(),
         page_input: String::new(),
         error: None,
         reading_state,
+        font_size: 16.0,
     };
     (state, Task::none())
 }
@@ -136,8 +152,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             return Task::perform(
                 async {
                     let file = rfd::AsyncFileDialog::new()
+                        .add_filter("Ebooks", &["pdf", "epub"])
                         .add_filter("PDF", &["pdf"])
-                        .set_title("Open PDF")
+                        .add_filter("EPUB", &["epub"])
+                        .set_title("Open File")
                         .pick_file()
                         .await;
 
@@ -148,44 +166,16 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         }
 
         Message::FileSelected(Some(path)) => {
-            state.error = None;
-            match PdfDoc::open(&path) {
-                Ok(doc) => {
-                    state.total_pages = doc.page_count();
-                    state.document = Some(doc);
-
-                    // Restore reading position if we've read this file before.
-                    let saved = state
-                        .reading_state
-                        .as_ref()
-                        .and_then(|store| store.get(&path));
-                    if let Some(saved) = saved {
-                        state.current_page = saved.page.min(state.total_pages.saturating_sub(1));
-                        state.zoom = ZoomMode::Manual(saved.zoom);
-                    } else {
-                        state.current_page = 0;
-                        state.zoom = ZoomMode::Manual(1.0);
-                    }
-
-                    state.page_input = format!("{}", state.current_page + 1);
-                    state.file_path = Some(path);
-                    render_current_page(state);
-                }
-                Err(e) => {
-                    state.error = Some(format!("Failed to open PDF: {e}"));
-                }
-            }
+            open_file(state, path);
         }
 
-        Message::FileSelected(None) => {
-            // User cancelled the dialog.
-        }
+        Message::FileSelected(None) => {}
 
         Message::NextPage => {
             if state.document.is_some() && state.current_page + 1 < state.total_pages {
                 state.current_page += 1;
                 state.page_input = format!("{}", state.current_page + 1);
-                render_current_page(state);
+                refresh_content(state);
                 save_reading_state(state);
             }
         }
@@ -194,7 +184,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             if state.document.is_some() && state.current_page > 0 {
                 state.current_page -= 1;
                 state.page_input = format!("{}", state.current_page + 1);
-                render_current_page(state);
+                refresh_content(state);
                 save_reading_state(state);
             }
         }
@@ -209,39 +199,48 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 && page_num <= state.total_pages
             {
                 state.current_page = page_num - 1;
-                render_current_page(state);
+                refresh_content(state);
                 save_reading_state(state);
             }
-            // Reset input to current page
             state.page_input = format!("{}", state.current_page + 1);
         }
 
         Message::ZoomIn => {
-            let current = state.zoom.scale();
-            let new_scale = (current + 0.25).min(5.0);
-            state.zoom = ZoomMode::Manual(new_scale);
-            render_current_page(state);
-            save_reading_state(state);
+            if matches!(state.document, Some(OpenDocument::Pdf(_))) {
+                let new_scale = (state.zoom.scale() + 0.25).min(5.0);
+                state.zoom = ZoomMode::Manual(new_scale);
+                refresh_content(state);
+                save_reading_state(state);
+            }
         }
 
         Message::ZoomOut => {
-            let current = state.zoom.scale();
-            let new_scale = (current - 0.25).max(0.25);
-            state.zoom = ZoomMode::Manual(new_scale);
-            render_current_page(state);
-            save_reading_state(state);
+            if matches!(state.document, Some(OpenDocument::Pdf(_))) {
+                let new_scale = (state.zoom.scale() - 0.25).max(0.25);
+                state.zoom = ZoomMode::Manual(new_scale);
+                refresh_content(state);
+                save_reading_state(state);
+            }
         }
 
         Message::SetZoomFitWidth => {
             state.zoom = ZoomMode::FitWidth;
-            render_current_page(state);
+            refresh_content(state);
             save_reading_state(state);
         }
 
         Message::SetZoomFitPage => {
             state.zoom = ZoomMode::FitPage;
-            render_current_page(state);
+            refresh_content(state);
             save_reading_state(state);
+        }
+
+        Message::FontSizeUp => {
+            state.font_size = (state.font_size + 2.0).min(48.0);
+        }
+
+        Message::FontSizeDown => {
+            state.font_size = (state.font_size - 2.0).max(8.0);
         }
 
         Message::KeyPressed(event) => {
@@ -252,10 +251,66 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
     Task::none()
 }
 
+fn open_file(state: &mut State, path: PathBuf) {
+    state.error = None;
+    state.rendered_page = None;
+    state.chapter_content = Vec::new();
+
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    let result: Result<(), String> = match ext.as_str() {
+        "pdf" => match PdfDoc::open(&path) {
+            Ok(doc) => {
+                state.total_pages = doc.page_count();
+                state.document = Some(OpenDocument::Pdf(doc));
+                Ok(())
+            }
+            Err(e) => Err(format!("Failed to open PDF: {e}")),
+        },
+        "epub" => match EpubDoc::open(&path) {
+            Ok(doc) => {
+                state.total_pages = doc.chapter_count();
+                state.document = Some(OpenDocument::Epub(doc));
+                Ok(())
+            }
+            Err(e) => Err(format!("Failed to open EPUB: {e}")),
+        },
+        _ => Err(format!("Unsupported file format: .{ext}")),
+    };
+
+    match result {
+        Ok(()) => {
+            // Restore reading position.
+            let saved = state
+                .reading_state
+                .as_ref()
+                .and_then(|store| store.get(&path));
+            if let Some(saved) = saved {
+                state.current_page = saved.page.min(state.total_pages.saturating_sub(1));
+                if matches!(state.document, Some(OpenDocument::Pdf(_))) {
+                    state.zoom = ZoomMode::Manual(saved.zoom);
+                }
+            } else {
+                state.current_page = 0;
+                state.zoom = ZoomMode::Manual(1.0);
+            }
+
+            state.page_input = format!("{}", state.current_page + 1);
+            state.file_path = Some(path);
+            refresh_content(state);
+        }
+        Err(msg) => {
+            state.error = Some(msg);
+        }
+    }
+}
+
 fn handle_key_event(event: keyboard::Event) -> Task<Message> {
     if let keyboard::Event::KeyPressed { key, modifiers, .. } = event {
         match key.as_ref() {
-            // Navigation
             keyboard::Key::Named(keyboard::key::Named::ArrowRight)
             | keyboard::Key::Named(keyboard::key::Named::PageDown) => {
                 return Task::done(Message::NextPage);
@@ -265,7 +320,6 @@ fn handle_key_event(event: keyboard::Event) -> Task<Message> {
                 return Task::done(Message::PrevPage);
             }
 
-            // Zoom
             keyboard::Key::Character(c) if c == "=" || c == "+" => {
                 return Task::done(Message::ZoomIn);
             }
@@ -273,7 +327,6 @@ fn handle_key_event(event: keyboard::Event) -> Task<Message> {
                 return Task::done(Message::ZoomOut);
             }
 
-            // Open file
             keyboard::Key::Character(c) if c == "o" && modifiers.command() => {
                 return Task::done(Message::OpenFile);
             }
@@ -284,30 +337,48 @@ fn handle_key_event(event: keyboard::Event) -> Task<Message> {
     Task::none()
 }
 
-fn render_current_page(state: &mut State) {
-    if let Some(doc) = &state.document {
-        let scale = state.zoom.scale();
-        match doc.render_page(state.current_page, scale) {
-            Ok(page) => {
-                state.rendered_page = Some(page);
-                state.error = None;
-            }
-            Err(e) => {
-                state.error = Some(format!("Failed to render page: {e}"));
-                state.rendered_page = None;
+/// Refresh the visible content for the current page/chapter.
+fn refresh_content(state: &mut State) {
+    match &state.document {
+        Some(OpenDocument::Pdf(doc)) => {
+            let scale = state.zoom.scale();
+            match doc.render_page(state.current_page, scale) {
+                Ok(page) => {
+                    state.rendered_page = Some(page);
+                    state.chapter_content = Vec::new();
+                    state.error = None;
+                }
+                Err(e) => {
+                    state.error = Some(format!("Failed to render page: {e}"));
+                    state.rendered_page = None;
+                }
             }
         }
+        Some(OpenDocument::Epub(doc)) => {
+            state.rendered_page = None;
+            if let Some(chapter) = doc.chapter(state.current_page) {
+                let base_path = chapter
+                    .path
+                    .rsplit_once('/')
+                    .map(|(dir, _)| dir)
+                    .unwrap_or("");
+                state.chapter_content = parse_chapter_xhtml(&chapter.content, base_path);
+                state.error = None;
+            } else {
+                state.chapter_content = Vec::new();
+                state.error = Some(format!("Chapter {} not found", state.current_page));
+            }
+        }
+        None => {}
     }
 }
 
-/// Save the current reading position to the database.
 fn save_reading_state(state: &State) {
     if let (Some(path), Some(store)) = (&state.file_path, &state.reading_state) {
         let reading = FileReadingState {
             page: state.current_page,
             zoom: state.zoom.scale(),
         };
-        // Best-effort save; don't crash the app on write failure.
         if let Err(e) = store.set(path, &reading) {
             eprintln!("warning: failed to save reading state: {e}");
         }
@@ -319,7 +390,7 @@ fn save_reading_state(state: &State) {
 // ---------------------------------------------------------------------------
 
 pub fn view(state: &State) -> Element<'_, Message> {
-    let content = column![toolbar(state), page_view(state)]
+    let content = column![toolbar(state), content_view(state)]
         .spacing(0)
         .width(Length::Fill)
         .height(Length::Fill);
@@ -331,6 +402,8 @@ fn toolbar(state: &State) -> Element<'_, Message> {
     let open_btn = button("Open").on_press(Message::OpenFile);
 
     let has_doc = state.document.is_some();
+    let is_pdf = matches!(state.document, Some(OpenDocument::Pdf(_)));
+    let is_epub = matches!(state.document, Some(OpenDocument::Epub(_)));
     let can_prev = has_doc && state.current_page > 0;
     let can_next = has_doc && state.current_page + 1 < state.total_pages;
 
@@ -344,7 +417,9 @@ fn toolbar(state: &State) -> Element<'_, Message> {
         next_btn = next_btn.on_press(Message::NextPage);
     }
 
-    let page_input = text_input("Page", &state.page_input)
+    let nav_label = if is_epub { "Ch" } else { "Page" };
+
+    let page_input = text_input(nav_label, &state.page_input)
         .on_input(Message::PageInputChanged)
         .on_submit(Message::GoToPage)
         .width(60);
@@ -355,46 +430,57 @@ fn toolbar(state: &State) -> Element<'_, Message> {
         String::new()
     });
 
-    let zoom_out_btn = if has_doc {
-        button("-").on_press(Message::ZoomOut)
-    } else {
-        button("-")
-    };
+    let mut toolbar_items: Vec<Element<'_, Message>> = vec![
+        open_btn.into(),
+        prev_btn.into(),
+        page_input.into(),
+        page_label.into(),
+        next_btn.into(),
+    ];
 
-    let zoom_label = text(state.zoom.label()).width(70);
+    // PDF: zoom controls
+    if is_pdf || !has_doc {
+        let zoom_out_btn = if is_pdf {
+            button("-").on_press(Message::ZoomOut)
+        } else {
+            button("-")
+        };
+        let zoom_label = text(state.zoom.label()).width(70);
+        let zoom_in_btn = if is_pdf {
+            button("+").on_press(Message::ZoomIn)
+        } else {
+            button("+")
+        };
+        let mut fit_w = button("W");
+        let mut fit_p = button("P");
+        if is_pdf {
+            fit_w = fit_w.on_press(Message::SetZoomFitWidth);
+            fit_p = fit_p.on_press(Message::SetZoomFitPage);
+        }
 
-    let zoom_in_btn = if has_doc {
-        button("+").on_press(Message::ZoomIn)
-    } else {
-        button("+")
-    };
-
-    let mut fit_width_btn = button("W");
-    let mut fit_page_btn = button("P");
-    if has_doc {
-        fit_width_btn = fit_width_btn.on_press(Message::SetZoomFitWidth);
-        fit_page_btn = fit_page_btn.on_press(Message::SetZoomFitPage);
+        toolbar_items.push(zoom_out_btn.into());
+        toolbar_items.push(zoom_label.into());
+        toolbar_items.push(zoom_in_btn.into());
+        toolbar_items.push(fit_w.into());
+        toolbar_items.push(fit_p.into());
     }
 
-    let toolbar_row = row![
-        open_btn,
-        prev_btn,
-        page_input,
-        page_label,
-        next_btn,
-        zoom_out_btn,
-        zoom_label,
-        zoom_in_btn,
-        fit_width_btn,
-        fit_page_btn,
-    ]
-    .spacing(8)
-    .align_y(iced::Alignment::Center);
+    // EPUB: font size controls
+    if is_epub {
+        let size_label = text(format!("{}px", state.font_size as u32)).width(50);
+        toolbar_items.push(button("A-").on_press(Message::FontSizeDown).into());
+        toolbar_items.push(size_label.into());
+        toolbar_items.push(button("A+").on_press(Message::FontSizeUp).into());
+    }
+
+    let toolbar_row = row(toolbar_items)
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
 
     container(toolbar_row).padding(8).width(Length::Fill).into()
 }
 
-fn page_view(state: &State) -> Element<'_, Message> {
+fn content_view(state: &State) -> Element<'_, Message> {
     if let Some(error) = &state.error {
         return center(text(error).size(16))
             .width(Length::Fill)
@@ -402,6 +488,14 @@ fn page_view(state: &State) -> Element<'_, Message> {
             .into();
     }
 
+    match &state.document {
+        Some(OpenDocument::Pdf(_)) => pdf_page_view(state),
+        Some(OpenDocument::Epub(_)) => epub_chapter_view(state),
+        None => welcome_view(),
+    }
+}
+
+fn pdf_page_view(state: &State) -> Element<'_, Message> {
     if let Some(rendered) = &state.rendered_page {
         let handle =
             image::Handle::from_rgba(rendered.width, rendered.height, rendered.pixels.clone());
@@ -417,20 +511,148 @@ fn page_view(state: &State) -> Element<'_, Message> {
             .height(Length::Fill)
             .into()
     } else {
-        // No document loaded — show welcome screen
-        center(
-            column![
-                text("Shosai (書斎)").size(32),
-                text("Open a PDF file to start reading").size(16),
-                button("Open File").on_press(Message::OpenFile),
-            ]
-            .spacing(20)
-            .align_x(iced::Center),
-        )
+        center(text("Rendering...").size(16))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+}
+
+fn epub_chapter_view(state: &State) -> Element<'_, Message> {
+    let font_size = state.font_size;
+    let mut content_col = column![].spacing(12).padding(20).width(Length::Fill);
+
+    // Chapter title from the TOC if available.
+    if let Some(OpenDocument::Epub(doc)) = &state.document
+        && let Some(chapter) = doc.chapter(state.current_page)
+        && let Some(title) = &chapter.title
+    {
+        content_col = content_col.push(text(title.clone()).size(font_size * 1.5));
+    }
+
+    for node in &state.chapter_content {
+        content_col = content_col.push(render_content_node(node, font_size));
+    }
+
+    let padded = container(content_col)
+        .max_width(800)
+        .width(Length::Fill)
+        .center_x(Length::Fill);
+
+    scrollable(padded)
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+fn render_content_node<'a>(node: &ContentNode, font_size: f32) -> Element<'a, Message> {
+    match node {
+        ContentNode::Heading { level, text: t } => {
+            let size = match level {
+                1 => font_size * 2.0,
+                2 => font_size * 1.6,
+                3 => font_size * 1.3,
+                4 => font_size * 1.1,
+                _ => font_size,
+            };
+            text(t.clone()).size(size).into()
+        }
+
+        ContentNode::Paragraph(spans) => render_spans(spans, font_size),
+
+        ContentNode::BlockQuote(children) => {
+            let mut col = column![].spacing(8).padding(20);
+            for child in children {
+                col = col.push(render_content_node(child, font_size));
+            }
+            container(col).padding([8, 16]).width(Length::Fill).into()
+        }
+
+        ContentNode::UnorderedList(items) => {
+            let mut col = column![].spacing(4);
+            for item_spans in items {
+                let bullet_text = "  \u{2022} ".to_string();
+                let mut all_spans = vec![shosai_core::epub::render::TextSpan {
+                    text: bullet_text,
+                    bold: false,
+                    italic: false,
+                }];
+                all_spans.extend(item_spans.iter().cloned());
+                col = col.push(render_spans(&all_spans, font_size));
+            }
+            col.into()
+        }
+
+        ContentNode::OrderedList(items) => {
+            let mut col = column![].spacing(4);
+            for (i, item_spans) in items.iter().enumerate() {
+                let num_text = format!("  {}. ", i + 1);
+                let mut all_spans = vec![shosai_core::epub::render::TextSpan {
+                    text: num_text,
+                    bold: false,
+                    italic: false,
+                }];
+                all_spans.extend(item_spans.iter().cloned());
+                col = col.push(render_spans(&all_spans, font_size));
+            }
+            col.into()
+        }
+
+        ContentNode::Image { alt, .. } => {
+            // TODO: load image from epub resources and display
+            text(format!("[Image: {alt}]")).size(font_size).into()
+        }
+
+        ContentNode::HorizontalRule => {
+            // Simple text-based separator
+            text("───────────────────").size(font_size).into()
+        }
     }
+}
+
+fn render_spans<'a>(
+    spans: &[shosai_core::epub::render::TextSpan],
+    font_size: f32,
+) -> Element<'a, Message> {
+    let rich_spans: Vec<iced::widget::text::Span<'a, Message>> = spans
+        .iter()
+        .map(|s| {
+            let font = match (s.bold, s.italic) {
+                (true, true) => Font {
+                    weight: iced::font::Weight::Bold,
+                    style: iced::font::Style::Italic,
+                    ..Font::DEFAULT
+                },
+                (true, false) => Font {
+                    weight: iced::font::Weight::Bold,
+                    ..Font::DEFAULT
+                },
+                (false, true) => Font {
+                    style: iced::font::Style::Italic,
+                    ..Font::DEFAULT
+                },
+                (false, false) => Font::DEFAULT,
+            };
+            span(s.text.clone()).size(font_size).font(font)
+        })
+        .collect();
+
+    rich_text(rich_spans).into()
+}
+
+fn welcome_view<'a>() -> Element<'a, Message> {
+    center(
+        column![
+            text("Shosai (書斎)").size(32),
+            text("Open a PDF or EPUB file to start reading").size(16),
+            button("Open File").on_press(Message::OpenFile),
+        ]
+        .spacing(20)
+        .align_x(iced::Center),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
 }
 
 // ---------------------------------------------------------------------------
