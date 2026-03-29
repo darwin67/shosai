@@ -10,6 +10,7 @@ use shosai_core::cbz::CbzDoc;
 use shosai_core::document::{Document, RenderedPage};
 use shosai_core::epub::EpubDoc;
 use shosai_core::epub::render::{ContentNode, parse_chapter_xhtml};
+use shosai_core::library::{Book, Library};
 use shosai_core::pdf::PdfDoc;
 use shosai_core::reading_state::{FileReadingState, ReadingStateStore};
 
@@ -60,33 +61,45 @@ impl Default for ZoomMode {
 }
 
 // ---------------------------------------------------------------------------
+// Screens
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Screen {
+    Library,
+    Reader,
+}
+
+// ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub struct State {
+    screen: Screen,
+
+    // -- Reader state --
     file_path: Option<PathBuf>,
     document: Option<OpenDocument>,
-    /// Current page (PDF) or chapter (EPUB) index (0-based).
     current_page: usize,
-    /// Total pages (PDF) or chapters (EPUB).
     total_pages: usize,
-    /// Zoom mode (PDF only).
     zoom: ZoomMode,
-    /// Cached rendered PDF page.
     rendered_page: Option<RenderedPage>,
-    /// Cached parsed EPUB chapter content nodes.
     chapter_content: Vec<ContentNode>,
-    /// Page/chapter input field text.
     page_input: String,
     error: Option<String>,
-    reading_state: Option<ReadingStateStore>,
-    /// EPUB font size in pixels.
     font_size: f32,
-    /// EPUB line spacing multiplier (1.0 = normal).
     line_spacing: f32,
-    /// Reader color theme.
     theme: ReaderTheme,
+
+    // -- Shared --
+    reading_state: Option<ReadingStateStore>,
+    library: Option<Library>,
+
+    // -- Library state --
+    library_books: Vec<Book>,
+    library_search: String,
+    library_filter: Option<shosai_core::library::BookFormat>,
 }
 
 /// Color theme for the EPUB reader.
@@ -162,6 +175,18 @@ pub enum Message {
     // Links
     LinkClicked(String),
 
+    // Library
+    ShowLibrary,
+    RefreshLibrary,
+    LibraryLoaded(Vec<Book>),
+    ImportFile,
+    ImportDirectory,
+    OpenBook(String), // file_path
+    #[allow(dead_code)]
+    RemoveBook(i64),
+    LibrarySearchChanged(String),
+    LibraryFilterChanged(Option<shosai_core::library::BookFormat>),
+
     // Keyboard
     KeyPressed(keyboard::Event),
 }
@@ -179,7 +204,13 @@ pub fn boot() -> (State, Task<Message>) {
         }
     };
 
+    let library = reading_state
+        .as_ref()
+        .map(|store| Library::new(store.pool().clone()));
+
     let state = State {
+        screen: Screen::Library,
+
         file_path: None,
         document: None,
         current_page: 0,
@@ -189,12 +220,18 @@ pub fn boot() -> (State, Task<Message>) {
         chapter_content: Vec::new(),
         page_input: String::new(),
         error: None,
-        reading_state,
         font_size: 16.0,
         line_spacing: 1.6,
         theme: ReaderTheme::default(),
+
+        reading_state,
+        library,
+
+        library_books: Vec::new(),
+        library_search: String::new(),
+        library_filter: None,
     };
-    (state, Task::none())
+    (state, Task::done(Message::RefreshLibrary))
 }
 
 // ---------------------------------------------------------------------------
@@ -313,8 +350,112 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             handle_link_click(state, &href);
         }
 
+        // Library
+        Message::ShowLibrary => {
+            state.screen = Screen::Library;
+            return Task::done(Message::RefreshLibrary);
+        }
+
+        Message::RefreshLibrary => {
+            if let Some(lib) = state.library.clone() {
+                let search = state.library_search.clone();
+                let filter = state.library_filter;
+                return Task::perform(
+                    async move {
+                        if !search.is_empty() {
+                            lib.search(&search).await.unwrap_or_default()
+                        } else if let Some(fmt) = filter {
+                            lib.filter_by_format(fmt).await.unwrap_or_default()
+                        } else {
+                            lib.list_all().await.unwrap_or_default()
+                        }
+                    },
+                    Message::LibraryLoaded,
+                );
+            }
+        }
+
+        Message::LibraryLoaded(books) => {
+            state.library_books = books;
+        }
+
+        Message::ImportFile => {
+            return Task::perform(
+                async {
+                    let file = rfd::AsyncFileDialog::new()
+                        .add_filter("Ebooks", &["pdf", "epub", "cbz"])
+                        .set_title("Import to Library")
+                        .pick_file()
+                        .await;
+                    file.map(|f| f.path().to_path_buf())
+                },
+                |path| {
+                    if let Some(p) = path {
+                        Message::OpenBook(p.to_string_lossy().to_string())
+                    } else {
+                        Message::RefreshLibrary // no-op refresh
+                    }
+                },
+            );
+        }
+
+        Message::ImportDirectory => {
+            if let Some(lib) = state.library.clone() {
+                return Task::perform(
+                    async move {
+                        let dir = rfd::AsyncFileDialog::new()
+                            .set_title("Import Directory")
+                            .pick_folder()
+                            .await;
+                        if let Some(d) = dir {
+                            let _ = lib.import_directory(d.path()).await;
+                        }
+                        // Return the updated list.
+                        lib.list_all().await.unwrap_or_default()
+                    },
+                    Message::LibraryLoaded,
+                );
+            }
+        }
+
+        Message::OpenBook(file_path) => {
+            let path = PathBuf::from(&file_path);
+            // Import to library if not already there.
+            if let Some(lib) = state.library.clone() {
+                let p = path.clone();
+                // Fire-and-forget import.
+                tokio::task::spawn(async move {
+                    let _ = lib.import_file(&p).await;
+                });
+            }
+            open_file(state, path);
+            state.screen = Screen::Reader;
+        }
+
+        Message::RemoveBook(id) => {
+            if let Some(lib) = state.library.clone() {
+                return Task::perform(
+                    async move {
+                        let _ = lib.remove(id).await;
+                        lib.list_all().await.unwrap_or_default()
+                    },
+                    Message::LibraryLoaded,
+                );
+            }
+        }
+
+        Message::LibrarySearchChanged(query) => {
+            state.library_search = query;
+            return Task::done(Message::RefreshLibrary);
+        }
+
+        Message::LibraryFilterChanged(filter) => {
+            state.library_filter = filter;
+            return Task::done(Message::RefreshLibrary);
+        }
+
         Message::KeyPressed(event) => {
-            return handle_key_event(event);
+            return handle_key_event(state, event);
         }
     }
 
@@ -389,9 +530,16 @@ fn open_file(state: &mut State, path: PathBuf) {
     }
 }
 
-fn handle_key_event(event: keyboard::Event) -> Task<Message> {
+fn handle_key_event(state: &State, event: keyboard::Event) -> Task<Message> {
     if let keyboard::Event::KeyPressed { key, modifiers, .. } = event {
         match key.as_ref() {
+            // Escape: go back to library from reader
+            keyboard::Key::Named(keyboard::key::Named::Escape) => {
+                if state.screen == Screen::Reader {
+                    return Task::done(Message::ShowLibrary);
+                }
+            }
+
             keyboard::Key::Named(keyboard::key::Named::ArrowRight)
             | keyboard::Key::Named(keyboard::key::Named::PageDown) => {
                 return Task::done(Message::NextPage);
@@ -540,12 +688,16 @@ fn save_reading_state(state: &State) {
 // ---------------------------------------------------------------------------
 
 pub fn view(state: &State) -> Element<'_, Message> {
-    let content = column![toolbar(state), content_view(state)]
-        .spacing(0)
-        .width(Length::Fill)
-        .height(Length::Fill);
-
-    content.into()
+    match state.screen {
+        Screen::Library => library_view(state),
+        Screen::Reader => {
+            let content = column![toolbar(state), content_view(state)]
+                .spacing(0)
+                .width(Length::Fill)
+                .height(Length::Fill);
+            content.into()
+        }
+    }
 }
 
 fn toolbar(state: &State) -> Element<'_, Message> {
@@ -583,7 +735,10 @@ fn toolbar(state: &State) -> Element<'_, Message> {
         String::new()
     });
 
+    let library_btn = button("Library").on_press(Message::ShowLibrary);
+
     let mut toolbar_items: Vec<Element<'_, Message>> = vec![
+        library_btn.into(),
         open_btn.into(),
         prev_btn.into(),
         page_input.into(),
@@ -1036,6 +1191,149 @@ fn render_spans<'a>(
 
     rich_text(rich_spans)
         .on_link_click(Message::LinkClicked)
+        .into()
+}
+
+fn library_view(state: &State) -> Element<'_, Message> {
+    let search_input = text_input("Search by title or author...", &state.library_search)
+        .on_input(Message::LibrarySearchChanged)
+        .width(300);
+
+    let all_btn = button("All").on_press(Message::LibraryFilterChanged(None));
+    let pdf_btn = button("PDF").on_press(Message::LibraryFilterChanged(Some(
+        shosai_core::library::BookFormat::Pdf,
+    )));
+    let epub_btn = button("EPUB").on_press(Message::LibraryFilterChanged(Some(
+        shosai_core::library::BookFormat::Epub,
+    )));
+    let cbz_btn = button("CBZ").on_press(Message::LibraryFilterChanged(Some(
+        shosai_core::library::BookFormat::Cbz,
+    )));
+    let import_btn = button("Import File").on_press(Message::ImportFile);
+    let import_dir_btn = button("Import Folder").on_press(Message::ImportDirectory);
+
+    let toolbar = row![
+        text("Library").size(24),
+        search_input,
+        all_btn,
+        pdf_btn,
+        epub_btn,
+        cbz_btn,
+        import_btn,
+        import_dir_btn,
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+
+    let header = container(toolbar).padding(12).width(Length::Fill);
+
+    if state.library_books.is_empty() {
+        let empty_msg = if state.library_search.is_empty() && state.library_filter.is_none() {
+            "No books in library. Import files to get started."
+        } else {
+            "No books match your search or filter."
+        };
+
+        return column![
+            header,
+            center(
+                column![
+                    text("Shosai (書斎)").size(32),
+                    text(empty_msg).size(16),
+                    button("Import File").on_press(Message::ImportFile),
+                    button("Import Folder").on_press(Message::ImportDirectory),
+                ]
+                .spacing(16)
+                .align_x(iced::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill),
+        ]
+        .into();
+    }
+
+    // Grid of book covers (wrap flow).
+    let cover_width = 150.0_f32;
+    let cover_height = 200.0_f32;
+
+    // Build grid as rows of cards. Approximate 5 cards per row.
+    let cards_per_row = 5;
+    let mut grid = column![].spacing(12);
+    let mut current_row: Vec<Element<'_, Message>> = Vec::new();
+
+    for book in &state.library_books {
+        current_row.push(render_book_card(book, cover_width, cover_height));
+        if current_row.len() >= cards_per_row {
+            grid = grid.push(row(std::mem::take(&mut current_row)).spacing(12));
+        }
+    }
+    if !current_row.is_empty() {
+        grid = grid.push(row(current_row).spacing(12));
+    }
+
+    let content = scrollable(container(grid).padding(12).width(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    column![header, content].into()
+}
+
+fn render_book_card<'a>(book: &Book, width: f32, height: f32) -> Element<'a, Message> {
+    let file_path = book.file_path.clone();
+
+    // Cover image or placeholder.
+    let cover: Element<'_, Message> = if let Some(ref cover_data) = book.cover {
+        if let Ok(img) = ::image::load_from_memory(cover_data) {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            let handle = image::Handle::from_rgba(w, h, rgba.into_raw());
+            image(handle)
+                .width(Length::Fixed(width))
+                .height(Length::Fixed(height))
+                .content_fit(iced::ContentFit::Cover)
+                .into()
+        } else {
+            cover_placeholder(width, height, &book.title)
+        }
+    } else {
+        cover_placeholder(width, height, &book.title)
+    };
+
+    let title_text = text(book.title.clone())
+        .size(12)
+        .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
+
+    let format_label = text(book.format.as_str().to_uppercase()).size(10);
+
+    let card = column![cover, title_text, format_label]
+        .spacing(4)
+        .width(Length::Fixed(width));
+
+    button(card)
+        .on_press(Message::OpenBook(file_path))
+        .padding(4)
+        .width(Length::Fixed(width + 8.0))
+        .into()
+}
+
+fn cover_placeholder<'a>(width: f32, height: f32, title: &str) -> Element<'a, Message> {
+    let label = text(title.chars().take(20).collect::<String>())
+        .size(14)
+        .color(iced::Color::WHITE);
+
+    container(center(label))
+        .width(Length::Fixed(width))
+        .height(Length::Fixed(height))
+        .style(|_theme| container::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgb(
+                0.3, 0.3, 0.4,
+            ))),
+            border: iced::Border {
+                radius: 4.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
         .into()
 }
 
