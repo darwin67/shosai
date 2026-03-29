@@ -157,6 +157,9 @@ pub enum Message {
     FontSizeDown,
     CycleTheme,
 
+    // Links
+    LinkClicked(String),
+
     // Keyboard
     KeyPressed(keyboard::Event),
 }
@@ -297,6 +300,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             state.theme = state.theme.next();
         }
 
+        Message::LinkClicked(href) => {
+            handle_link_click(state, &href);
+        }
+
         Message::KeyPressed(event) => {
             return handle_key_event(event);
         }
@@ -389,6 +396,60 @@ fn handle_key_event(event: keyboard::Event) -> Task<Message> {
         }
     }
     Task::none()
+}
+
+/// Handle a link click from the EPUB reader.
+fn handle_link_click(state: &mut State, href: &str) {
+    // External links: open in system browser.
+    if href.starts_with("http://") || href.starts_with("https://") || href.starts_with("mailto:") {
+        if let Err(e) = open::that(href) {
+            eprintln!("warning: failed to open URL: {e}");
+        }
+        return;
+    }
+
+    // Internal EPUB links: navigate to the target chapter.
+    if let Some(OpenDocument::Epub(doc)) = &state.document {
+        // Split href into path and optional fragment (#anchor).
+        let (target_path, _fragment) = match href.split_once('#') {
+            Some((path, frag)) => (path, Some(frag)),
+            None => (href, None),
+        };
+
+        // If the path is empty, it's a same-chapter fragment link — nothing to navigate.
+        if target_path.is_empty() {
+            return;
+        }
+
+        // Find the chapter whose path ends with the target.
+        // Links may be relative to the current chapter's directory, so we
+        // resolve against the current chapter's base path.
+        let current_base = doc
+            .chapter(state.current_page)
+            .map(|ch| {
+                ch.path
+                    .rsplit_once('/')
+                    .map(|(dir, _)| dir.to_string())
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+
+        let resolved = if !current_base.is_empty() && !target_path.starts_with('/') {
+            format!("{current_base}/{target_path}")
+        } else {
+            target_path.to_string()
+        };
+
+        // Find the chapter index by matching the resolved path.
+        if let Some(chapter_idx) = doc.content.chapters.iter().position(|ch| {
+            ch.path == resolved || ch.path.ends_with(target_path) || ch.path.ends_with(&resolved)
+        }) {
+            state.current_page = chapter_idx;
+            state.page_input = format!("{}", state.current_page + 1);
+            refresh_content(state);
+            save_reading_state(state);
+        }
+    }
 }
 
 /// Refresh the visible content for the current page/chapter.
@@ -863,7 +924,7 @@ fn render_spans<'a>(
     font_size: f32,
     text_color: iced::Color,
 ) -> Element<'a, Message> {
-    let rich_spans: Vec<iced::widget::text::Span<'a, Message>> = spans
+    let rich_spans: Vec<iced::widget::text::Span<'a, String>> = spans
         .iter()
         .map(|s| {
             let is_link = s.link.is_some();
@@ -891,11 +952,16 @@ fn render_spans<'a>(
             if is_link {
                 sp = sp.underline(true);
             }
+            if let Some(href) = &s.link {
+                sp = sp.link(href.clone());
+            }
             sp
         })
         .collect();
 
-    rich_text(rich_spans).into()
+    rich_text(rich_spans)
+        .on_link_click(Message::LinkClicked)
+        .into()
 }
 
 fn welcome_view<'a>() -> Element<'a, Message> {
