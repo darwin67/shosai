@@ -639,11 +639,36 @@ fn render_content_node<'a>(
         ContentNode::Paragraph(spans) => render_spans(spans, font_size, text_color),
 
         ContentNode::BlockQuote(children) => {
-            let mut col = column![].spacing(8).padding(20);
+            let quote_color = iced::Color {
+                a: 0.7,
+                ..text_color
+            };
+            let bar_color = iced::Color {
+                a: 0.3,
+                ..text_color
+            };
+            let mut col = column![].spacing(8);
             for child in children {
-                col = col.push(render_content_node(child, font_size, text_color, resources));
+                col = col.push(render_content_node(
+                    child,
+                    font_size,
+                    quote_color,
+                    resources,
+                ));
             }
-            container(col).padding(16).width(Length::Fill).into()
+            row![
+                container(column![])
+                    .width(Length::Fixed(3.0))
+                    .height(Length::Fill)
+                    .style(move |_theme| container::Style {
+                        background: Some(iced::Background::Color(bar_color)),
+                        ..Default::default()
+                    }),
+                container(col).padding([4, 12]),
+            ]
+            .spacing(0)
+            .width(Length::Fill)
+            .into()
         }
 
         ContentNode::UnorderedList(items) => {
