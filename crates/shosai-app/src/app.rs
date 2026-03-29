@@ -6,6 +6,7 @@ use iced::widget::{
 };
 use iced::{Element, Font, Length, Subscription, Task};
 
+use shosai_core::cbz::CbzDoc;
 use shosai_core::document::{Document, RenderedPage};
 use shosai_core::epub::EpubDoc;
 use shosai_core::epub::render::{ContentNode, parse_chapter_xhtml};
@@ -20,6 +21,7 @@ use shosai_core::reading_state::{FileReadingState, ReadingStateStore};
 enum OpenDocument {
     Pdf(PdfDoc),
     Epub(EpubDoc),
+    Cbz(CbzDoc),
 }
 
 // ---------------------------------------------------------------------------
@@ -205,9 +207,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             return Task::perform(
                 async {
                     let file = rfd::AsyncFileDialog::new()
-                        .add_filter("Ebooks", &["pdf", "epub"])
+                        .add_filter("Ebooks", &["pdf", "epub", "cbz"])
                         .add_filter("PDF", &["pdf"])
                         .add_filter("EPUB", &["epub"])
+                        .add_filter("CBZ", &["cbz"])
                         .set_title("Open File")
                         .pick_file()
                         .await;
@@ -259,7 +262,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         }
 
         Message::ZoomIn => {
-            if matches!(state.document, Some(OpenDocument::Pdf(_))) {
+            if matches!(
+                state.document,
+                Some(OpenDocument::Pdf(_)) | Some(OpenDocument::Cbz(_))
+            ) {
                 let new_scale = (state.zoom.scale() + 0.25).min(5.0);
                 state.zoom = ZoomMode::Manual(new_scale);
                 refresh_content(state);
@@ -268,7 +274,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         }
 
         Message::ZoomOut => {
-            if matches!(state.document, Some(OpenDocument::Pdf(_))) {
+            if matches!(
+                state.document,
+                Some(OpenDocument::Pdf(_)) | Some(OpenDocument::Cbz(_))
+            ) {
                 let new_scale = (state.zoom.scale() - 0.25).max(0.25);
                 state.zoom = ZoomMode::Manual(new_scale);
                 refresh_content(state);
@@ -339,6 +348,14 @@ fn open_file(state: &mut State, path: PathBuf) {
             }
             Err(e) => Err(format!("Failed to open EPUB: {e}")),
         },
+        "cbz" => match CbzDoc::open(&path) {
+            Ok(doc) => {
+                state.total_pages = doc.page_count();
+                state.document = Some(OpenDocument::Cbz(doc));
+                Ok(())
+            }
+            Err(e) => Err(format!("Failed to open CBZ: {e}")),
+        },
         _ => Err(format!("Unsupported file format: .{ext}")),
     };
 
@@ -351,7 +368,10 @@ fn open_file(state: &mut State, path: PathBuf) {
                 .and_then(|store| store.get(&path));
             if let Some(saved) = saved {
                 state.current_page = saved.page.min(state.total_pages.saturating_sub(1));
-                if matches!(state.document, Some(OpenDocument::Pdf(_))) {
+                if matches!(
+                    state.document,
+                    Some(OpenDocument::Pdf(_)) | Some(OpenDocument::Cbz(_))
+                ) {
                     state.zoom = ZoomMode::Manual(saved.zoom);
                 }
             } else {
@@ -485,6 +505,20 @@ fn refresh_content(state: &mut State) {
                 state.error = Some(format!("Chapter {} not found", state.current_page));
             }
         }
+        Some(OpenDocument::Cbz(doc)) => {
+            let scale = state.zoom.scale();
+            match doc.render_page(state.current_page, scale) {
+                Ok(page) => {
+                    state.rendered_page = Some(page);
+                    state.chapter_content = Vec::new();
+                    state.error = None;
+                }
+                Err(e) => {
+                    state.error = Some(format!("Failed to render page: {e}"));
+                    state.rendered_page = None;
+                }
+            }
+        }
         None => {}
     }
 }
@@ -518,7 +552,10 @@ fn toolbar(state: &State) -> Element<'_, Message> {
     let open_btn = button("Open").on_press(Message::OpenFile);
 
     let has_doc = state.document.is_some();
-    let is_pdf = matches!(state.document, Some(OpenDocument::Pdf(_)));
+    let is_pdf_or_cbz = matches!(
+        state.document,
+        Some(OpenDocument::Pdf(_)) | Some(OpenDocument::Cbz(_))
+    );
     let is_epub = matches!(state.document, Some(OpenDocument::Epub(_)));
     let can_prev = has_doc && state.current_page > 0;
     let can_next = has_doc && state.current_page + 1 < state.total_pages;
@@ -533,7 +570,7 @@ fn toolbar(state: &State) -> Element<'_, Message> {
         next_btn = next_btn.on_press(Message::NextPage);
     }
 
-    let nav_label = if is_epub { "Ch" } else { "Page" };
+    let nav_label = if is_epub { "Ch" } else { "Pg" };
 
     let page_input = text_input(nav_label, &state.page_input)
         .on_input(Message::PageInputChanged)
@@ -555,21 +592,21 @@ fn toolbar(state: &State) -> Element<'_, Message> {
     ];
 
     // PDF: zoom controls
-    if is_pdf || !has_doc {
-        let zoom_out_btn = if is_pdf {
+    if is_pdf_or_cbz || !has_doc {
+        let zoom_out_btn = if is_pdf_or_cbz {
             button("-").on_press(Message::ZoomOut)
         } else {
             button("-")
         };
         let zoom_label = text(state.zoom.label()).width(70);
-        let zoom_in_btn = if is_pdf {
+        let zoom_in_btn = if is_pdf_or_cbz {
             button("+").on_press(Message::ZoomIn)
         } else {
             button("+")
         };
         let mut fit_w = button("W");
         let mut fit_p = button("P");
-        if is_pdf {
+        if is_pdf_or_cbz {
             fit_w = fit_w.on_press(Message::SetZoomFitWidth);
             fit_p = fit_p.on_press(Message::SetZoomFitPage);
         }
@@ -610,7 +647,7 @@ fn content_view(state: &State) -> Element<'_, Message> {
     }
 
     match &state.document {
-        Some(OpenDocument::Pdf(_)) => pdf_page_view(state),
+        Some(OpenDocument::Pdf(_) | OpenDocument::Cbz(_)) => pdf_page_view(state),
         Some(OpenDocument::Epub(_)) => epub_chapter_view(state),
         None => welcome_view(),
     }
@@ -1006,7 +1043,7 @@ fn welcome_view<'a>() -> Element<'a, Message> {
     center(
         column![
             text("Shosai (書斎)").size(32),
-            text("Open a PDF or EPUB file to start reading").size(16),
+            text("Open a PDF, EPUB, or CBZ file to start reading").size(16),
             button("Open File").on_press(Message::OpenFile),
         ]
         .spacing(20)
