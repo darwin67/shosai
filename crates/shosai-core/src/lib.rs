@@ -1,3 +1,4 @@
+pub mod cbz;
 pub mod document;
 pub mod epub;
 pub mod highlight;
