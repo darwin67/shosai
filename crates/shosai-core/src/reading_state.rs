@@ -36,6 +36,14 @@ pub struct ReadingStateStore {
 }
 
 impl ReadingStateStore {
+    /// Get a reference to the underlying connection pool.
+    ///
+    /// This allows sharing the pool with other modules (e.g. the library)
+    /// that use the same database.
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     /// Open (or create) the store at the default platform path.
     pub fn open() -> Result<Self> {
         let rt = tokio::runtime::Handle::current();
