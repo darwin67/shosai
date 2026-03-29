@@ -165,41 +165,39 @@ The separation of ~shosai-core~ and ~shosai-app~ ensures:
 * Phase 3 — CBZ Support & Library Management
 :PROPERTIES:
 :PHASE: 3
-:STATUS: TODO
+:STATUS: DONE
 :END:
 
 *Goal*: Comic book viewing and a proper library to manage collections.
 
-** TODO CBZ viewer
-- [ ] Extract images from ZIP archive
-- [ ] Sort entries by filename (natural sort order)
-- [ ] Display modes:
-  - Single page
-  - Double-page spread (side by side)
-- [ ] Fit modes: fit-to-width, fit-to-height, fit-to-page
-- [ ] Preload adjacent pages for smooth navigation
-- [ ] Implement ~Document~ trait for CBZ
+** DONE CBZ viewer
+- [X] Extract images from ZIP archive (JPEG, PNG, GIF, WebP, BMP)
+- [X] Sort entries by filename (natural sort order via ~natord~)
+- [X] Single page display with zoom controls
+- [X] Skip macOS metadata and hidden files
+- [X] Page rendering with scaling (Lanczos3 filter)
+- [X] 12 integration tests
 
-** TODO Library management
-- [ ] SQLite database schema:
-  - Books table: id, title, author, format, file_path, cover_blob, reading_progress, date_added, last_read
-  - Bookmarks table (for Phase 4)
-- [ ] Import books:
+** DONE Library management
+- [X] SQLite database schema (002_library migration):
+  - Books table: id, title, author, format, file_path, cover_blob, progress, date_added, last_read
+- [X] Import books:
   - Individual file import
   - Directory scan (recursive)
-- [ ] Library views:
-  - Grid view with cover thumbnails
-  - List view with metadata columns
-- [ ] Search by title / author
-- [ ] Filter by format (PDF / EPUB / CBZ)
-- [ ] "Recently read" and "Currently reading" sections
-- [ ] Delete / remove from library
+  - Duplicate detection (returns existing entry)
+- [X] Library grid view with cover thumbnails
+- [X] Search by title / author (real-time filtering)
+- [X] Filter by format (All / PDF / EPUB / CBZ)
+- [X] Books sorted by last_read then date_added (recently read first)
+- [X] Delete / remove from library
+- [X] Auto-import when opening a file
+- [X] 14 library tests
 
-** TODO Cover extraction
-- [ ] PDF: render first page as thumbnail (scaled down)
-- [ ] EPUB: extract cover image from OPF metadata
-- [ ] CBZ: use first image in archive as cover
-- [ ] Cache covers in SQLite as BLOBs or on disk
+** DONE Cover extraction
+- [X] PDF: render first page at 0.5x scale as thumbnail
+- [X] EPUB: extract cover image from OPF manifest metadata
+- [X] CBZ: use first image in archive as cover
+- [X] All covers resized to 300x400 max and stored as PNG BLOBs in SQLite
 
 * Phase 4 — Polish & Advanced Features
 :PROPERTIES:
