@@ -15,13 +15,28 @@ pub struct TextSpan {
     pub link: Option<String>,
 }
 
+/// Style annotations that can be applied to any block-level content node.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodeStyle {
+    /// Text alignment override.
+    pub text_align: Option<super::style::TextAlignment>,
+    /// Font size multiplier override.
+    pub font_size_multiplier: Option<f32>,
+    /// Left margin in em.
+    pub margin_left_em: Option<f32>,
+}
+
 /// A content node in the simplified document model.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContentNode {
     /// A heading (level 1–6).
-    Heading { level: u8, text: String },
+    Heading {
+        level: u8,
+        text: String,
+        style: NodeStyle,
+    },
     /// A paragraph with mixed inline formatting.
-    Paragraph(Vec<TextSpan>),
+    Paragraph(Vec<TextSpan>, NodeStyle),
     /// A block quote (contains paragraphs).
     BlockQuote(Vec<ContentNode>),
     /// An unordered list.
@@ -51,7 +66,12 @@ pub enum ContentNode {
 ///
 /// `base_path` is the directory of the chapter within the EPUB archive,
 /// used to resolve relative image `src` attributes.
-pub fn parse_chapter_xhtml(xhtml: &str, base_path: &str) -> Vec<ContentNode> {
+/// `styles` is the CSS class → style map for applying class-based styles.
+pub fn parse_chapter_xhtml(
+    xhtml: &str,
+    base_path: &str,
+    styles: &super::style::StyleMap,
+) -> Vec<ContentNode> {
     let doc = match roxmltree::Document::parse(xhtml) {
         Ok(d) => d,
         Err(_) => return Vec::new(),
@@ -63,62 +83,94 @@ pub fn parse_chapter_xhtml(xhtml: &str, base_path: &str) -> Vec<ContentNode> {
         .find(|n| n.tag_name().name() == "body")
         .unwrap_or(doc.root());
 
-    parse_block_children(body, base_path)
+    parse_block_children(body, base_path, styles)
 }
 
 /// Parse block-level children of an element.
-fn parse_block_children(parent: roxmltree::Node, base_path: &str) -> Vec<ContentNode> {
+fn parse_block_children(
+    parent: roxmltree::Node,
+    base_path: &str,
+    styles: &super::style::StyleMap,
+) -> Vec<ContentNode> {
     let mut nodes = Vec::new();
 
     for child in parent.children() {
         if !child.is_element() {
-            // Bare text at block level → treat as paragraph.
             if child.is_text() {
                 let text = child.text().unwrap_or("").trim();
                 if !text.is_empty() {
-                    nodes.push(ContentNode::Paragraph(vec![TextSpan {
-                        text: text.to_string(),
-                        bold: false,
-                        italic: false,
-                        monospace: false,
-                        link: None,
-                    }]));
+                    nodes.push(ContentNode::Paragraph(
+                        vec![TextSpan {
+                            text: text.to_string(),
+                            bold: false,
+                            italic: false,
+                            monospace: false,
+                            link: None,
+                        }],
+                        NodeStyle::default(),
+                    ));
                 }
             }
             continue;
         }
 
+        // Look up CSS class-based style for this element.
+        let css_style = lookup_element_style(&child, styles);
+
+        // If `display: none`, skip entirely.
+        if css_style.as_ref().is_some_and(|s| s.hidden == Some(true)) {
+            continue;
+        }
+
+        // If the CSS says monospace + preserve-whitespace, treat as code block
+        // regardless of the HTML tag (handles Calibre-generated classes).
+        if css_style
+            .as_ref()
+            .is_some_and(|s| s.monospace == Some(true) && s.preserve_whitespace == Some(true))
+        {
+            let code = collect_text_content(&child);
+            if !code.trim().is_empty() {
+                nodes.push(ContentNode::CodeBlock {
+                    code: code.trim().to_string(),
+                    language: None,
+                });
+                continue;
+            }
+        }
+
+        let node_style = css_to_node_style(&css_style);
+
         match child.tag_name().name() {
-            "h1" => push_heading(&mut nodes, &child, 1),
-            "h2" => push_heading(&mut nodes, &child, 2),
-            "h3" => push_heading(&mut nodes, &child, 3),
-            "h4" => push_heading(&mut nodes, &child, 4),
-            "h5" => push_heading(&mut nodes, &child, 5),
-            "h6" => push_heading(&mut nodes, &child, 6),
+            "h1" => push_heading(&mut nodes, &child, 1, &node_style),
+            "h2" => push_heading(&mut nodes, &child, 2, &node_style),
+            "h3" => push_heading(&mut nodes, &child, 3, &node_style),
+            "h4" => push_heading(&mut nodes, &child, 4, &node_style),
+            "h5" => push_heading(&mut nodes, &child, 5, &node_style),
+            "h6" => push_heading(&mut nodes, &child, 6, &node_style),
 
             "p" => {
-                let spans = collect_inline_spans(&child);
+                let spans = collect_inline_spans(&child, styles);
                 if !spans.is_empty() {
-                    nodes.push(ContentNode::Paragraph(spans));
+                    nodes.push(ContentNode::Paragraph(spans, node_style));
                 }
             }
 
             "blockquote" => {
-                let inner = parse_block_children(child, base_path);
+                let inner = parse_block_children(child, base_path, styles);
                 if !inner.is_empty() {
                     nodes.push(ContentNode::BlockQuote(inner));
                 }
             }
 
             "ul" => {
-                let items = parse_list_items(&child);
+                let items = parse_list_items(&child, styles);
                 if !items.is_empty() {
                     nodes.push(ContentNode::UnorderedList(items));
                 }
             }
 
             "ol" => {
-                let items = parse_list_items(&child);
+                let items = parse_list_items(&child, styles);
                 if !items.is_empty() {
                     nodes.push(ContentNode::OrderedList(items));
                 }
@@ -136,7 +188,6 @@ fn parse_block_children(parent: roxmltree::Node, base_path: &str) -> Vec<Content
             }
 
             "code" => {
-                // Block-level <code> (not inside <p>) — treat as code block.
                 let language = extract_language_hint(&child);
                 let code = collect_text_content(&child);
                 if !code.trim().is_empty() {
@@ -161,17 +212,15 @@ fn parse_block_children(parent: roxmltree::Node, base_path: &str) -> Vec<Content
                 nodes.push(ContentNode::HorizontalRule);
             }
 
-            // Wrapper elements: recurse into them.
             "div" | "section" | "article" | "main" | "aside" | "header" | "footer" | "figure"
             | "figcaption" => {
-                nodes.extend(parse_block_children(child, base_path));
+                nodes.extend(parse_block_children(child, base_path, styles));
             }
 
-            // Anything else: try to extract text content as a paragraph.
             _ => {
-                let spans = collect_inline_spans(&child);
+                let spans = collect_inline_spans(&child, styles);
                 if !spans.is_empty() {
-                    nodes.push(ContentNode::Paragraph(spans));
+                    nodes.push(ContentNode::Paragraph(spans, node_style));
                 }
             }
         }
@@ -180,20 +229,74 @@ fn parse_block_children(parent: roxmltree::Node, base_path: &str) -> Vec<Content
     nodes
 }
 
+/// Look up the CSS style for an element based on its class attribute.
+fn lookup_element_style(
+    element: &roxmltree::Node,
+    styles: &super::style::StyleMap,
+) -> Option<super::style::EpubStyle> {
+    let class_attr = element.attribute("class")?;
+    let mut merged = super::style::EpubStyle::default();
+    let mut found = false;
+    for cls in class_attr.split_whitespace() {
+        if let Some(style) = styles.get(cls) {
+            // Simple merge: later classes override earlier ones.
+            macro_rules! merge {
+                ($field:ident) => {
+                    if style.$field.is_some() {
+                        merged.$field = style.$field;
+                    }
+                };
+            }
+            merge!(bold);
+            merge!(italic);
+            merge!(monospace);
+            merge!(font_size_multiplier);
+            merge!(text_align);
+            merge!(hidden);
+            merge!(text_indent_em);
+            merge!(margin_left_em);
+            merge!(preserve_whitespace);
+            found = true;
+        }
+    }
+    found.then_some(merged)
+}
+
+/// Convert a CSS style to a NodeStyle.
+fn css_to_node_style(css: &Option<super::style::EpubStyle>) -> NodeStyle {
+    match css {
+        Some(s) => NodeStyle {
+            text_align: s.text_align,
+            font_size_multiplier: s.font_size_multiplier,
+            margin_left_em: s.margin_left_em,
+        },
+        None => NodeStyle::default(),
+    }
+}
+
 /// Collect heading text content.
-fn push_heading(nodes: &mut Vec<ContentNode>, element: &roxmltree::Node, level: u8) {
+fn push_heading(
+    nodes: &mut Vec<ContentNode>,
+    element: &roxmltree::Node,
+    level: u8,
+    node_style: &NodeStyle,
+) {
     let text = collect_text_content(element).trim().to_string();
     if !text.is_empty() {
-        nodes.push(ContentNode::Heading { level, text });
+        nodes.push(ContentNode::Heading {
+            level,
+            text,
+            style: node_style.clone(),
+        });
     }
 }
 
 /// Parse <li> items from a <ul> or <ol>.
-fn parse_list_items(list: &roxmltree::Node) -> Vec<Vec<TextSpan>> {
+fn parse_list_items(list: &roxmltree::Node, styles: &super::style::StyleMap) -> Vec<Vec<TextSpan>> {
     let mut items = Vec::new();
     for child in list.children() {
         if child.is_element() && child.tag_name().name() == "li" {
-            let spans = collect_inline_spans(&child);
+            let spans = collect_inline_spans(&child, styles);
             if !spans.is_empty() {
                 items.push(spans);
             }
@@ -203,9 +306,17 @@ fn parse_list_items(list: &roxmltree::Node) -> Vec<Vec<TextSpan>> {
 }
 
 /// Collect inline text spans with bold/italic formatting from an element.
-fn collect_inline_spans(element: &roxmltree::Node) -> Vec<TextSpan> {
+fn collect_inline_spans(
+    element: &roxmltree::Node,
+    styles: &super::style::StyleMap,
+) -> Vec<TextSpan> {
     let mut spans = Vec::new();
-    collect_inline_spans_recursive(element, false, false, false, None, &mut spans);
+    // Check if the element itself has CSS-based styling.
+    let css = lookup_element_style(element, styles);
+    let bold = css.as_ref().is_some_and(|s| s.bold == Some(true));
+    let italic = css.as_ref().is_some_and(|s| s.italic == Some(true));
+    let mono = css.as_ref().is_some_and(|s| s.monospace == Some(true));
+    collect_inline_spans_recursive(element, bold, italic, mono, None, styles, &mut spans);
 
     // Merge adjacent spans with the same formatting.
     merge_spans(&mut spans);
@@ -218,6 +329,7 @@ fn collect_inline_spans_recursive(
     italic: bool,
     monospace: bool,
     link: Option<&str>,
+    styles: &super::style::StyleMap,
     spans: &mut Vec<TextSpan>,
 ) {
     for child in node.children() {
@@ -233,10 +345,24 @@ fn collect_inline_spans_recursive(
                 });
             }
         } else if child.is_element() {
+            // Apply CSS class-based overrides for this inline element.
+            let css = lookup_element_style(&child, styles);
+            let css_bold = css.as_ref().is_some_and(|s| s.bold == Some(true));
+            let css_italic = css.as_ref().is_some_and(|s| s.italic == Some(true));
+            let css_mono = css.as_ref().is_some_and(|s| s.monospace == Some(true));
+
             match child.tag_name().name() {
                 "a" => {
                     let href = child.attribute("href");
-                    collect_inline_spans_recursive(&child, bold, italic, monospace, href, spans);
+                    collect_inline_spans_recursive(
+                        &child,
+                        bold || css_bold,
+                        italic || css_italic,
+                        monospace || css_mono,
+                        href,
+                        styles,
+                        spans,
+                    );
                 }
                 tag => {
                     let (b, i, m) = match tag {
@@ -246,7 +372,15 @@ fn collect_inline_spans_recursive(
                         "code" | "tt" | "samp" | "kbd" => (bold, italic, true),
                         _ => (bold, italic, monospace),
                     };
-                    collect_inline_spans_recursive(&child, b, i, m, link, spans);
+                    collect_inline_spans_recursive(
+                        &child,
+                        b || css_bold,
+                        i || css_italic,
+                        m || css_mono,
+                        link,
+                        styles,
+                        spans,
+                    );
                 }
             }
         }
@@ -335,10 +469,10 @@ mod tests {
     #[test]
     fn test_parse_paragraph() {
         let xhtml = r#"<html><body><p>Hello world</p></body></html>"#;
-        let nodes = parse_chapter_xhtml(xhtml, "");
+        let nodes = parse_chapter_xhtml(xhtml, "", &Default::default());
         assert_eq!(nodes.len(), 1);
         match &nodes[0] {
-            ContentNode::Paragraph(spans) => {
+            ContentNode::Paragraph(spans, _) => {
                 assert_eq!(spans.len(), 1);
                 assert_eq!(spans[0].text, "Hello world");
                 assert!(!spans[0].bold);
@@ -351,20 +485,24 @@ mod tests {
     #[test]
     fn test_parse_heading() {
         let xhtml = r#"<html><body><h1>Title</h1><h2>Subtitle</h2></body></html>"#;
-        let nodes = parse_chapter_xhtml(xhtml, "");
+        let nodes = parse_chapter_xhtml(xhtml, "", &Default::default());
         assert_eq!(nodes.len(), 2);
-        assert!(matches!(&nodes[0], ContentNode::Heading { level: 1, text } if text == "Title"));
-        assert!(matches!(&nodes[1], ContentNode::Heading { level: 2, text } if text == "Subtitle"));
+        assert!(
+            matches!(&nodes[0], ContentNode::Heading { level: 1, text, .. } if text == "Title")
+        );
+        assert!(
+            matches!(&nodes[1], ContentNode::Heading { level: 2, text, .. } if text == "Subtitle")
+        );
     }
 
     #[test]
     fn test_parse_bold_italic() {
         let xhtml =
             r#"<html><body><p>Normal <strong>bold</strong> and <em>italic</em></p></body></html>"#;
-        let nodes = parse_chapter_xhtml(xhtml, "");
+        let nodes = parse_chapter_xhtml(xhtml, "", &Default::default());
         assert_eq!(nodes.len(), 1);
         match &nodes[0] {
-            ContentNode::Paragraph(spans) => {
+            ContentNode::Paragraph(spans, _) => {
                 // "Normal " (plain), "bold" (bold), " and " (plain), "italic" (italic)
                 assert!(spans.len() >= 3, "expected at least 3 spans: {spans:?}");
                 let bold_span = spans.iter().find(|s| s.bold);
@@ -385,7 +523,7 @@ mod tests {
             <ul><li>One</li><li>Two</li></ul>
             <ol><li>First</li><li>Second</li></ol>
         </body></html>"#;
-        let nodes = parse_chapter_xhtml(xhtml, "");
+        let nodes = parse_chapter_xhtml(xhtml, "", &Default::default());
         assert_eq!(nodes.len(), 2);
         assert!(matches!(&nodes[0], ContentNode::UnorderedList(items) if items.len() == 2));
         assert!(matches!(&nodes[1], ContentNode::OrderedList(items) if items.len() == 2));
@@ -394,12 +532,12 @@ mod tests {
     #[test]
     fn test_parse_blockquote() {
         let xhtml = r#"<html><body><blockquote><p>Quoted text</p></blockquote></body></html>"#;
-        let nodes = parse_chapter_xhtml(xhtml, "");
+        let nodes = parse_chapter_xhtml(xhtml, "", &Default::default());
         assert_eq!(nodes.len(), 1);
         match &nodes[0] {
             ContentNode::BlockQuote(inner) => {
                 assert_eq!(inner.len(), 1);
-                assert!(matches!(&inner[0], ContentNode::Paragraph(_)));
+                assert!(matches!(&inner[0], ContentNode::Paragraph(_, _)));
             }
             other => panic!("expected BlockQuote, got {other:?}"),
         }
@@ -408,7 +546,7 @@ mod tests {
     #[test]
     fn test_parse_image() {
         let xhtml = r#"<html><body><img src="images/fig1.png" alt="Figure 1"/></body></html>"#;
-        let nodes = parse_chapter_xhtml(xhtml, "OEBPS");
+        let nodes = parse_chapter_xhtml(xhtml, "OEBPS", &Default::default());
         assert_eq!(nodes.len(), 1);
         match &nodes[0] {
             ContentNode::Image { src, alt } => {
@@ -422,7 +560,7 @@ mod tests {
     #[test]
     fn test_parse_hr() {
         let xhtml = r#"<html><body><hr/></body></html>"#;
-        let nodes = parse_chapter_xhtml(xhtml, "");
+        let nodes = parse_chapter_xhtml(xhtml, "", &Default::default());
         assert_eq!(nodes.len(), 1);
         assert!(matches!(&nodes[0], ContentNode::HorizontalRule));
     }
@@ -430,9 +568,9 @@ mod tests {
     #[test]
     fn test_parse_div_wrapper() {
         let xhtml = r#"<html><body><div><p>Inside div</p></div></body></html>"#;
-        let nodes = parse_chapter_xhtml(xhtml, "");
+        let nodes = parse_chapter_xhtml(xhtml, "", &Default::default());
         assert_eq!(nodes.len(), 1);
-        assert!(matches!(&nodes[0], ContentNode::Paragraph(_)));
+        assert!(matches!(&nodes[0], ContentNode::Paragraph(_, _)));
     }
 
     #[test]
@@ -440,7 +578,7 @@ mod tests {
         let xhtml = r#"<html><body><pre class="language-rust">fn main() {
     println!("hello");
 }</pre></body></html>"#;
-        let nodes = parse_chapter_xhtml(xhtml, "");
+        let nodes = parse_chapter_xhtml(xhtml, "", &Default::default());
         assert_eq!(nodes.len(), 1);
         match &nodes[0] {
             ContentNode::CodeBlock { code, language } => {
@@ -454,7 +592,7 @@ mod tests {
     #[test]
     fn test_parse_pre_without_language() {
         let xhtml = r#"<html><body><pre>some plain text</pre></body></html>"#;
-        let nodes = parse_chapter_xhtml(xhtml, "");
+        let nodes = parse_chapter_xhtml(xhtml, "", &Default::default());
         assert_eq!(nodes.len(), 1);
         match &nodes[0] {
             ContentNode::CodeBlock { code, language } => {
@@ -469,7 +607,7 @@ mod tests {
     fn test_parse_pre_code_nested() {
         let xhtml =
             r#"<html><body><pre><code class="lang-python">print("hi")</code></pre></body></html>"#;
-        let nodes = parse_chapter_xhtml(xhtml, "");
+        let nodes = parse_chapter_xhtml(xhtml, "", &Default::default());
         assert_eq!(nodes.len(), 1);
         match &nodes[0] {
             ContentNode::CodeBlock { code, language } => {
@@ -483,10 +621,10 @@ mod tests {
     #[test]
     fn test_parse_inline_code() {
         let xhtml = r#"<html><body><p>Use <code>println!</code> to print</p></body></html>"#;
-        let nodes = parse_chapter_xhtml(xhtml, "");
+        let nodes = parse_chapter_xhtml(xhtml, "", &Default::default());
         assert_eq!(nodes.len(), 1);
         match &nodes[0] {
-            ContentNode::Paragraph(spans) => {
+            ContentNode::Paragraph(spans, _) => {
                 let mono_span = spans.iter().find(|s| s.monospace);
                 assert!(mono_span.is_some(), "should have a monospace span");
                 assert_eq!(mono_span.unwrap().text, "println!");
@@ -498,10 +636,10 @@ mod tests {
     #[test]
     fn test_parse_link() {
         let xhtml = r#"<html><body><p>Visit <a href="https://example.com">our site</a> today</p></body></html>"#;
-        let nodes = parse_chapter_xhtml(xhtml, "");
+        let nodes = parse_chapter_xhtml(xhtml, "", &Default::default());
         assert_eq!(nodes.len(), 1);
         match &nodes[0] {
-            ContentNode::Paragraph(spans) => {
+            ContentNode::Paragraph(spans, _) => {
                 let link_span = spans.iter().find(|s| s.link.is_some());
                 assert!(link_span.is_some(), "should have a link span");
                 let link_span = link_span.unwrap();
@@ -516,10 +654,10 @@ mod tests {
     fn test_parse_bold_link() {
         let xhtml =
             r#"<html><body><p><a href="url"><strong>bold link</strong></a></p></body></html>"#;
-        let nodes = parse_chapter_xhtml(xhtml, "");
+        let nodes = parse_chapter_xhtml(xhtml, "", &Default::default());
         assert_eq!(nodes.len(), 1);
         match &nodes[0] {
-            ContentNode::Paragraph(spans) => {
+            ContentNode::Paragraph(spans, _) => {
                 let link_span = spans.iter().find(|s| s.link.is_some());
                 assert!(link_span.is_some());
                 let link_span = link_span.unwrap();

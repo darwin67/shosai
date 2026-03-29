@@ -8,6 +8,7 @@
 
 mod parser;
 pub mod render;
+pub mod style;
 mod types;
 
 pub use parser::EpubDoc;

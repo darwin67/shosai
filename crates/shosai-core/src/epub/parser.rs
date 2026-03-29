@@ -53,6 +53,22 @@ impl EpubDoc {
         // 5. Load resources (images, CSS, fonts).
         let resources = load_resources(&mut archive, &manifest)?;
 
+        // 6. Parse CSS stylesheets into a class → style map.
+        let css_sources: Vec<(&str, String)> = manifest
+            .values()
+            .filter(|item| item.media_type == "text/css")
+            .filter_map(|item| {
+                resources
+                    .get(&item.href)
+                    .and_then(|data| String::from_utf8(data.clone()).ok())
+                    .map(|css| (item.href.as_str(), css))
+            })
+            .collect();
+
+        let styles = super::style::parse_epub_styles(
+            css_sources.iter().map(|(path, css)| (*path, css.as_str())),
+        );
+
         Ok(Self {
             content: EpubContent {
                 metadata,
@@ -60,6 +76,7 @@ impl EpubDoc {
                 toc,
                 manifest,
                 resources,
+                styles,
             },
         })
     }

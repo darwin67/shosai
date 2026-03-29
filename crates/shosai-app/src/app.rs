@@ -477,7 +477,8 @@ fn refresh_content(state: &mut State) {
                     .rsplit_once('/')
                     .map(|(dir, _)| dir)
                     .unwrap_or("");
-                state.chapter_content = parse_chapter_xhtml(&chapter.content, base_path);
+                state.chapter_content =
+                    parse_chapter_xhtml(&chapter.content, base_path, &doc.content.styles);
                 state.error = None;
             } else {
                 state.chapter_content = Vec::new();
@@ -686,18 +687,43 @@ fn render_content_node<'a>(
     resources: &std::collections::HashMap<String, Vec<u8>>,
 ) -> Element<'a, Message> {
     match node {
-        ContentNode::Heading { level, text: t } => {
-            let size = match level {
+        ContentNode::Heading {
+            level,
+            text: t,
+            style,
+        } => {
+            let base_size = match level {
                 1 => font_size * 2.0,
                 2 => font_size * 1.6,
                 3 => font_size * 1.3,
                 4 => font_size * 1.1,
                 _ => font_size,
             };
-            text(t.clone()).size(size).color(text_color).into()
+            let size = style
+                .font_size_multiplier
+                .map(|m| base_size * m)
+                .unwrap_or(base_size);
+            let align = node_style_to_alignment(style);
+            let heading = text(t.clone()).size(size).color(text_color);
+            container(heading).width(Length::Fill).align_x(align).into()
         }
 
-        ContentNode::Paragraph(spans) => render_spans(spans, font_size, text_color),
+        ContentNode::Paragraph(spans, style) => {
+            let size = style
+                .font_size_multiplier
+                .map(|m| font_size * m)
+                .unwrap_or(font_size);
+            let align = node_style_to_alignment(style);
+            let rendered = render_spans(spans, size, text_color);
+            let mut c = container(rendered).width(Length::Fill).align_x(align);
+            if let Some(margin) = style.margin_left_em {
+                c = c.padding(iced::Padding {
+                    left: margin * font_size,
+                    ..iced::Padding::ZERO
+                });
+            }
+            c.into()
+        }
 
         ContentNode::BlockQuote(children) => {
             let quote_color = iced::Color {
@@ -910,6 +936,18 @@ fn render_code_block<'a>(
         ..Default::default()
     })
     .into()
+}
+
+fn node_style_to_alignment(
+    style: &shosai_core::epub::render::NodeStyle,
+) -> iced::alignment::Horizontal {
+    match style.text_align {
+        Some(shosai_core::epub::style::TextAlignment::Center) => {
+            iced::alignment::Horizontal::Center
+        }
+        Some(shosai_core::epub::style::TextAlignment::Right) => iced::alignment::Horizontal::Right,
+        _ => iced::alignment::Horizontal::Left,
+    }
 }
 
 const LINK_COLOR: iced::Color = iced::Color {

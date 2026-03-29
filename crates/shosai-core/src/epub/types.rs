@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 
+use super::style::StyleMap;
+
 /// Metadata extracted from the OPF `<metadata>` element.
 #[derive(Debug, Clone, Default)]
 pub struct EpubMetadata {
@@ -62,4 +64,6 @@ pub struct EpubContent {
     pub manifest: HashMap<String, ManifestItem>,
     /// Raw resource data by archive path (images, CSS, fonts).
     pub resources: HashMap<String, Vec<u8>>,
+    /// CSS class → style map extracted from the EPUB's stylesheets.
+    pub styles: StyleMap,
 }
