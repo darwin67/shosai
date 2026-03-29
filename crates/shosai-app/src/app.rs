@@ -680,6 +680,7 @@ fn render_content_node<'a>(
                     bold: false,
                     italic: false,
                     monospace: false,
+                    link: None,
                 }];
                 all_spans.extend(item_spans.iter().cloned());
                 col = col.push(render_spans(&all_spans, font_size, text_color));
@@ -696,6 +697,7 @@ fn render_content_node<'a>(
                     bold: false,
                     italic: false,
                     monospace: false,
+                    link: None,
                 }];
                 all_spans.extend(item_spans.iter().cloned());
                 col = col.push(render_spans(&all_spans, font_size, text_color));
@@ -849,6 +851,13 @@ fn render_code_block<'a>(
     .into()
 }
 
+const LINK_COLOR: iced::Color = iced::Color {
+    r: 0.2,
+    g: 0.5,
+    b: 0.9,
+    a: 1.0,
+};
+
 fn render_spans<'a>(
     spans: &[shosai_core::epub::render::TextSpan],
     font_size: f32,
@@ -857,6 +866,7 @@ fn render_spans<'a>(
     let rich_spans: Vec<iced::widget::text::Span<'a, Message>> = spans
         .iter()
         .map(|s| {
+            let is_link = s.link.is_some();
             let family = if s.monospace {
                 iced::font::Family::Monospace
             } else {
@@ -876,10 +886,12 @@ fn render_spans<'a>(
                 },
                 ..Font::DEFAULT
             };
-            span(s.text.clone())
-                .size(font_size)
-                .font(font)
-                .color(text_color)
+            let color = if is_link { LINK_COLOR } else { text_color };
+            let mut sp = span(s.text.clone()).size(font_size).font(font).color(color);
+            if is_link {
+                sp = sp.underline(true);
+            }
+            sp
         })
         .collect();
 

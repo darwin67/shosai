@@ -11,6 +11,8 @@ pub struct TextSpan {
     pub bold: bool,
     pub italic: bool,
     pub monospace: bool,
+    /// If set, this span is a link to the given URL/href.
+    pub link: Option<String>,
 }
 
 /// A content node in the simplified document model.
@@ -79,6 +81,7 @@ fn parse_block_children(parent: roxmltree::Node, base_path: &str) -> Vec<Content
                         bold: false,
                         italic: false,
                         monospace: false,
+                        link: None,
                     }]));
                 }
             }
@@ -202,7 +205,7 @@ fn parse_list_items(list: &roxmltree::Node) -> Vec<Vec<TextSpan>> {
 /// Collect inline text spans with bold/italic formatting from an element.
 fn collect_inline_spans(element: &roxmltree::Node) -> Vec<TextSpan> {
     let mut spans = Vec::new();
-    collect_inline_spans_recursive(element, false, false, false, &mut spans);
+    collect_inline_spans_recursive(element, false, false, false, None, &mut spans);
 
     // Merge adjacent spans with the same formatting.
     merge_spans(&mut spans);
@@ -214,6 +217,7 @@ fn collect_inline_spans_recursive(
     bold: bool,
     italic: bool,
     monospace: bool,
+    link: Option<&str>,
     spans: &mut Vec<TextSpan>,
 ) {
     for child in node.children() {
@@ -225,17 +229,26 @@ fn collect_inline_spans_recursive(
                     bold,
                     italic,
                     monospace,
+                    link: link.map(|s| s.to_string()),
                 });
             }
         } else if child.is_element() {
-            let (b, i, m) = match child.tag_name().name() {
-                "b" | "strong" => (true, italic, monospace),
-                "i" | "em" | "cite" => (bold, true, monospace),
-                "bi" => (true, true, monospace),
-                "code" | "tt" | "samp" | "kbd" => (bold, italic, true),
-                _ => (bold, italic, monospace),
-            };
-            collect_inline_spans_recursive(&child, b, i, m, spans);
+            match child.tag_name().name() {
+                "a" => {
+                    let href = child.attribute("href");
+                    collect_inline_spans_recursive(&child, bold, italic, monospace, href, spans);
+                }
+                tag => {
+                    let (b, i, m) = match tag {
+                        "b" | "strong" => (true, italic, monospace),
+                        "i" | "em" | "cite" => (bold, true, monospace),
+                        "bi" => (true, true, monospace),
+                        "code" | "tt" | "samp" | "kbd" => (bold, italic, true),
+                        _ => (bold, italic, monospace),
+                    };
+                    collect_inline_spans_recursive(&child, b, i, m, link, spans);
+                }
+            }
         }
     }
 }
@@ -247,6 +260,7 @@ fn merge_spans(spans: &mut Vec<TextSpan>) {
         if spans[i].bold == spans[i + 1].bold
             && spans[i].italic == spans[i + 1].italic
             && spans[i].monospace == spans[i + 1].monospace
+            && spans[i].link == spans[i + 1].link
         {
             let next_text = spans[i + 1].text.clone();
             spans[i].text.push_str(&next_text);
@@ -476,6 +490,41 @@ mod tests {
                 let mono_span = spans.iter().find(|s| s.monospace);
                 assert!(mono_span.is_some(), "should have a monospace span");
                 assert_eq!(mono_span.unwrap().text, "println!");
+            }
+            other => panic!("expected Paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_link() {
+        let xhtml = r#"<html><body><p>Visit <a href="https://example.com">our site</a> today</p></body></html>"#;
+        let nodes = parse_chapter_xhtml(xhtml, "");
+        assert_eq!(nodes.len(), 1);
+        match &nodes[0] {
+            ContentNode::Paragraph(spans) => {
+                let link_span = spans.iter().find(|s| s.link.is_some());
+                assert!(link_span.is_some(), "should have a link span");
+                let link_span = link_span.unwrap();
+                assert_eq!(link_span.text, "our site");
+                assert_eq!(link_span.link.as_deref(), Some("https://example.com"));
+            }
+            other => panic!("expected Paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_bold_link() {
+        let xhtml =
+            r#"<html><body><p><a href="url"><strong>bold link</strong></a></p></body></html>"#;
+        let nodes = parse_chapter_xhtml(xhtml, "");
+        assert_eq!(nodes.len(), 1);
+        match &nodes[0] {
+            ContentNode::Paragraph(spans) => {
+                let link_span = spans.iter().find(|s| s.link.is_some());
+                assert!(link_span.is_some());
+                let link_span = link_span.unwrap();
+                assert!(link_span.bold, "link should be bold");
+                assert_eq!(link_span.link.as_deref(), Some("url"));
             }
             other => panic!("expected Paragraph, got {other:?}"),
         }
