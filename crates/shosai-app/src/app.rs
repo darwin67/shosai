@@ -714,25 +714,25 @@ fn save_reading_state(state: &State) {
         }
     }
 
-    if let (Some(lib), Some(path)) = (state.library.clone(), state.file_path.clone()) {
-        if state.total_pages > 0 {
-            let progress = (state.current_page + 1) as f64 / state.total_pages as f64;
-            let progress = progress.min(1.0).max(0.0);
-            tokio::task::spawn(async move {
-                let _ = lib.update_progress_by_path(&path, progress).await;
-            });
-        }
+    if let (Some(lib), Some(path)) = (state.library.clone(), state.file_path.clone())
+        && state.total_pages > 0
+    {
+        let progress = (state.current_page + 1) as f64 / state.total_pages as f64;
+        let progress = progress.clamp(0.0, 1.0);
+        tokio::task::spawn(async move {
+            let _ = lib.update_progress_by_path(&path, progress).await;
+        });
     }
 }
 
 fn save_library_cards_per_row(state: &State) {
-    if let Some(store) = &state.reading_state {
-        if let Err(e) = store.set_pref_int(
+    if let Some(store) = &state.reading_state
+        && let Err(e) = store.set_pref_int(
             LIBRARY_CARDS_PER_ROW_KEY,
             state.library_cards_per_row as i64,
-        ) {
-            eprintln!("warning: failed to save library layout: {e}");
-        }
+        )
+    {
+        eprintln!("warning: failed to save library layout: {e}");
     }
 }
 
