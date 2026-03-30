@@ -2,7 +2,7 @@
 //!
 //! Uses the same SQLite database as the reading state store.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use sqlx::Row;
@@ -80,7 +80,7 @@ impl Library {
     /// Extracts metadata and cover image from the file. If the file
     /// already exists in the library, returns its existing book entry.
     pub async fn import_file(&self, path: &Path) -> Result<Book> {
-        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let path = canonical_path(path);
         let path_str = path.to_string_lossy().to_string();
 
         // Check if already imported.
@@ -206,12 +206,29 @@ impl Library {
 
     /// Update reading progress (0.0 to 1.0) and last_read timestamp.
     pub async fn update_progress(&self, book_id: i64, progress: f64) -> Result<()> {
+        let progress = progress.clamp(0.0, 1.0);
         sqlx::query("UPDATE books SET progress = ?, last_read = datetime('now') WHERE id = ?")
             .bind(progress)
             .bind(book_id)
             .execute(&self.pool)
             .await
             .context("failed to update progress")?;
+        Ok(())
+    }
+
+    /// Update reading progress using a file path (0.0 to 1.0).
+    pub async fn update_progress_by_path(&self, path: &Path, progress: f64) -> Result<()> {
+        let progress = progress.clamp(0.0, 1.0);
+        let key = canonical_path(path).to_string_lossy().to_string();
+
+        sqlx::query(
+            "UPDATE books SET progress = ?, last_read = datetime('now') WHERE file_path = ?",
+        )
+        .bind(progress)
+        .bind(&key)
+        .execute(&self.pool)
+        .await
+        .context("failed to update progress by path")?;
         Ok(())
     }
 
@@ -256,6 +273,10 @@ fn row_to_book(row: &sqlx::sqlite::SqliteRow) -> Option<Book> {
         date_added: row.try_get("date_added").ok()?,
         last_read: row.try_get("last_read").ok()?,
     })
+}
+
+fn canonical_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 // ---------------------------------------------------------------------------

@@ -70,6 +70,11 @@ enum Screen {
     Reader,
 }
 
+const LIBRARY_CARDS_PER_ROW_MIN: usize = 2;
+const LIBRARY_CARDS_PER_ROW_MAX: usize = 8;
+const LIBRARY_CARDS_PER_ROW_DEFAULT: usize = 5;
+const LIBRARY_CARDS_PER_ROW_KEY: &str = "library.cards_per_row";
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -100,6 +105,7 @@ pub struct State {
     library_books: Vec<Book>,
     library_search: String,
     library_filter: Option<shosai_core::library::BookFormat>,
+    library_cards_per_row: usize,
 }
 
 /// Color theme for the EPUB reader.
@@ -186,6 +192,8 @@ pub enum Message {
     RemoveBook(i64),
     LibrarySearchChanged(String),
     LibraryFilterChanged(Option<shosai_core::library::BookFormat>),
+    LibraryCardsPerRowIncrement,
+    LibraryCardsPerRowDecrement,
 
     // Keyboard
     KeyPressed(keyboard::Event),
@@ -207,6 +215,15 @@ pub fn boot() -> (State, Task<Message>) {
     let library = reading_state
         .as_ref()
         .map(|store| Library::new(store.pool().clone()));
+
+    let library_cards_per_row = reading_state
+        .as_ref()
+        .and_then(|store| store.get_pref_int(LIBRARY_CARDS_PER_ROW_KEY))
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| {
+            (*value >= LIBRARY_CARDS_PER_ROW_MIN) && (*value <= LIBRARY_CARDS_PER_ROW_MAX)
+        })
+        .unwrap_or(LIBRARY_CARDS_PER_ROW_DEFAULT);
 
     let state = State {
         screen: Screen::Library,
@@ -230,6 +247,7 @@ pub fn boot() -> (State, Task<Message>) {
         library_books: Vec::new(),
         library_search: String::new(),
         library_filter: None,
+        library_cards_per_row,
     };
     (state, Task::done(Message::RefreshLibrary))
 }
@@ -452,6 +470,20 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         Message::LibraryFilterChanged(filter) => {
             state.library_filter = filter;
             return Task::done(Message::RefreshLibrary);
+        }
+
+        Message::LibraryCardsPerRowIncrement => {
+            if state.library_cards_per_row < LIBRARY_CARDS_PER_ROW_MAX {
+                state.library_cards_per_row += 1;
+                save_library_cards_per_row(state);
+            }
+        }
+
+        Message::LibraryCardsPerRowDecrement => {
+            if state.library_cards_per_row > LIBRARY_CARDS_PER_ROW_MIN {
+                state.library_cards_per_row -= 1;
+                save_library_cards_per_row(state);
+            }
         }
 
         Message::KeyPressed(event) => {
@@ -679,6 +711,27 @@ fn save_reading_state(state: &State) {
         };
         if let Err(e) = store.set(path, &reading) {
             eprintln!("warning: failed to save reading state: {e}");
+        }
+    }
+
+    if let (Some(lib), Some(path)) = (state.library.clone(), state.file_path.clone()) {
+        if state.total_pages > 0 {
+            let progress = (state.current_page + 1) as f64 / state.total_pages as f64;
+            let progress = progress.min(1.0).max(0.0);
+            tokio::task::spawn(async move {
+                let _ = lib.update_progress_by_path(&path, progress).await;
+            });
+        }
+    }
+}
+
+fn save_library_cards_per_row(state: &State) {
+    if let Some(store) = &state.reading_state {
+        if let Err(e) = store.set_pref_int(
+            LIBRARY_CARDS_PER_ROW_KEY,
+            state.library_cards_per_row as i64,
+        ) {
+            eprintln!("warning: failed to save library layout: {e}");
         }
     }
 }
@@ -1212,6 +1265,16 @@ fn library_view(state: &State) -> Element<'_, Message> {
     let import_btn = button("Import File").on_press(Message::ImportFile);
     let import_dir_btn = button("Import Folder").on_press(Message::ImportDirectory);
 
+    let mut per_row_down = button("-");
+    if state.library_cards_per_row > LIBRARY_CARDS_PER_ROW_MIN {
+        per_row_down = per_row_down.on_press(Message::LibraryCardsPerRowDecrement);
+    }
+    let mut per_row_up = button("+");
+    if state.library_cards_per_row < LIBRARY_CARDS_PER_ROW_MAX {
+        per_row_up = per_row_up.on_press(Message::LibraryCardsPerRowIncrement);
+    }
+    let per_row_label = text(format!("Per row: {}", state.library_cards_per_row)).size(14);
+
     let toolbar = row![
         text("Library").size(24),
         search_input,
@@ -1219,6 +1282,9 @@ fn library_view(state: &State) -> Element<'_, Message> {
         pdf_btn,
         epub_btn,
         cbz_btn,
+        per_row_down,
+        per_row_label,
+        per_row_up,
         import_btn,
         import_dir_btn,
     ]
@@ -1256,8 +1322,8 @@ fn library_view(state: &State) -> Element<'_, Message> {
     let cover_width = 150.0_f32;
     let cover_height = 200.0_f32;
 
-    // Build grid as rows of cards. Approximate 5 cards per row.
-    let cards_per_row = 5;
+    // Build grid as rows of cards.
+    let cards_per_row = state.library_cards_per_row;
     let mut grid = column![].spacing(12);
     let mut current_row: Vec<Element<'_, Message>> = Vec::new();
 

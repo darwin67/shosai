@@ -112,6 +112,21 @@ async fn test_update_progress() {
 }
 
 #[tokio::test]
+async fn test_update_progress_by_path() {
+    let (lib, _, _dir) = temp_library().await;
+    let book = lib.import_file(&fixture_path("sample.pdf")).await.unwrap();
+
+    lib.update_progress_by_path(&PathBuf::from(&book.file_path), 0.75)
+        .await
+        .unwrap();
+
+    let books = lib.list_all().await.unwrap();
+    let updated = books.iter().find(|b| b.id == book.id).unwrap();
+    assert!((updated.progress - 0.75).abs() < f64::EPSILON);
+    assert!(updated.last_read.is_some());
+}
+
+#[tokio::test]
 async fn test_remove() {
     let (lib, _, _dir) = temp_library().await;
     let book = lib.import_file(&fixture_path("sample.pdf")).await.unwrap();
