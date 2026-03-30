@@ -216,6 +216,7 @@ pub fn boot() -> (State, Task<Message>) {
         .as_ref()
         .map(|store| Library::new(store.pool().clone()));
 
+    // Load the last chosen layout density so the library feels consistent across launches.
     let library_cards_per_row = reading_state
         .as_ref()
         .and_then(|store| store.get_pref_int(LIBRARY_CARDS_PER_ROW_KEY))
@@ -473,6 +474,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         }
 
         Message::LibraryCardsPerRowIncrement => {
+            // Clamp within bounds to keep the grid readable on small windows.
             if state.library_cards_per_row < LIBRARY_CARDS_PER_ROW_MAX {
                 state.library_cards_per_row += 1;
                 save_library_cards_per_row(state);
@@ -480,6 +482,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         }
 
         Message::LibraryCardsPerRowDecrement => {
+            // Clamp within bounds to keep the grid readable on small windows.
             if state.library_cards_per_row > LIBRARY_CARDS_PER_ROW_MIN {
                 state.library_cards_per_row -= 1;
                 save_library_cards_per_row(state);
@@ -714,6 +717,8 @@ fn save_reading_state(state: &State) {
         }
     }
 
+    // Also update library progress so the library sort/order stays current.
+    // Use a background task to avoid blocking the UI thread on DB writes.
     if let (Some(lib), Some(path)) = (state.library.clone(), state.file_path.clone())
         && state.total_pages > 0
     {
@@ -726,6 +731,7 @@ fn save_reading_state(state: &State) {
 }
 
 fn save_library_cards_per_row(state: &State) {
+    // Persist the layout choice alongside reading state for quick reloads.
     if let Some(store) = &state.reading_state
         && let Err(e) = store.set_pref_int(
             LIBRARY_CARDS_PER_ROW_KEY,
@@ -1265,6 +1271,7 @@ fn library_view(state: &State) -> Element<'_, Message> {
     let import_btn = button("Import File").on_press(Message::ImportFile);
     let import_dir_btn = button("Import Folder").on_press(Message::ImportDirectory);
 
+    // Layout density controls: keeps the grid customizable without resizing cards.
     let mut per_row_down = button("-");
     if state.library_cards_per_row > LIBRARY_CARDS_PER_ROW_MIN {
         per_row_down = per_row_down.on_press(Message::LibraryCardsPerRowDecrement);

@@ -146,6 +146,7 @@ impl ReadingStateStore {
 
     /// Get a stored preference value as an integer.
     pub fn get_pref_int(&self, key: &str) -> Option<i64> {
+        // Preferences are stored as strings to keep the table flexible.
         let rt = tokio::runtime::Handle::current();
         rt.block_on(self.get_pref_int_async(key))
     }

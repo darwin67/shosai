@@ -80,6 +80,7 @@ impl Library {
     /// Extracts metadata and cover image from the file. If the file
     /// already exists in the library, returns its existing book entry.
     pub async fn import_file(&self, path: &Path) -> Result<Book> {
+        // Normalize paths so lookups and progress updates stay consistent.
         let path = canonical_path(path);
         let path_str = path.to_string_lossy().to_string();
 
@@ -218,6 +219,7 @@ impl Library {
 
     /// Update reading progress using a file path (0.0 to 1.0).
     pub async fn update_progress_by_path(&self, path: &Path, progress: f64) -> Result<()> {
+        // Use canonical paths so the reader and library always converge on one row.
         let progress = progress.clamp(0.0, 1.0);
         let key = canonical_path(path).to_string_lossy().to_string();
 
@@ -275,6 +277,7 @@ fn row_to_book(row: &sqlx::sqlite::SqliteRow) -> Option<Book> {
     })
 }
 
+/// Best-effort canonicalization used for stable database keys.
 fn canonical_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
