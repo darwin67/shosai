@@ -216,10 +216,10 @@ The separation of ~shosai-core~ and ~shosai-app~ ensures:
 - [X] 13 bookmark tests
 - [ ] Text highlighting (future): overlay-based for PDF, text selection for EPUB
 
-** TODO In-document search
-- [ ] PDF: text extraction from pages, search across document
-- [ ] EPUB: full-text search across chapters
-- [ ] Search results panel with navigation to matches
+** IN-PROGRESS In-document search
+- [X] PDF: text extraction from pages, search across document
+- [X] EPUB: full-text search across chapters
+- [X] Search results panel with navigation to matches
 - [ ] Highlight search matches in the reader view
 
 ** TODO Performance optimization
