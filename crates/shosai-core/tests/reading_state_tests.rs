@@ -182,6 +182,26 @@ async fn test_data_persists_across_opens() {
 }
 
 #[tokio::test]
+async fn test_preferences_persist_across_opens() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("shosai.db");
+
+    {
+        let store = ReadingStateStore::open_at_async(&db_path).await.unwrap();
+        store
+            .set_pref_int_async("library.cards_per_row", 6)
+            .await
+            .unwrap();
+    }
+
+    {
+        let store = ReadingStateStore::open_at_async(&db_path).await.unwrap();
+        let value = store.get_pref_int_async("library.cards_per_row").await;
+        assert_eq!(value, Some(6));
+    }
+}
+
+#[tokio::test]
 async fn test_migrations_are_idempotent() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("shosai.db");

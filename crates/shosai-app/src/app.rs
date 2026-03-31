@@ -6,9 +6,11 @@ use iced::widget::{
 };
 use iced::{Element, Font, Length, Subscription, Task};
 
+use shosai_core::cbz::CbzDoc;
 use shosai_core::document::{Document, RenderedPage};
 use shosai_core::epub::EpubDoc;
 use shosai_core::epub::render::{ContentNode, parse_chapter_xhtml};
+use shosai_core::library::{Book, Library};
 use shosai_core::pdf::PdfDoc;
 use shosai_core::reading_state::{FileReadingState, ReadingStateStore};
 
@@ -20,6 +22,7 @@ use shosai_core::reading_state::{FileReadingState, ReadingStateStore};
 enum OpenDocument {
     Pdf(PdfDoc),
     Epub(EpubDoc),
+    Cbz(CbzDoc),
 }
 
 // ---------------------------------------------------------------------------
@@ -58,33 +61,51 @@ impl Default for ZoomMode {
 }
 
 // ---------------------------------------------------------------------------
+// Screens
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Screen {
+    Library,
+    Reader,
+}
+
+const LIBRARY_CARDS_PER_ROW_MIN: usize = 2;
+const LIBRARY_CARDS_PER_ROW_MAX: usize = 8;
+const LIBRARY_CARDS_PER_ROW_DEFAULT: usize = 5;
+const LIBRARY_CARDS_PER_ROW_KEY: &str = "library.cards_per_row";
+
+// ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub struct State {
+    screen: Screen,
+
+    // -- Reader state --
     file_path: Option<PathBuf>,
     document: Option<OpenDocument>,
-    /// Current page (PDF) or chapter (EPUB) index (0-based).
     current_page: usize,
-    /// Total pages (PDF) or chapters (EPUB).
     total_pages: usize,
-    /// Zoom mode (PDF only).
     zoom: ZoomMode,
-    /// Cached rendered PDF page.
     rendered_page: Option<RenderedPage>,
-    /// Cached parsed EPUB chapter content nodes.
     chapter_content: Vec<ContentNode>,
-    /// Page/chapter input field text.
     page_input: String,
     error: Option<String>,
-    reading_state: Option<ReadingStateStore>,
-    /// EPUB font size in pixels.
     font_size: f32,
-    /// EPUB line spacing multiplier (1.0 = normal).
     line_spacing: f32,
-    /// Reader color theme.
     theme: ReaderTheme,
+
+    // -- Shared --
+    reading_state: Option<ReadingStateStore>,
+    library: Option<Library>,
+
+    // -- Library state --
+    library_books: Vec<Book>,
+    library_search: String,
+    library_filter: Option<shosai_core::library::BookFormat>,
+    library_cards_per_row: usize,
 }
 
 /// Color theme for the EPUB reader.
@@ -160,6 +181,20 @@ pub enum Message {
     // Links
     LinkClicked(String),
 
+    // Library
+    ShowLibrary,
+    RefreshLibrary,
+    LibraryLoaded(Vec<Book>),
+    ImportFile,
+    ImportDirectory,
+    OpenBook(String), // file_path
+    #[allow(dead_code)]
+    RemoveBook(i64),
+    LibrarySearchChanged(String),
+    LibraryFilterChanged(Option<shosai_core::library::BookFormat>),
+    LibraryCardsPerRowIncrement,
+    LibraryCardsPerRowDecrement,
+
     // Keyboard
     KeyPressed(keyboard::Event),
 }
@@ -177,7 +212,23 @@ pub fn boot() -> (State, Task<Message>) {
         }
     };
 
+    let library = reading_state
+        .as_ref()
+        .map(|store| Library::new(store.pool().clone()));
+
+    // Load the last chosen layout density so the library feels consistent across launches.
+    let library_cards_per_row = reading_state
+        .as_ref()
+        .and_then(|store| store.get_pref_int(LIBRARY_CARDS_PER_ROW_KEY))
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| {
+            (*value >= LIBRARY_CARDS_PER_ROW_MIN) && (*value <= LIBRARY_CARDS_PER_ROW_MAX)
+        })
+        .unwrap_or(LIBRARY_CARDS_PER_ROW_DEFAULT);
+
     let state = State {
+        screen: Screen::Library,
+
         file_path: None,
         document: None,
         current_page: 0,
@@ -187,12 +238,19 @@ pub fn boot() -> (State, Task<Message>) {
         chapter_content: Vec::new(),
         page_input: String::new(),
         error: None,
-        reading_state,
         font_size: 16.0,
         line_spacing: 1.6,
         theme: ReaderTheme::default(),
+
+        reading_state,
+        library,
+
+        library_books: Vec::new(),
+        library_search: String::new(),
+        library_filter: None,
+        library_cards_per_row,
     };
-    (state, Task::none())
+    (state, Task::done(Message::RefreshLibrary))
 }
 
 // ---------------------------------------------------------------------------
@@ -205,9 +263,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             return Task::perform(
                 async {
                     let file = rfd::AsyncFileDialog::new()
-                        .add_filter("Ebooks", &["pdf", "epub"])
+                        .add_filter("Ebooks", &["pdf", "epub", "cbz"])
                         .add_filter("PDF", &["pdf"])
                         .add_filter("EPUB", &["epub"])
+                        .add_filter("CBZ", &["cbz"])
                         .set_title("Open File")
                         .pick_file()
                         .await;
@@ -259,7 +318,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         }
 
         Message::ZoomIn => {
-            if matches!(state.document, Some(OpenDocument::Pdf(_))) {
+            if matches!(
+                state.document,
+                Some(OpenDocument::Pdf(_)) | Some(OpenDocument::Cbz(_))
+            ) {
                 let new_scale = (state.zoom.scale() + 0.25).min(5.0);
                 state.zoom = ZoomMode::Manual(new_scale);
                 refresh_content(state);
@@ -268,7 +330,10 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         }
 
         Message::ZoomOut => {
-            if matches!(state.document, Some(OpenDocument::Pdf(_))) {
+            if matches!(
+                state.document,
+                Some(OpenDocument::Pdf(_)) | Some(OpenDocument::Cbz(_))
+            ) {
                 let new_scale = (state.zoom.scale() - 0.25).max(0.25);
                 state.zoom = ZoomMode::Manual(new_scale);
                 refresh_content(state);
@@ -304,8 +369,128 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             handle_link_click(state, &href);
         }
 
+        // Library
+        Message::ShowLibrary => {
+            state.screen = Screen::Library;
+            return Task::done(Message::RefreshLibrary);
+        }
+
+        Message::RefreshLibrary => {
+            if let Some(lib) = state.library.clone() {
+                let search = state.library_search.clone();
+                let filter = state.library_filter;
+                return Task::perform(
+                    async move {
+                        if !search.is_empty() {
+                            lib.search(&search).await.unwrap_or_default()
+                        } else if let Some(fmt) = filter {
+                            lib.filter_by_format(fmt).await.unwrap_or_default()
+                        } else {
+                            lib.list_all().await.unwrap_or_default()
+                        }
+                    },
+                    Message::LibraryLoaded,
+                );
+            }
+        }
+
+        Message::LibraryLoaded(books) => {
+            state.library_books = books;
+        }
+
+        Message::ImportFile => {
+            return Task::perform(
+                async {
+                    let file = rfd::AsyncFileDialog::new()
+                        .add_filter("Ebooks", &["pdf", "epub", "cbz"])
+                        .set_title("Import to Library")
+                        .pick_file()
+                        .await;
+                    file.map(|f| f.path().to_path_buf())
+                },
+                |path| {
+                    if let Some(p) = path {
+                        Message::OpenBook(p.to_string_lossy().to_string())
+                    } else {
+                        Message::RefreshLibrary // no-op refresh
+                    }
+                },
+            );
+        }
+
+        Message::ImportDirectory => {
+            if let Some(lib) = state.library.clone() {
+                return Task::perform(
+                    async move {
+                        let dir = rfd::AsyncFileDialog::new()
+                            .set_title("Import Directory")
+                            .pick_folder()
+                            .await;
+                        if let Some(d) = dir {
+                            let _ = lib.import_directory(d.path()).await;
+                        }
+                        // Return the updated list.
+                        lib.list_all().await.unwrap_or_default()
+                    },
+                    Message::LibraryLoaded,
+                );
+            }
+        }
+
+        Message::OpenBook(file_path) => {
+            let path = PathBuf::from(&file_path);
+            // Import to library if not already there.
+            if let Some(lib) = state.library.clone() {
+                let p = path.clone();
+                // Fire-and-forget import.
+                tokio::task::spawn(async move {
+                    let _ = lib.import_file(&p).await;
+                });
+            }
+            open_file(state, path);
+            state.screen = Screen::Reader;
+        }
+
+        Message::RemoveBook(id) => {
+            if let Some(lib) = state.library.clone() {
+                return Task::perform(
+                    async move {
+                        let _ = lib.remove(id).await;
+                        lib.list_all().await.unwrap_or_default()
+                    },
+                    Message::LibraryLoaded,
+                );
+            }
+        }
+
+        Message::LibrarySearchChanged(query) => {
+            state.library_search = query;
+            return Task::done(Message::RefreshLibrary);
+        }
+
+        Message::LibraryFilterChanged(filter) => {
+            state.library_filter = filter;
+            return Task::done(Message::RefreshLibrary);
+        }
+
+        Message::LibraryCardsPerRowIncrement => {
+            // Clamp within bounds to keep the grid readable on small windows.
+            if state.library_cards_per_row < LIBRARY_CARDS_PER_ROW_MAX {
+                state.library_cards_per_row += 1;
+                save_library_cards_per_row(state);
+            }
+        }
+
+        Message::LibraryCardsPerRowDecrement => {
+            // Clamp within bounds to keep the grid readable on small windows.
+            if state.library_cards_per_row > LIBRARY_CARDS_PER_ROW_MIN {
+                state.library_cards_per_row -= 1;
+                save_library_cards_per_row(state);
+            }
+        }
+
         Message::KeyPressed(event) => {
-            return handle_key_event(event);
+            return handle_key_event(state, event);
         }
     }
 
@@ -339,6 +524,14 @@ fn open_file(state: &mut State, path: PathBuf) {
             }
             Err(e) => Err(format!("Failed to open EPUB: {e}")),
         },
+        "cbz" => match CbzDoc::open(&path) {
+            Ok(doc) => {
+                state.total_pages = doc.page_count();
+                state.document = Some(OpenDocument::Cbz(doc));
+                Ok(())
+            }
+            Err(e) => Err(format!("Failed to open CBZ: {e}")),
+        },
         _ => Err(format!("Unsupported file format: .{ext}")),
     };
 
@@ -351,7 +544,10 @@ fn open_file(state: &mut State, path: PathBuf) {
                 .and_then(|store| store.get(&path));
             if let Some(saved) = saved {
                 state.current_page = saved.page.min(state.total_pages.saturating_sub(1));
-                if matches!(state.document, Some(OpenDocument::Pdf(_))) {
+                if matches!(
+                    state.document,
+                    Some(OpenDocument::Pdf(_)) | Some(OpenDocument::Cbz(_))
+                ) {
                     state.zoom = ZoomMode::Manual(saved.zoom);
                 }
             } else {
@@ -369,9 +565,16 @@ fn open_file(state: &mut State, path: PathBuf) {
     }
 }
 
-fn handle_key_event(event: keyboard::Event) -> Task<Message> {
+fn handle_key_event(state: &State, event: keyboard::Event) -> Task<Message> {
     if let keyboard::Event::KeyPressed { key, modifiers, .. } = event {
         match key.as_ref() {
+            // Escape: go back to library from reader
+            keyboard::Key::Named(keyboard::key::Named::Escape) => {
+                if state.screen == Screen::Reader {
+                    return Task::done(Message::ShowLibrary);
+                }
+            }
+
             keyboard::Key::Named(keyboard::key::Named::ArrowRight)
             | keyboard::Key::Named(keyboard::key::Named::PageDown) => {
                 return Task::done(Message::NextPage);
@@ -485,6 +688,20 @@ fn refresh_content(state: &mut State) {
                 state.error = Some(format!("Chapter {} not found", state.current_page));
             }
         }
+        Some(OpenDocument::Cbz(doc)) => {
+            let scale = state.zoom.scale();
+            match doc.render_page(state.current_page, scale) {
+                Ok(page) => {
+                    state.rendered_page = Some(page);
+                    state.chapter_content = Vec::new();
+                    state.error = None;
+                }
+                Err(e) => {
+                    state.error = Some(format!("Failed to render page: {e}"));
+                    state.rendered_page = None;
+                }
+            }
+        }
         None => {}
     }
 }
@@ -499,6 +716,30 @@ fn save_reading_state(state: &State) {
             eprintln!("warning: failed to save reading state: {e}");
         }
     }
+
+    // Also update library progress so the library sort/order stays current.
+    // Use a background task to avoid blocking the UI thread on DB writes.
+    if let (Some(lib), Some(path)) = (state.library.clone(), state.file_path.clone())
+        && state.total_pages > 0
+    {
+        let progress = (state.current_page + 1) as f64 / state.total_pages as f64;
+        let progress = progress.clamp(0.0, 1.0);
+        tokio::task::spawn(async move {
+            let _ = lib.update_progress_by_path(&path, progress).await;
+        });
+    }
+}
+
+fn save_library_cards_per_row(state: &State) {
+    // Persist the layout choice alongside reading state for quick reloads.
+    if let Some(store) = &state.reading_state
+        && let Err(e) = store.set_pref_int(
+            LIBRARY_CARDS_PER_ROW_KEY,
+            state.library_cards_per_row as i64,
+        )
+    {
+        eprintln!("warning: failed to save library layout: {e}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -506,19 +747,26 @@ fn save_reading_state(state: &State) {
 // ---------------------------------------------------------------------------
 
 pub fn view(state: &State) -> Element<'_, Message> {
-    let content = column![toolbar(state), content_view(state)]
-        .spacing(0)
-        .width(Length::Fill)
-        .height(Length::Fill);
-
-    content.into()
+    match state.screen {
+        Screen::Library => library_view(state),
+        Screen::Reader => {
+            let content = column![toolbar(state), content_view(state)]
+                .spacing(0)
+                .width(Length::Fill)
+                .height(Length::Fill);
+            content.into()
+        }
+    }
 }
 
 fn toolbar(state: &State) -> Element<'_, Message> {
     let open_btn = button("Open").on_press(Message::OpenFile);
 
     let has_doc = state.document.is_some();
-    let is_pdf = matches!(state.document, Some(OpenDocument::Pdf(_)));
+    let is_pdf_or_cbz = matches!(
+        state.document,
+        Some(OpenDocument::Pdf(_)) | Some(OpenDocument::Cbz(_))
+    );
     let is_epub = matches!(state.document, Some(OpenDocument::Epub(_)));
     let can_prev = has_doc && state.current_page > 0;
     let can_next = has_doc && state.current_page + 1 < state.total_pages;
@@ -533,7 +781,7 @@ fn toolbar(state: &State) -> Element<'_, Message> {
         next_btn = next_btn.on_press(Message::NextPage);
     }
 
-    let nav_label = if is_epub { "Ch" } else { "Page" };
+    let nav_label = if is_epub { "Ch" } else { "Pg" };
 
     let page_input = text_input(nav_label, &state.page_input)
         .on_input(Message::PageInputChanged)
@@ -546,7 +794,10 @@ fn toolbar(state: &State) -> Element<'_, Message> {
         String::new()
     });
 
+    let library_btn = button("Library").on_press(Message::ShowLibrary);
+
     let mut toolbar_items: Vec<Element<'_, Message>> = vec![
+        library_btn.into(),
         open_btn.into(),
         prev_btn.into(),
         page_input.into(),
@@ -555,21 +806,21 @@ fn toolbar(state: &State) -> Element<'_, Message> {
     ];
 
     // PDF: zoom controls
-    if is_pdf || !has_doc {
-        let zoom_out_btn = if is_pdf {
+    if is_pdf_or_cbz || !has_doc {
+        let zoom_out_btn = if is_pdf_or_cbz {
             button("-").on_press(Message::ZoomOut)
         } else {
             button("-")
         };
         let zoom_label = text(state.zoom.label()).width(70);
-        let zoom_in_btn = if is_pdf {
+        let zoom_in_btn = if is_pdf_or_cbz {
             button("+").on_press(Message::ZoomIn)
         } else {
             button("+")
         };
         let mut fit_w = button("W");
         let mut fit_p = button("P");
-        if is_pdf {
+        if is_pdf_or_cbz {
             fit_w = fit_w.on_press(Message::SetZoomFitWidth);
             fit_p = fit_p.on_press(Message::SetZoomFitPage);
         }
@@ -610,7 +861,7 @@ fn content_view(state: &State) -> Element<'_, Message> {
     }
 
     match &state.document {
-        Some(OpenDocument::Pdf(_)) => pdf_page_view(state),
+        Some(OpenDocument::Pdf(_) | OpenDocument::Cbz(_)) => pdf_page_view(state),
         Some(OpenDocument::Epub(_)) => epub_chapter_view(state),
         None => welcome_view(),
     }
@@ -1002,11 +1253,168 @@ fn render_spans<'a>(
         .into()
 }
 
+fn library_view(state: &State) -> Element<'_, Message> {
+    let search_input = text_input("Search by title or author...", &state.library_search)
+        .on_input(Message::LibrarySearchChanged)
+        .width(300);
+
+    let all_btn = button("All").on_press(Message::LibraryFilterChanged(None));
+    let pdf_btn = button("PDF").on_press(Message::LibraryFilterChanged(Some(
+        shosai_core::library::BookFormat::Pdf,
+    )));
+    let epub_btn = button("EPUB").on_press(Message::LibraryFilterChanged(Some(
+        shosai_core::library::BookFormat::Epub,
+    )));
+    let cbz_btn = button("CBZ").on_press(Message::LibraryFilterChanged(Some(
+        shosai_core::library::BookFormat::Cbz,
+    )));
+    let import_btn = button("Import File").on_press(Message::ImportFile);
+    let import_dir_btn = button("Import Folder").on_press(Message::ImportDirectory);
+
+    // Layout density controls: keeps the grid customizable without resizing cards.
+    let mut per_row_down = button("-");
+    if state.library_cards_per_row > LIBRARY_CARDS_PER_ROW_MIN {
+        per_row_down = per_row_down.on_press(Message::LibraryCardsPerRowDecrement);
+    }
+    let mut per_row_up = button("+");
+    if state.library_cards_per_row < LIBRARY_CARDS_PER_ROW_MAX {
+        per_row_up = per_row_up.on_press(Message::LibraryCardsPerRowIncrement);
+    }
+    let per_row_label = text(format!("Per row: {}", state.library_cards_per_row)).size(14);
+
+    let toolbar = row![
+        text("Library").size(24),
+        search_input,
+        all_btn,
+        pdf_btn,
+        epub_btn,
+        cbz_btn,
+        per_row_down,
+        per_row_label,
+        per_row_up,
+        import_btn,
+        import_dir_btn,
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+
+    let header = container(toolbar).padding(12).width(Length::Fill);
+
+    if state.library_books.is_empty() {
+        let empty_msg = if state.library_search.is_empty() && state.library_filter.is_none() {
+            "No books in library. Import files to get started."
+        } else {
+            "No books match your search or filter."
+        };
+
+        return column![
+            header,
+            center(
+                column![
+                    text("Shosai (書斎)").size(32),
+                    text(empty_msg).size(16),
+                    button("Import File").on_press(Message::ImportFile),
+                    button("Import Folder").on_press(Message::ImportDirectory),
+                ]
+                .spacing(16)
+                .align_x(iced::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill),
+        ]
+        .into();
+    }
+
+    // Grid of book covers (wrap flow).
+    let cover_width = 150.0_f32;
+    let cover_height = 200.0_f32;
+
+    // Build grid as rows of cards.
+    let cards_per_row = state.library_cards_per_row;
+    let mut grid = column![].spacing(12);
+    let mut current_row: Vec<Element<'_, Message>> = Vec::new();
+
+    for book in &state.library_books {
+        current_row.push(render_book_card(book, cover_width, cover_height));
+        if current_row.len() >= cards_per_row {
+            grid = grid.push(row(std::mem::take(&mut current_row)).spacing(12));
+        }
+    }
+    if !current_row.is_empty() {
+        grid = grid.push(row(current_row).spacing(12));
+    }
+
+    let content = scrollable(container(grid).padding(12).width(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    column![header, content].into()
+}
+
+fn render_book_card<'a>(book: &Book, width: f32, height: f32) -> Element<'a, Message> {
+    let file_path = book.file_path.clone();
+
+    // Cover image or placeholder.
+    let cover: Element<'_, Message> = if let Some(ref cover_data) = book.cover {
+        if let Ok(img) = ::image::load_from_memory(cover_data) {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            let handle = image::Handle::from_rgba(w, h, rgba.into_raw());
+            image(handle)
+                .width(Length::Fixed(width))
+                .height(Length::Fixed(height))
+                .content_fit(iced::ContentFit::Cover)
+                .into()
+        } else {
+            cover_placeholder(width, height, &book.title)
+        }
+    } else {
+        cover_placeholder(width, height, &book.title)
+    };
+
+    let title_text = text(book.title.clone())
+        .size(12)
+        .wrapping(iced::widget::text::Wrapping::WordOrGlyph);
+
+    let format_label = text(book.format.as_str().to_uppercase()).size(10);
+
+    let card = column![cover, title_text, format_label]
+        .spacing(4)
+        .width(Length::Fixed(width));
+
+    button(card)
+        .on_press(Message::OpenBook(file_path))
+        .padding(4)
+        .width(Length::Fixed(width + 8.0))
+        .into()
+}
+
+fn cover_placeholder<'a>(width: f32, height: f32, title: &str) -> Element<'a, Message> {
+    let label = text(title.chars().take(20).collect::<String>())
+        .size(14)
+        .color(iced::Color::WHITE);
+
+    container(center(label))
+        .width(Length::Fixed(width))
+        .height(Length::Fixed(height))
+        .style(|_theme| container::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgb(
+                0.3, 0.3, 0.4,
+            ))),
+            border: iced::Border {
+                radius: 4.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
 fn welcome_view<'a>() -> Element<'a, Message> {
     center(
         column![
             text("Shosai (書斎)").size(32),
-            text("Open a PDF or EPUB file to start reading").size(16),
+            text("Open a PDF, EPUB, or CBZ file to start reading").size(16),
             button("Open File").on_press(Message::OpenFile),
         ]
         .spacing(20)

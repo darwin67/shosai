@@ -36,6 +36,14 @@ pub struct ReadingStateStore {
 }
 
 impl ReadingStateStore {
+    /// Get a reference to the underlying connection pool.
+    ///
+    /// This allows sharing the pool with other modules (e.g. the library)
+    /// that use the same database.
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     /// Open (or create) the store at the default platform path.
     pub fn open() -> Result<Self> {
         let rt = tokio::runtime::Handle::current();
@@ -132,6 +140,48 @@ impl ReadingStateStore {
         .execute(&self.pool)
         .await
         .context("failed to save reading state")?;
+
+        Ok(())
+    }
+
+    /// Get a stored preference value as an integer.
+    pub fn get_pref_int(&self, key: &str) -> Option<i64> {
+        // Preferences are stored as strings to keep the table flexible.
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(self.get_pref_int_async(key))
+    }
+
+    /// Set a stored preference value as an integer.
+    pub fn set_pref_int(&self, key: &str, value: i64) -> Result<()> {
+        let rt = tokio::runtime::Handle::current();
+        rt.block_on(self.set_pref_int_async(key, value))
+    }
+
+    /// Async: get a preference value as an integer.
+    pub async fn get_pref_int_async(&self, key: &str) -> Option<i64> {
+        sqlx::query("SELECT value FROM preferences WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|row| row.get::<String, _>("value").parse::<i64>().ok())
+    }
+
+    /// Async: set a preference value as an integer.
+    pub async fn set_pref_int_async(&self, key: &str, value: i64) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO preferences (key, value, updated_at)
+             VALUES (?, ?, datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at",
+        )
+        .bind(key)
+        .bind(value.to_string())
+        .execute(&self.pool)
+        .await
+        .context("failed to save preference")?;
 
         Ok(())
     }
