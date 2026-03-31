@@ -1,3 +1,4 @@
+pub mod bookmarks;
 pub mod cbz;
 pub mod document;
 pub mod epub;

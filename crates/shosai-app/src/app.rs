@@ -6,6 +6,7 @@ use iced::widget::{
 };
 use iced::{Element, Font, Length, Subscription, Task};
 
+use shosai_core::bookmarks::{Bookmark, BookmarkStore};
 use shosai_core::cbz::CbzDoc;
 use shosai_core::document::{Document, RenderedPage};
 use shosai_core::epub::EpubDoc;
@@ -100,6 +101,14 @@ pub struct State {
     // -- Shared --
     reading_state: Option<ReadingStateStore>,
     library: Option<Library>,
+    bookmark_store: Option<BookmarkStore>,
+
+    // -- Bookmarks --
+    bookmarks: Vec<Bookmark>,
+    show_bookmarks_panel: bool,
+    current_page_bookmarked: bool,
+    editing_note_id: Option<i64>,
+    editing_note_text: String,
 
     // -- Library state --
     library_books: Vec<Book>,
@@ -195,6 +204,18 @@ pub enum Message {
     LibraryCardsPerRowIncrement,
     LibraryCardsPerRowDecrement,
 
+    // Bookmarks
+    ToggleBookmark,
+    ToggleBookmarksPanel,
+    BookmarksLoaded(Vec<Bookmark>),
+    GoToBookmark(usize), // page index
+    StartEditNote(i64, String),
+    EditNoteChanged(String),
+    SaveNote,
+    CancelEditNote,
+    DeleteBookmark(i64),
+    ExportBookmarks,
+
     // Keyboard
     KeyPressed(keyboard::Event),
 }
@@ -242,8 +263,18 @@ pub fn boot() -> (State, Task<Message>) {
         line_spacing: 1.6,
         theme: ReaderTheme::default(),
 
+        bookmark_store: reading_state
+            .as_ref()
+            .map(|s| BookmarkStore::new(s.pool().clone())),
+
         reading_state,
         library,
+
+        bookmarks: Vec::new(),
+        show_bookmarks_panel: false,
+        current_page_bookmarked: false,
+        editing_note_id: None,
+        editing_note_text: String::new(),
 
         library_books: Vec::new(),
         library_search: String::new(),
@@ -489,6 +520,102 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             }
         }
 
+        // Bookmarks
+        Message::ToggleBookmark => {
+            if let (Some(path), Some(store)) = (&state.file_path, &state.bookmark_store) {
+                let page_title = format!("Page {}", state.current_page + 1);
+                match store.toggle(path, state.current_page, Some(&page_title)) {
+                    Ok(Some(_)) => state.current_page_bookmarked = true,
+                    Ok(None) => state.current_page_bookmarked = false,
+                    Err(e) => eprintln!("warning: failed to toggle bookmark: {e}"),
+                }
+                return refresh_bookmarks(state);
+            }
+        }
+
+        Message::ToggleBookmarksPanel => {
+            state.show_bookmarks_panel = !state.show_bookmarks_panel;
+            if state.show_bookmarks_panel {
+                return refresh_bookmarks(state);
+            }
+        }
+
+        Message::BookmarksLoaded(bookmarks) => {
+            state.bookmarks = bookmarks;
+            // Update current page bookmark status.
+            if let Some(path) = &state.file_path
+                && let Some(store) = &state.bookmark_store
+            {
+                state.current_page_bookmarked = store.is_bookmarked(path, state.current_page);
+            }
+        }
+
+        Message::GoToBookmark(page) => {
+            state.current_page = page;
+            state.page_input = format!("{}", page + 1);
+            refresh_content(state);
+            save_reading_state(state);
+            update_bookmark_status(state);
+        }
+
+        Message::StartEditNote(id, existing) => {
+            state.editing_note_id = Some(id);
+            state.editing_note_text = existing;
+        }
+
+        Message::EditNoteChanged(text) => {
+            state.editing_note_text = text;
+        }
+
+        Message::SaveNote => {
+            if let (Some(id), Some(store)) = (state.editing_note_id, &state.bookmark_store) {
+                let note = if state.editing_note_text.is_empty() {
+                    None
+                } else {
+                    Some(state.editing_note_text.as_str())
+                };
+                let rt = tokio::runtime::Handle::current();
+                if let Err(e) = rt.block_on(store.update_note_async(id, note)) {
+                    eprintln!("warning: failed to save note: {e}");
+                }
+            }
+            state.editing_note_id = None;
+            state.editing_note_text = String::new();
+            return refresh_bookmarks(state);
+        }
+
+        Message::CancelEditNote => {
+            state.editing_note_id = None;
+            state.editing_note_text = String::new();
+        }
+
+        Message::DeleteBookmark(id) => {
+            if let Some(store) = &state.bookmark_store {
+                let rt = tokio::runtime::Handle::current();
+                if let Err(e) = rt.block_on(store.remove_async(id)) {
+                    eprintln!("warning: failed to delete bookmark: {e}");
+                }
+            }
+            return refresh_bookmarks(state);
+        }
+
+        Message::ExportBookmarks => {
+            if let (Some(path), Some(store)) = (&state.file_path, &state.bookmark_store) {
+                match store.export_markdown(path) {
+                    Ok(md) => {
+                        // Save to file next to the document.
+                        let export_path = path.with_extension("bookmarks.md");
+                        if let Err(e) = std::fs::write(&export_path, &md) {
+                            eprintln!("warning: failed to export bookmarks: {e}");
+                        } else {
+                            eprintln!("Bookmarks exported to {}", export_path.display());
+                        }
+                    }
+                    Err(e) => eprintln!("warning: failed to export bookmarks: {e}"),
+                }
+            }
+        }
+
         Message::KeyPressed(event) => {
             return handle_key_event(state, event);
         }
@@ -558,6 +685,11 @@ fn open_file(state: &mut State, path: PathBuf) {
             state.page_input = format!("{}", state.current_page + 1);
             state.file_path = Some(path);
             refresh_content(state);
+            update_bookmark_status(state);
+            // Load bookmarks for this file.
+            if let (Some(p), Some(store)) = (&state.file_path, &state.bookmark_store) {
+                state.bookmarks = store.list_for_file(p).unwrap_or_default();
+            }
         }
         Err(msg) => {
             state.error = Some(msg);
@@ -593,6 +725,20 @@ fn handle_key_event(state: &State, event: keyboard::Event) -> Task<Message> {
 
             keyboard::Key::Character(c) if c == "o" && modifiers.command() => {
                 return Task::done(Message::OpenFile);
+            }
+
+            // Ctrl+B: toggle bookmark on current page
+            keyboard::Key::Character(c) if c == "b" && modifiers.command() => {
+                if state.screen == Screen::Reader {
+                    return Task::done(Message::ToggleBookmark);
+                }
+            }
+
+            // B: toggle bookmarks panel
+            keyboard::Key::Character(c) if c == "b" && !modifiers.command() => {
+                if state.screen == Screen::Reader {
+                    return Task::done(Message::ToggleBookmarksPanel);
+                }
             }
 
             _ => {}
@@ -704,6 +850,29 @@ fn refresh_content(state: &mut State) {
         }
         None => {}
     }
+
+    update_bookmark_status(state);
+}
+
+fn refresh_bookmarks(state: &State) -> Task<Message> {
+    if let (Some(path), Some(store)) = (&state.file_path, &state.bookmark_store) {
+        let store = store.clone();
+        let path = path.clone();
+        Task::perform(
+            async move { store.list_for_file_async(&path).await.unwrap_or_default() },
+            Message::BookmarksLoaded,
+        )
+    } else {
+        Task::none()
+    }
+}
+
+fn update_bookmark_status(state: &mut State) {
+    if let (Some(path), Some(store)) = (&state.file_path, &state.bookmark_store) {
+        state.current_page_bookmarked = store.is_bookmarked(path, state.current_page);
+    } else {
+        state.current_page_bookmarked = false;
+    }
 }
 
 fn save_reading_state(state: &State) {
@@ -750,11 +919,27 @@ pub fn view(state: &State) -> Element<'_, Message> {
     match state.screen {
         Screen::Library => library_view(state),
         Screen::Reader => {
-            let content = column![toolbar(state), content_view(state)]
+            let main_content = content_view(state);
+
+            let body: Element<'_, Message> = if state.show_bookmarks_panel {
+                row![
+                    container(main_content)
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                    bookmarks_panel(state),
+                ]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+            } else {
+                main_content
+            };
+
+            column![toolbar(state), body]
                 .spacing(0)
                 .width(Length::Fill)
-                .height(Length::Fill);
-            content.into()
+                .height(Length::Fill)
+                .into()
         }
     }
 }
@@ -845,11 +1030,127 @@ fn toolbar(state: &State) -> Element<'_, Message> {
         );
     }
 
+    // Bookmark controls (for all formats when a doc is open)
+    if has_doc {
+        let bookmark_label = if state.current_page_bookmarked {
+            "\u{2605}" // filled star
+        } else {
+            "\u{2606}" // empty star
+        };
+        toolbar_items.push(
+            button(bookmark_label)
+                .on_press(Message::ToggleBookmark)
+                .into(),
+        );
+        let panel_label = if state.show_bookmarks_panel {
+            "Hide BM"
+        } else {
+            "Show BM"
+        };
+        toolbar_items.push(
+            button(panel_label)
+                .on_press(Message::ToggleBookmarksPanel)
+                .into(),
+        );
+    }
+
     let toolbar_row = row(toolbar_items)
         .spacing(8)
         .align_y(iced::Alignment::Center);
 
     container(toolbar_row).padding(8).width(Length::Fill).into()
+}
+
+fn bookmarks_panel(state: &State) -> Element<'_, Message> {
+    let mut panel = column![text("Bookmarks").size(16)]
+        .spacing(8)
+        .padding(8)
+        .width(Length::Fixed(280.0));
+
+    if state.bookmarks.is_empty() {
+        panel = panel.push(text("No bookmarks yet").size(12));
+    } else {
+        for bm in &state.bookmarks {
+            let title = bm
+                .title
+                .clone()
+                .unwrap_or_else(|| format!("Pg {}", bm.page + 1));
+
+            let is_editing = state.editing_note_id == Some(bm.id);
+
+            let mut entry_col = column![].spacing(4);
+
+            // Header row: title + page + delete button
+            let header = row![
+                button(text(title).size(12))
+                    .on_press(Message::GoToBookmark(bm.page))
+                    .padding(2),
+                text(format!("p.{}", bm.page + 1)).size(10),
+                button(text("\u{2715}").size(10))
+                    .on_press(Message::DeleteBookmark(bm.id))
+                    .padding(2),
+            ]
+            .spacing(4)
+            .align_y(iced::Alignment::Center);
+
+            entry_col = entry_col.push(header);
+
+            if is_editing {
+                // Note editing mode
+                let input = text_input("Add a note...", &state.editing_note_text)
+                    .on_input(Message::EditNoteChanged)
+                    .on_submit(Message::SaveNote)
+                    .size(12)
+                    .width(Length::Fill);
+                let cancel_btn = button(text("Cancel").size(10))
+                    .on_press(Message::CancelEditNote)
+                    .padding(2);
+                let save_btn = button(text("Save").size(10))
+                    .on_press(Message::SaveNote)
+                    .padding(2);
+                entry_col = entry_col.push(input);
+                entry_col = entry_col.push(row![save_btn, cancel_btn].spacing(4));
+            } else {
+                // Display note or "Add note" button
+                if let Some(note) = &bm.note {
+                    entry_col = entry_col.push(text(note.clone()).size(11));
+                }
+                let edit_label = if bm.note.is_some() {
+                    "Edit note"
+                } else {
+                    "Add note"
+                };
+                let existing_note = bm.note.clone().unwrap_or_default();
+                entry_col = entry_col.push(
+                    button(text(edit_label).size(10))
+                        .on_press(Message::StartEditNote(bm.id, existing_note))
+                        .padding(2),
+                );
+            }
+
+            panel = panel.push(container(entry_col).padding(4).width(Length::Fill));
+        }
+    }
+
+    // Export button at the bottom
+    if !state.bookmarks.is_empty() {
+        panel = panel.push(
+            button(text("Export as Markdown").size(11))
+                .on_press(Message::ExportBookmarks)
+                .padding(4),
+        );
+    }
+
+    container(scrollable(panel).height(Length::Fill))
+        .width(Length::Fixed(280.0))
+        .height(Length::Fill)
+        .style(|_theme| container::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgb(
+                0.95, 0.95, 0.95,
+            ))),
+            ..Default::default()
+        })
+        .into()
 }
 
 fn content_view(state: &State) -> Element<'_, Message> {
