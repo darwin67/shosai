@@ -207,14 +207,14 @@ The separation of ~shosai-core~ and ~shosai-app~ ensures:
 
 *Goal*: Make it a daily-driver reader.
 
-** TODO Bookmarks & annotations
-- [ ] Bookmark pages / chapters
-- [ ] Text highlighting:
-  - PDF: overlay-based highlighting on rendered page
-  - EPUB: text selection within rendered content
-- [ ] Notes attached to bookmarks / highlights
-- [ ] Store in SQLite database
-- [ ] Export bookmarks / notes (plain text, JSON, or Markdown)
+** DONE Bookmarks & annotations
+- [X] Bookmark pages / chapters (toggle with star button or Ctrl+B)
+- [X] Notes attached to bookmarks (inline add/edit in sidebar)
+- [X] Store in SQLite database (004_bookmarks migration)
+- [X] Bookmarks panel sidebar with navigation, notes, and delete
+- [X] Export bookmarks / notes as Markdown
+- [X] 13 bookmark tests
+- [ ] Text highlighting (future): overlay-based for PDF, text selection for EPUB
 
 ** TODO In-document search
 - [ ] PDF: text extraction from pages, search across document
