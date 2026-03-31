@@ -94,6 +94,34 @@ impl PdfDoc {
     }
 }
 
+impl PdfDoc {
+    /// Extract all text from a single page.
+    pub fn page_text(&self, index: usize) -> Result<String> {
+        if index >= self.page_count {
+            anyhow::bail!(
+                "page index {index} out of range (total: {})",
+                self.page_count
+            );
+        }
+
+        let pdfium = create_pdfium()?;
+        let document = pdfium
+            .load_pdf_from_byte_slice(&self.data, None)
+            .map_err(|e| anyhow::anyhow!("failed to load PDF for text extraction: {e}"))?;
+
+        let page = document
+            .pages()
+            .get(index as u16)
+            .map_err(|e| anyhow::anyhow!("failed to get page {index}: {e}"))?;
+
+        let text = page
+            .text()
+            .map_err(|e| anyhow::anyhow!("failed to load text for page {index}: {e}"))?;
+
+        Ok(text.all())
+    }
+}
+
 impl Document for PdfDoc {
     fn page_count(&self) -> usize {
         self.page_count
