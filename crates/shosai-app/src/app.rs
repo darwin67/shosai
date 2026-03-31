@@ -14,6 +14,7 @@ use shosai_core::epub::render::{ContentNode, parse_chapter_xhtml};
 use shosai_core::library::{Book, Library};
 use shosai_core::pdf::PdfDoc;
 use shosai_core::reading_state::{FileReadingState, ReadingStateStore};
+use shosai_core::search::SearchMatch;
 
 // ---------------------------------------------------------------------------
 // Open document wrapper
@@ -109,6 +110,12 @@ pub struct State {
     current_page_bookmarked: bool,
     editing_note_id: Option<i64>,
     editing_note_text: String,
+
+    // -- In-document search --
+    show_search_bar: bool,
+    search_query: String,
+    search_results: Vec<SearchMatch>,
+    search_current: usize, // index into search_results
 
     // -- Library state --
     library_books: Vec<Book>,
@@ -216,6 +223,14 @@ pub enum Message {
     DeleteBookmark(i64),
     ExportBookmarks,
 
+    // In-document search
+    ToggleSearchBar,
+    SearchQueryChanged(String),
+    SearchPerformed(Vec<SearchMatch>),
+    SearchNext,
+    SearchPrev,
+    CloseSearch,
+
     // Keyboard
     KeyPressed(keyboard::Event),
 }
@@ -275,6 +290,11 @@ pub fn boot() -> (State, Task<Message>) {
         current_page_bookmarked: false,
         editing_note_id: None,
         editing_note_text: String::new(),
+
+        show_search_bar: false,
+        search_query: String::new(),
+        search_results: Vec::new(),
+        search_current: 0,
 
         library_books: Vec::new(),
         library_search: String::new(),
@@ -616,6 +636,61 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             }
         }
 
+        // In-document search
+        Message::ToggleSearchBar => {
+            if state.screen == Screen::Reader && state.document.is_some() {
+                state.show_search_bar = !state.show_search_bar;
+                if !state.show_search_bar {
+                    // Clear results when closing.
+                    state.search_query.clear();
+                    state.search_results.clear();
+                    state.search_current = 0;
+                }
+            }
+        }
+
+        Message::SearchQueryChanged(query) => {
+            state.search_query = query.clone();
+            if query.is_empty() {
+                state.search_results.clear();
+                state.search_current = 0;
+            } else {
+                return perform_search(state);
+            }
+        }
+
+        Message::SearchPerformed(results) => {
+            state.search_results = results;
+            state.search_current = 0;
+            // Navigate to first result if any.
+            navigate_to_current_search_result(state);
+        }
+
+        Message::SearchNext => {
+            if !state.search_results.is_empty() {
+                state.search_current = (state.search_current + 1) % state.search_results.len();
+                navigate_to_current_search_result(state);
+            }
+        }
+
+        Message::SearchPrev => {
+            if !state.search_results.is_empty() {
+                state.search_current = if state.search_current == 0 {
+                    state.search_results.len() - 1
+                } else {
+                    state.search_current - 1
+                };
+                navigate_to_current_search_result(state);
+            }
+        }
+
+        Message::CloseSearch => {
+            state.show_search_bar = false;
+            state.search_query.clear();
+            state.search_results.clear();
+            state.search_current = 0;
+        }
+
         Message::KeyPressed(event) => {
             return handle_key_event(state, event);
         }
@@ -628,6 +703,10 @@ fn open_file(state: &mut State, path: PathBuf) {
     state.error = None;
     state.rendered_page = None;
     state.chapter_content = Vec::new();
+    state.show_search_bar = false;
+    state.search_query.clear();
+    state.search_results.clear();
+    state.search_current = 0;
 
     let ext = path
         .extension()
@@ -700,13 +779,6 @@ fn open_file(state: &mut State, path: PathBuf) {
 fn handle_key_event(state: &State, event: keyboard::Event) -> Task<Message> {
     if let keyboard::Event::KeyPressed { key, modifiers, .. } = event {
         match key.as_ref() {
-            // Escape: go back to library from reader
-            keyboard::Key::Named(keyboard::key::Named::Escape) => {
-                if state.screen == Screen::Reader {
-                    return Task::done(Message::ShowLibrary);
-                }
-            }
-
             keyboard::Key::Named(keyboard::key::Named::ArrowRight)
             | keyboard::Key::Named(keyboard::key::Named::PageDown) => {
                 return Task::done(Message::NextPage);
@@ -738,6 +810,22 @@ fn handle_key_event(state: &State, event: keyboard::Event) -> Task<Message> {
             keyboard::Key::Character(c) if c == "b" && !modifiers.command() => {
                 if state.screen == Screen::Reader {
                     return Task::done(Message::ToggleBookmarksPanel);
+                }
+            }
+
+            // Ctrl+F: toggle search bar
+            keyboard::Key::Character(c) if c == "f" && modifiers.command() => {
+                if state.screen == Screen::Reader {
+                    return Task::done(Message::ToggleSearchBar);
+                }
+            }
+
+            // Escape: close search bar if open, otherwise go to library
+            keyboard::Key::Named(keyboard::key::Named::Escape) => {
+                if state.show_search_bar {
+                    return Task::done(Message::CloseSearch);
+                } else if state.screen == Screen::Reader {
+                    return Task::done(Message::ShowLibrary);
                 }
             }
 
@@ -911,6 +999,47 @@ fn save_library_cards_per_row(state: &State) {
     }
 }
 
+fn perform_search(state: &State) -> Task<Message> {
+    let query = state.search_query.clone();
+
+    match &state.document {
+        Some(OpenDocument::Pdf(doc)) => {
+            // PDF text extraction requires pdfium (not Send), so we do it
+            // synchronously. For large PDFs this will block briefly.
+            let mut results = Vec::new();
+            let query_lower = query.to_lowercase();
+            for page_idx in 0..doc.page_count() {
+                if let Ok(page_text) = doc.page_text(page_idx) {
+                    shosai_core::search::find_matches_in_text_pub(
+                        &page_text,
+                        &query_lower,
+                        page_idx,
+                        &mut results,
+                    );
+                }
+            }
+            Task::done(Message::SearchPerformed(results))
+        }
+        Some(OpenDocument::Epub(doc)) => {
+            let results = shosai_core::search::search_epub(doc, &query);
+            Task::done(Message::SearchPerformed(results))
+        }
+        _ => Task::none(),
+    }
+}
+
+fn navigate_to_current_search_result(state: &mut State) {
+    if let Some(result) = state.search_results.get(state.search_current) {
+        let target_page = result.page;
+        if target_page != state.current_page && target_page < state.total_pages {
+            state.current_page = target_page;
+            state.page_input = format!("{}", state.current_page + 1);
+            refresh_content(state);
+            save_reading_state(state);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------
@@ -935,11 +1064,15 @@ pub fn view(state: &State) -> Element<'_, Message> {
                 main_content
             };
 
-            column![toolbar(state), body]
-                .spacing(0)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
+            let mut layout = column![toolbar(state)].spacing(0);
+
+            if state.show_search_bar {
+                layout = layout.push(search_bar(state));
+            }
+
+            layout = layout.push(body);
+
+            layout.width(Length::Fill).height(Length::Fill).into()
         }
     }
 }
@@ -1052,6 +1185,19 @@ fn toolbar(state: &State) -> Element<'_, Message> {
                 .on_press(Message::ToggleBookmarksPanel)
                 .into(),
         );
+        // Search button (PDF and EPUB only, not CBZ)
+        if !matches!(state.document, Some(OpenDocument::Cbz(_))) {
+            let search_label = if state.show_search_bar {
+                "Hide Search"
+            } else {
+                "Search"
+            };
+            toolbar_items.push(
+                button(search_label)
+                    .on_press(Message::ToggleSearchBar)
+                    .into(),
+            );
+        }
     }
 
     let toolbar_row = row(toolbar_items)
@@ -1147,6 +1293,62 @@ fn bookmarks_panel(state: &State) -> Element<'_, Message> {
         .style(|_theme| container::Style {
             background: Some(iced::Background::Color(iced::Color::from_rgb(
                 0.95, 0.95, 0.95,
+            ))),
+            ..Default::default()
+        })
+        .into()
+}
+
+fn search_bar(state: &State) -> Element<'_, Message> {
+    let input = text_input("Search in document...", &state.search_query)
+        .on_input(Message::SearchQueryChanged)
+        .on_submit(Message::SearchNext)
+        .width(300);
+
+    let result_info = if state.search_results.is_empty() {
+        if state.search_query.is_empty() {
+            String::new()
+        } else {
+            "No results".to_string()
+        }
+    } else {
+        format!(
+            "{} / {}",
+            state.search_current + 1,
+            state.search_results.len()
+        )
+    };
+
+    let has_results = !state.search_results.is_empty();
+
+    let mut prev_btn = button("<");
+    if has_results {
+        prev_btn = prev_btn.on_press(Message::SearchPrev);
+    }
+
+    let mut next_btn = button(">");
+    if has_results {
+        next_btn = next_btn.on_press(Message::SearchNext);
+    }
+
+    let close_btn = button("\u{2715}").on_press(Message::CloseSearch);
+
+    let bar = row![
+        input,
+        text(result_info).size(14),
+        prev_btn,
+        next_btn,
+        close_btn,
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+
+    container(bar)
+        .padding(8)
+        .width(Length::Fill)
+        .style(|_theme| container::Style {
+            background: Some(iced::Background::Color(iced::Color::from_rgb(
+                0.93, 0.93, 0.93,
             ))),
             ..Default::default()
         })

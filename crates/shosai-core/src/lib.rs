@@ -6,3 +6,4 @@ pub mod highlight;
 pub mod library;
 pub mod pdf;
 pub mod reading_state;
+pub mod search;
