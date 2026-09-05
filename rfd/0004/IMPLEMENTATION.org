@@ -72,7 +72,7 @@ without maintaining two production feature paths.
 
 * M1 — Extract the Rust application core
 :PROPERTIES:
-:STATUS: IN-PROGRESS
+:STATUS: DONE
 :END:
 
 - [X] Move EPUB pagination and renderer-neutral geometry out of
@@ -102,10 +102,10 @@ coordinates.
 
 * M2 — Flutter highlighting feasibility slice
 :PROPERTIES:
-:STATUS: TODO
+:STATUS: IN-PROGRESS
 :END:
 
-- [ ] Create the Flutter application and native Rust library integration with
+- [X] Create the Flutter application and native Rust library integration with
   reproducible debug and release commands.
 - [ ] Open one representative PDF and EPUB, render visible content, and release
   document and buffer handles deterministically.
