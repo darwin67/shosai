@@ -10,8 +10,11 @@ trap 'rm -rf "$temporary"' EXIT
 
 mkdir -p "$rust_root"
 cp "$root/Cargo.lock" "$temporary/rust/Cargo.lock"
-sed 's/members = \["crates\/shosai-core", "crates\/shosai-app"\]/members = ["crates\/shosai-core"]/' \
-  "$root/Cargo.toml" >"$temporary/rust/Cargo.toml"
+awk '
+  /^members = \[$/ { print "members = [\"crates/shosai-core\"]"; in_members = 1; next }
+  in_members && /^\]$/ { in_members = 0; next }
+  !in_members { print }
+' "$root/Cargo.toml" >"$temporary/rust/Cargo.toml"
 sed '/^\[dependencies\]$/a flutter_rust_bridge = "=2.11.1"' \
   "$root/crates/shosai-core/Cargo.toml" >"$rust_root/Cargo.toml"
 cp -R "$root/crates/shosai-core/src" "$rust_root/src"
