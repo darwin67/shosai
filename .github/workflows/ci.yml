@@ -112,6 +112,10 @@ jobs:
 
       - run: nix develop --command make test
 
+      - name: Build Flutter Linux host
+        if: runner.os == 'Linux'
+        run: nix develop --command make flutter-linux-debug
+
   test-windows:
     name: Test (Windows)
     runs-on: windows-latest

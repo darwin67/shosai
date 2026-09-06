@@ -1,4 +1,4 @@
-.PHONY: dev reset lint lint-flutter fmt test test-flutter test-scripts check-frb flutter-codegen check-flutter flutter-dev flutter-release check-rfds changelog next-version
+.PHONY: dev reset lint lint-flutter fmt test test-flutter test-scripts check-frb check-flutter-codegen flutter-codegen check-flutter flutter-dev flutter-linux-debug flutter-release check-rfds changelog next-version
 
 DEV_DATA_HOME := $(CURDIR)/target
 
@@ -31,8 +31,9 @@ test:
 	$(MAKE) check-frb
 	$(MAKE) test-flutter
 
-## Generate bindings and run Flutter tests
-test-flutter: flutter-codegen
+## Verify bindings and run Flutter unit and native bridge tests
+test-flutter: check-flutter-codegen
+	cargo build --package shosai-flutter-bridge
 	cd flutter && flutter test
 
 ## Run tests for repository scripts
@@ -46,20 +47,28 @@ test-scripts:
 check-frb:
 	@./scripts/check-frb-codegen.sh
 
+## Verify checked-in Flutter bindings match the bridge API
+check-flutter-codegen:
+	@./scripts/check-flutter-codegen.sh
+
 ## Generate Rust/Dart bindings
 flutter-codegen:
 	cd flutter && flutter_rust_bridge_codegen generate
 	cargo fmt --package shosai-flutter-bridge
 
-## Generate bindings and validate the Flutter host
-check-flutter: flutter-codegen
+## Validate generated bindings and the Flutter host
+check-flutter: check-flutter-codegen
 	cd flutter && dart format --output=none --set-exit-if-changed lib test
 	cd flutter && flutter analyze
-	cd flutter && flutter test
+	$(MAKE) test-flutter
 
 ## Run the Linux Flutter host in debug mode
 flutter-dev: flutter-codegen
 	cd flutter && flutter run -d linux
+
+## Build the Linux Flutter host in debug mode
+flutter-linux-debug: check-flutter-codegen
+	cd flutter && flutter build linux --debug
 
 ## Build the Linux Flutter host in release mode
 flutter-release: flutter-codegen
