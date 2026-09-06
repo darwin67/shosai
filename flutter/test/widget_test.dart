@@ -186,6 +186,77 @@ void main() {
     ]);
   });
 
+  test('dispatch owns reader model transitions and async completion', () async {
+    final bridge = _FakeBridge();
+    final controller = ReaderController(
+      bridge: bridge,
+      decoder: (pixels, {required width, required height}) {
+        throw StateError('EPUB must not decode a raster');
+      },
+    );
+    final initial = controller.model;
+    final transitions = <ReaderModel>[];
+    controller.addListener(() => transitions.add(controller.model));
+
+    controller.dispatch(const ReaderOpenRequested('  /tmp/book.epub  '));
+
+    expect(controller.model, isNot(same(initial)));
+    expect(controller.model.busy, isTrue);
+    expect(controller.model.generation, 1);
+    expect(controller.model.document, isNull);
+    expect(bridge.openRequests.single.pathKey, '/tmp/book.epub');
+
+    controller.dispatch(const ReaderOpenRequested('/tmp/ignored.epub'));
+    expect(bridge.openRequests, hasLength(1));
+
+    bridge.completeOpen(FlutterBookFormat.epub);
+    await bridge.operationFinished.future;
+
+    expect(controller.model.busy, isFalse);
+    expect(controller.model.document?.handle, _documentHandle);
+    expect(controller.model.error, isNull);
+    expect(transitions, hasLength(3));
+    expect(transitions[0].busy, isTrue);
+    expect(transitions[1].document?.handle, _documentHandle);
+    expect(transitions[2].busy, isFalse);
+
+    controller.dispose();
+    await bridge.disposed.future;
+    expect(bridge.events, ['cancellation', 'document', 'dispose']);
+  });
+
+  test('throwing listeners cannot interrupt effect ownership', () async {
+    final bridge = _FakeBridge();
+    final controller = ReaderController(
+      bridge: bridge,
+      decoder: (pixels, {required width, required height}) {
+        throw StateError('EPUB must not decode a raster');
+      },
+    );
+    final reported = <Object>[];
+    final previousErrorHandler = FlutterError.onError;
+    FlutterError.onError = (details) => reported.add(details.exception);
+    controller.addListener(() => throw StateError('listener failed'));
+
+    try {
+      controller.dispatch(const ReaderOpenRequested('/tmp/book.epub'));
+      bridge.completeOpen(FlutterBookFormat.epub);
+      await bridge.operationFinished.future;
+
+      expect(controller.model.busy, isFalse);
+      expect(controller.model.document?.handle, _documentHandle);
+      expect(reported, hasLength(3));
+
+      controller.dispose();
+      await bridge.disposed.future;
+      expect(bridge.releasedDocuments, [_documentHandle]);
+      expect(bridge.releasedCancellations, [BigInt.one]);
+      expect(bridge.disposeCount, 1);
+    } finally {
+      FlutterError.onError = previousErrorHandler;
+    }
+  });
+
   test('premultiplies translucent RGBA pixels in place', () {
     final pixels = Uint8List.fromList([
       255,
@@ -214,8 +285,10 @@ class _FakeBridge implements FlutterBridge {
   final openCompleter = Completer<FlutterDocumentSummary>();
   final renderCompleter = Completer<FlutterRenderedBuffer>();
   final renderStarted = Completer<void>();
+  final operationFinished = Completer<void>();
   final disposed = Completer<void>();
   final Uint8List pixels;
+  final openRequests = <FlutterOpenRequest>[];
   final releasedDocuments = <FlutterDocumentHandle>[];
   final releasedBuffers = <FlutterBufferHandle>[];
   final releasedCancellations = <BigInt>[];
@@ -265,6 +338,7 @@ class _FakeBridge implements FlutterBridge {
     required BigInt cancellationId,
   }) {
     _ensureAlive();
+    openRequests.add(request);
     return openCompleter.future;
   }
 
@@ -281,6 +355,7 @@ class _FakeBridge implements FlutterBridge {
     _ensureAlive();
     releasedCancellations.add(id);
     events.add('cancellation');
+    operationFinished.complete();
     return true;
   }
 

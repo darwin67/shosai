@@ -5,6 +5,11 @@ hosts load the generated `flutter_rust_bridge` bindings, open PDF, EPUB, and
 CBZ documents through `shosai-core`, and render the first PDF or CBZ page.
 EPUB scene transfer and highlighting are subsequent M2 work.
 
+Reader state follows the same Elm-style model/message/update flow as the Iced
+frontend. Widgets render the immutable `ReaderModel` and dispatch sealed
+`ReaderMessage` values; `ReaderController` runs bridge effects and dispatches
+their completion messages while retaining ownership of native resources.
+
 Run commands from the repository root through the pinned development
 environment:
 
