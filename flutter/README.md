@@ -11,7 +11,7 @@ environment:
 ```sh
 .agents/dev make check-flutter
 .agents/dev make flutter-dev
-.agents/dev make flutter-macos-debug
+.agents/dev make flutter-macos-smoke
 .agents/dev make flutter-release
 ```
 

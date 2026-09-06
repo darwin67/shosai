@@ -1,4 +1,4 @@
-.PHONY: dev reset lint lint-flutter fmt test test-flutter test-scripts check-frb check-flutter-codegen flutter-codegen check-flutter flutter-dev flutter-linux-debug flutter-macos-debug flutter-release check-rfds changelog next-version
+.PHONY: dev reset lint lint-flutter fmt test test-flutter test-scripts check-frb check-flutter-codegen flutter-codegen check-flutter flutter-dev flutter-linux-debug flutter-macos-debug flutter-macos-smoke flutter-release check-rfds changelog next-version
 
 DEV_DATA_HOME := $(CURDIR)/target
 
@@ -88,6 +88,18 @@ flutter-macos-debug: check-flutter-codegen
 		CC_aarch64_apple_darwin="$$CC_aarch64_apple_darwin" \
 		CXX_aarch64_apple_darwin="$$CXX_aarch64_apple_darwin" \
 		flutter build macos --debug
+
+## Launch the packaged macOS host and verify that it remains running
+flutter-macos-smoke: flutter-macos-debug
+	@log="$$(mktemp)"; \
+		app="flutter/build/macos/Build/Products/Debug/shosai_flutter.app/Contents/MacOS/shosai_flutter"; \
+		"$$app" >"$$log" 2>&1 & pid=$$!; \
+		trap 'kill "$$pid" 2>/dev/null || true; wait "$$pid" 2>/dev/null || true; rm -f "$$log"' EXIT; \
+		sleep 5; \
+		if ! kill -0 "$$pid" 2>/dev/null; then \
+			cat "$$log"; \
+			exit 1; \
+		fi
 
 ## Build the Linux Flutter host in release mode
 flutter-release: flutter-codegen
