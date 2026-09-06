@@ -54,8 +54,8 @@ void main() {
         expect(pixels, hasLength(rendered.byteLen.toInt()));
         expect(pixels.length, rendered.width * rendered.height * 4);
       } finally {
-        if (buffer != null) bridge.releaseBuffer(handle: buffer!);
-        if (document != null) bridge.releaseDocument(handle: document!);
+        if (buffer != null) bridge.releaseBuffer(handle: buffer);
+        if (document != null) bridge.releaseDocument(handle: document);
         bridge.releaseCancellation(id: cancellation);
         bridge.dispose();
       }
