@@ -34,11 +34,7 @@ test:
 ## Verify bindings and run Flutter unit and native bridge tests
 test-flutter: check-flutter-codegen
 	cargo build --package shosai-flutter-bridge
-	cd flutter && \
-		if [ "$$(uname -s)" = Darwin ]; then \
-			export SHOSAI_PDFIUM_LIBRARY="$${DYLD_LIBRARY_PATH%%:*}/libpdfium.dylib"; \
-		fi; \
-		flutter test
+	cd flutter && flutter test
 
 ## Run tests for repository scripts
 test-scripts:
@@ -76,18 +72,7 @@ flutter-linux-debug: check-flutter-codegen
 
 ## Build the macOS Flutter host in debug mode
 flutter-macos-debug: check-flutter-codegen
-	cd flutter && env -i \
-		HOME="$$HOME" \
-		PATH="$$PATH" \
-		TMPDIR="$${TMPDIR:-/tmp}" \
-		DEVELOPER_DIR="$$DEVELOPER_DIR" \
-		SDKROOT="$$(/usr/bin/xcrun --sdk macosx --show-sdk-path)" \
-		MACOSX_DEPLOYMENT_TARGET=13.0 \
-		DYLD_LIBRARY_PATH="$$DYLD_LIBRARY_PATH" \
-		CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="$$CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER" \
-		CC_aarch64_apple_darwin="$$CC_aarch64_apple_darwin" \
-		CXX_aarch64_apple_darwin="$$CXX_aarch64_apple_darwin" \
-		flutter build macos --debug
+	@./scripts/build-flutter-macos.sh
 
 ## Launch the packaged macOS host and verify that it remains running
 flutter-macos-smoke: flutter-macos-debug

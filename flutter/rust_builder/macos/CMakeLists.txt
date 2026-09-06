@@ -22,9 +22,16 @@ set(RUST_LIBRARY
 )
 set(BUNDLED_RUST_LIBRARY "${BUNDLE_DIR}/libshosai_flutter_bridge.dylib")
 
+if(DEFINED ENV{SHOSAI_PDFIUM_LIBRARY} AND NOT "$ENV{SHOSAI_PDFIUM_LIBRARY}" STREQUAL "")
+  set(PDFIUM_LIBRARY "$ENV{SHOSAI_PDFIUM_LIBRARY}" CACHE FILEPATH
+    "Path to the PDFium library" FORCE)
+endif()
 if(NOT PDFIUM_LIBRARY)
   string(REPLACE ":" ";" PDFIUM_HINTS "$ENV{DYLD_LIBRARY_PATH}")
   find_library(PDFIUM_LIBRARY pdfium HINTS ${PDFIUM_HINTS} REQUIRED)
+endif()
+if(NOT EXISTS "${PDFIUM_LIBRARY}")
+  message(FATAL_ERROR "PDFium library does not exist: ${PDFIUM_LIBRARY}")
 endif()
 
 find_program(LIPO_EXECUTABLE lipo REQUIRED)
