@@ -205,6 +205,24 @@ async fn epub_annotation_round_trips_and_updates() {
 }
 
 #[tokio::test]
+async fn untracked_annotations_reopen_by_device_local_path() {
+    let (store, _pool, _dir) = temp_store().await;
+    let mut first = epub_annotation(None);
+    first.local_path = Some("device://book.epub".to_owned());
+    store.create_async(&first).await.unwrap();
+    let mut other = epub_annotation(None);
+    other.local_path = Some("device://other.epub".to_owned());
+    store.create_async(&other).await.unwrap();
+
+    let reopened = store
+        .list_for_local_path_async("device://book.epub")
+        .await
+        .unwrap();
+    assert_eq!(reopened.len(), 1);
+    assert_eq!(reopened[0].id, first.id);
+}
+
+#[tokio::test]
 async fn text_and_geometry_only_pdf_annotations_round_trip() {
     let (store, pool, _dir) = temp_store().await;
     let rectangles = vec![

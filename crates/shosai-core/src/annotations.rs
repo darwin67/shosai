@@ -533,6 +533,40 @@ impl AnnotationStore {
         Ok(annotations)
     }
 
+    /// List live annotations associated with an untracked device-local path.
+    pub async fn list_for_local_path_async(&self, local_path: &str) -> Result<Vec<Annotation>> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("failed to begin annotation list snapshot")?;
+        let rows = sqlx::query(
+            "SELECT * FROM annotations WHERE book_id IS NULL AND local_path = ? AND deleted_at IS NULL ORDER BY created_at, id",
+        )
+        .bind(local_path)
+        .fetch_all(&mut *transaction)
+        .await
+        .context("failed to list annotations for local path")?;
+        let mut annotations = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let rectangle_rows = sqlx::query(
+                "SELECT left, bottom, right, top FROM annotation_pdf_rectangles WHERE annotation_id = ? ORDER BY rect_index LIMIT ?",
+            )
+            .bind(id)
+            .bind(i64::try_from(MAX_PDF_RECTANGLES + 1).expect("rectangle limit fits in i64"))
+            .fetch_all(&mut *transaction)
+            .await
+            .context("failed to load PDF annotation rectangles")?;
+            annotations.push(row_to_annotation(row, rows_to_rectangles(rectangle_rows)?)?);
+        }
+        transaction
+            .commit()
+            .await
+            .context("failed to finish annotation list snapshot")?;
+        Ok(annotations)
+    }
+
     pub async fn update_async(
         &self,
         id: &AnnotationId,

@@ -40,6 +40,7 @@ pub struct PdfSelectionEndpoint {
 #[derive(Clone, Debug)]
 struct PdfSelectionZone {
     bounds: PdfSelectionRect,
+    page_bounds: (f32, f32, f32, f32),
     endpoint: PdfSelectionEndpoint,
 }
 
@@ -92,6 +93,26 @@ impl PdfSelectionSnapshot {
 
     pub fn endpoint_count(&self) -> usize {
         self.rows.iter().map(|row| row.zones.len()).sum()
+    }
+
+    /// Return owned endpoint geometry that can be retained by a frontend and
+    /// hit-tested without re-entering PDFium.
+    pub fn endpoints(&self) -> Vec<(PdfSelectionRect, PdfSelectionEndpoint)> {
+        self.rows
+            .iter()
+            .flat_map(|row| &row.zones)
+            .map(|zone| (zone.bounds, zone.endpoint))
+            .collect()
+    }
+
+    /// Return PDF page-coordinate rectangles for a durable character range.
+    pub fn page_rectangles(&self, start: usize, end: usize) -> Vec<(f32, f32, f32, f32)> {
+        self.rows
+            .iter()
+            .flat_map(|row| &row.zones)
+            .filter(|zone| start <= zone.endpoint.character && zone.endpoint.character < end)
+            .map(|zone| zone.page_bounds)
+            .collect()
     }
 
     pub fn retained_bytes(&self) -> usize {
@@ -775,6 +796,12 @@ impl PdfDoc {
             }
             zones.push(PdfSelectionZone {
                 bounds,
+                page_bounds: (
+                    page_bounds.left().value,
+                    page_bounds.bottom().value,
+                    page_bounds.right().value,
+                    page_bounds.top().value,
+                ),
                 endpoint: PdfSelectionEndpoint {
                     character: character.index(),
                     page_x: (page_bounds.left().value + page_bounds.right().value) / 2.0,

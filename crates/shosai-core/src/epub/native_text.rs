@@ -9,6 +9,7 @@ use cosmic_text::{
     fontdb::{Database, Language, Stretch, Style, Weight},
 };
 use unicode_casefold::UnicodeCaseFold;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::{EpubFontBook, EpubFontFace, EpubFontStyle};
 
@@ -70,6 +71,13 @@ pub struct EpubTextHit {
     pub scalars: Range<usize>,
     pub link: String,
 }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EpubTextEndpoint {
+    pub rect: EpubTextRect,
+    pub scalar: usize,
+    pub scalar_start: usize,
+    pub scalar_end: usize,
+}
 #[derive(Clone, Debug)]
 pub struct EpubTextLine {
     pub top: f32,
@@ -86,6 +94,10 @@ pub struct EpubTextLayout {
     pub height: f32,
     pub lines: Vec<EpubTextLine>,
     pub links: Vec<EpubTextHit>,
+    /// Half-grapheme hit zones derived from the exact shaped glyphs that paint
+    /// this layout. Consumers can retain these and hit-test without re-entering
+    /// the renderer.
+    pub endpoints: Vec<EpubTextEndpoint>,
 }
 
 pub(super) struct NativeTextState {
@@ -120,7 +132,12 @@ impl NativeTextState {
         let mut aliases = HashMap::new();
         let mut styles = HashMap::<String, Vec<Style>>::new();
         let mut weights = HashMap::<String, Vec<(Style, f32, f32)>>::new();
-        if !faces.is_empty() {
+        if faces.is_empty() {
+            // Native text is also the bridge renderer for ordinary EPUB text.
+            // Keep its fallback deterministic in headless/mobile packages that
+            // do not expose host fonts to the Rust process.
+            db.load_font_data(super::pagination::math_layout::MATH_FONT_BYTES.to_vec());
+        } else {
             db.load_system_fonts();
         }
         for (id, declared) in ids.iter().zip(faces) {
@@ -238,6 +255,7 @@ impl EpubFontBook {
             height: 0.0,
             lines: Vec::new(),
             links: Vec::new(),
+            endpoints: Vec::new(),
         };
         for (index, paragraph) in requests.iter().enumerate() {
             let range = &paragraphs[index];
@@ -258,10 +276,17 @@ impl EpubFontBook {
                 hit.rect.y += result.height;
                 hit.scalars = hit.scalars.start + scalar_start..hit.scalars.end + scalar_start;
             }
+            for endpoint in &mut layout.endpoints {
+                endpoint.rect.y += result.height;
+                endpoint.scalar += scalar_start;
+                endpoint.scalar_start += scalar_start;
+                endpoint.scalar_end += scalar_start;
+            }
             result.width = result.width.max(layout.width);
             result.height += layout.height;
             result.lines.extend(layout.lines);
             result.links.extend(layout.links);
+            result.endpoints.extend(layout.endpoints);
         }
         Ok(result)
     }
@@ -442,6 +467,7 @@ impl EpubFontBook {
         }
         let mut lines = Vec::with_capacity(runs.len());
         let mut links = Vec::new();
+        let mut endpoints = Vec::new();
         for (run, line_range) in runs.into_iter().zip(line_ranges) {
             let ph = (run.line_height * request.scale).ceil() as usize;
             let mut rgba = if rasterize {
@@ -475,6 +501,42 @@ impl EpubFontBook {
                     width: glyph.w.max(0.0),
                     height: run.line_height,
                 };
+                let cluster = &visible_text[local_start..local_end];
+                let graphemes = cluster.graphemes(true).collect::<Vec<_>>();
+                let grapheme_width = rect.width / graphemes.len().max(1) as f32;
+                let mut cluster_scalar = scalars.start;
+                for (position, grapheme) in graphemes.into_iter().enumerate() {
+                    let after = cluster_scalar + grapheme.chars().count();
+                    let (left, right) = if glyph.level.is_rtl() {
+                        (after, cluster_scalar)
+                    } else {
+                        (cluster_scalar, after)
+                    };
+                    let x = rect.x + position as f32 * grapheme_width;
+                    endpoints.push(EpubTextEndpoint {
+                        rect: EpubTextRect {
+                            x,
+                            y: rect.y,
+                            width: grapheme_width / 2.0,
+                            height: rect.height,
+                        },
+                        scalar: left,
+                        scalar_start: cluster_scalar,
+                        scalar_end: after,
+                    });
+                    endpoints.push(EpubTextEndpoint {
+                        rect: EpubTextRect {
+                            x: x + grapheme_width / 2.0,
+                            y: rect.y,
+                            width: grapheme_width / 2.0,
+                            height: rect.height,
+                        },
+                        scalar: right,
+                        scalar_start: cluster_scalar,
+                        scalar_end: after,
+                    });
+                    cluster_scalar = after;
+                }
                 if rasterize {
                     for h in &request.highlights {
                         if h.scalars.start < scalars.end && scalars.start < h.scalars.end {
@@ -558,6 +620,7 @@ impl EpubFontBook {
             height,
             lines,
             links,
+            endpoints,
         })
     }
 }

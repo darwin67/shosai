@@ -2,16 +2,23 @@
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use thiserror::Error;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
+use crate::annotations::{
+    Annotation, AnnotationId, AnnotationStore, AnnotationTarget, DocumentFingerprint, EpubAnchor,
+    HighlightColor, NewAnnotation, PageRect, PdfAnchor, QuoteSelector,
+};
+
 use crate::application::{DeviceFileLocator, OpenDocument, OpenDocumentError, OpenDocumentPlan};
 use crate::document::RenderedPage;
 #[cfg(test)]
 use crate::epub::EpubLimits;
+use crate::epub::{EpubTextAlign, EpubTextDirection, EpubTextRequest, EpubTextRun};
 use crate::library::BookFormat;
 
 pub const MAX_BRIDGE_BUFFER_BYTES: usize = 160 * 1024 * 1024;
@@ -78,6 +85,43 @@ pub struct RenderedBuffer {
     pub width: u32,
     pub height: u32,
     pub byte_len: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelectionRect {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelectionEndpoint {
+    pub offset: usize,
+    pub range_start: usize,
+    pub range_end: usize,
+    pub rect: SelectionRect,
+}
+
+/// Owned visible-surface text and hit zones. Pointer movement consumes this
+/// value locally and never re-enters PDFium or Rust.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectionSurface {
+    pub width: f32,
+    pub height: f32,
+    pub text: String,
+    pub resource_path: Option<String>,
+    pub endpoints: Vec<SelectionEndpoint>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BridgeAnnotation {
+    pub id: String,
+    pub unit: usize,
+    pub start: usize,
+    pub end: usize,
+    pub color: HighlightColor,
+    pub body: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -175,6 +219,8 @@ pub enum BridgeError {
     Panic,
     #[error("bridge worker stopped unexpectedly")]
     Worker,
+    #[error("annotation storage failed: {0}")]
+    Storage(String),
 }
 
 impl BridgeError {
@@ -190,7 +236,7 @@ impl BridgeError {
             | Self::RequestLimit
             | Self::BufferCountLimit
             | Self::OpenLimit { .. } => BridgeErrorKind::LimitExceeded,
-            Self::Panic | Self::Worker | Self::Backend { .. } => {
+            Self::Panic | Self::Worker | Self::Backend { .. } | Self::Storage(_) => {
                 BridgeErrorKind::BackendUnavailable
             }
             Self::Render(_) => BridgeErrorKind::RenderFailed,
@@ -214,6 +260,8 @@ struct RetainedBuffer {
 #[derive(Debug)]
 struct RetainedDocument {
     document: OpenDocument,
+    local_path: String,
+    fingerprint: DocumentFingerprint,
     _bytes: OwnedSemaphorePermit,
     _slot: OwnedSemaphorePermit,
 }
@@ -261,6 +309,7 @@ pub struct Bridge {
     next_handle: Arc<AtomicU64>,
     registry: Arc<Mutex<Registry>>,
     admission: Arc<BridgeAdmission>,
+    annotation_store: Arc<tokio::sync::OnceCell<AnnotationStore>>,
 }
 
 impl Default for Bridge {
@@ -291,6 +340,7 @@ impl Bridge {
             next_handle: Arc::new(AtomicU64::new(0)),
             registry: Arc::new(Mutex::new(Registry::default())),
             admission,
+            annotation_store: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
 
@@ -359,9 +409,9 @@ impl Bridge {
         let open_slot =
             acquire_permits(Arc::clone(&self.admission.open_slots), 1, &cancellation).await?;
         let worker_cancellation = cancellation.clone();
-        let (document, guards) = tokio::task::spawn_blocking(move || {
+        let (opened, guards) = tokio::task::spawn_blocking(move || {
             let document = guarded(|| {
-                plan.open_cancellable(worker_cancellation)
+                plan.open_with_content_hash_cancellable(worker_cancellation)
                     .map_err(map_open_error)
             });
             (
@@ -373,7 +423,7 @@ impl Bridge {
         .map_err(|_| BridgeError::Worker)?;
         let (_request_slot, document_slot, mut document_bytes, open_slot) = guards;
         check_cancelled(&cancellation)?;
-        let document = document?;
+        let (document, content_hash) = opened?;
         let actual_retained_bytes = document
             .retained_byte_len()
             .ok_or(BridgeError::DocumentLimit)?;
@@ -412,11 +462,197 @@ impl Bridge {
                 handle,
                 Arc::new(RetainedDocument {
                     document,
+                    local_path: request.path_key,
+                    fingerprint: DocumentFingerprint::new(
+                        "sha256-hex",
+                        1,
+                        content_hash.into_bytes(),
+                    )
+                    .map_err(storage_error)?,
                     _bytes: document_bytes,
                     _slot: document_slot,
                 }),
             );
         Ok(summary)
+    }
+
+    async fn annotation_store(&self) -> Result<&AnnotationStore, BridgeError> {
+        self.annotation_store
+            .get_or_try_init(|| async {
+                let state = crate::reading_state::ReadingStateStore::open_async_deferred_backfill()
+                    .await
+                    .map_err(|error| BridgeError::Storage(error.to_string()))?;
+                Ok(AnnotationStore::new(state.pool().clone()))
+            })
+            .await
+    }
+
+    pub async fn create_annotation(
+        &self,
+        document: DocumentHandle,
+        unit: usize,
+        start: usize,
+        end: usize,
+        color: HighlightColor,
+        body: Option<String>,
+    ) -> Result<BridgeAnnotation, BridgeError> {
+        if start >= end {
+            return Err(BridgeError::InvalidRequest(
+                "annotation range must be non-empty".into(),
+            ));
+        }
+        let retained = self.document(document)?;
+        let surface = selection_surface(&retained.document, unit, 1.0, 680.0, 18.0, &|| false)?;
+        let chars: Vec<char> = surface.text.chars().collect();
+        if end > chars.len() {
+            return Err(BridgeError::InvalidRequest(
+                "annotation range exceeds text".into(),
+            ));
+        }
+        let quote = QuoteSelector::new(
+            &chars[start..end].iter().collect::<String>(),
+            &chars[..start].iter().collect::<String>(),
+            &chars[end..].iter().collect::<String>(),
+        )
+        .map_err(storage_error)?;
+        let target = match &retained.document {
+            OpenDocument::Epub(_) => AnnotationTarget::Epub(
+                EpubAnchor::new(
+                    u32::try_from(unit)
+                        .map_err(|_| BridgeError::InvalidRequest("unit exceeds range".into()))?,
+                    surface.resource_path.as_deref().ok_or_else(|| {
+                        BridgeError::InvalidRequest("EPUB resource path missing".into())
+                    })?,
+                    u32::try_from(start)
+                        .map_err(|_| BridgeError::InvalidRequest("range exceeds range".into()))?,
+                    u32::try_from(end)
+                        .map_err(|_| BridgeError::InvalidRequest("range exceeds range".into()))?,
+                )
+                .map_err(storage_error)?,
+            ),
+            OpenDocument::Pdf(document) => {
+                let rectangles = document
+                    .selection_snapshot(unit, 1.0)
+                    .map_err(map_render_error)?
+                    .page_rectangles(start, end)
+                    .into_iter()
+                    .map(|(left, bottom, right, top)| {
+                        PageRect::new(left, bottom, right, top).map_err(storage_error)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                AnnotationTarget::Pdf(
+                    PdfAnchor::new(
+                        u32::try_from(unit).map_err(|_| {
+                            BridgeError::InvalidRequest("unit exceeds range".into())
+                        })?,
+                        Some((u32::try_from(start).unwrap(), u32::try_from(end).unwrap())),
+                        rectangles,
+                    )
+                    .map_err(storage_error)?,
+                )
+            }
+            OpenDocument::Cbz(_) => return Err(BridgeError::UnsupportedOperation(BookFormat::Cbz)),
+        };
+        let created = self
+            .annotation_store()
+            .await?
+            .create_async(&NewAnnotation {
+                id: AnnotationId::new(),
+                book_id: None,
+                local_path: Some(retained.local_path.clone()),
+                fingerprint: retained.fingerprint.clone(),
+                quote: Some(quote),
+                target,
+                color,
+                body,
+                provenance: None,
+            })
+            .await
+            .map_err(storage_error)?;
+        Ok(annotation_dto(created))
+    }
+
+    pub async fn list_annotations(
+        &self,
+        document: DocumentHandle,
+    ) -> Result<Vec<BridgeAnnotation>, BridgeError> {
+        let retained = self.document(document)?;
+        self.annotation_store()
+            .await?
+            .list_for_local_path_async(&retained.local_path)
+            .await
+            .map_err(storage_error)
+            .map(|items| {
+                items
+                    .into_iter()
+                    .filter(|item| item.fingerprint == retained.fingerprint)
+                    .map(annotation_dto)
+                    .collect()
+            })
+    }
+
+    pub async fn update_annotation(
+        &self,
+        document: DocumentHandle,
+        id: &str,
+        color: HighlightColor,
+        body: Option<String>,
+    ) -> Result<bool, BridgeError> {
+        let retained = self.document(document)?;
+        let id = AnnotationId::from_str(id)
+            .map_err(|_| BridgeError::InvalidRequest("invalid annotation ID".into()))?;
+        if !self
+            .annotation_belongs_to(&id, &retained.local_path, &retained.fingerprint)
+            .await?
+        {
+            return Ok(false);
+        }
+        self.annotation_store()
+            .await?
+            .update_async(&id, color, body.as_deref())
+            .await
+            .map_err(storage_error)
+    }
+
+    pub async fn delete_annotation(
+        &self,
+        document: DocumentHandle,
+        id: &str,
+    ) -> Result<bool, BridgeError> {
+        let retained = self.document(document)?;
+        let id = AnnotationId::from_str(id)
+            .map_err(|_| BridgeError::InvalidRequest("invalid annotation ID".into()))?;
+        if !self
+            .annotation_belongs_to(&id, &retained.local_path, &retained.fingerprint)
+            .await?
+        {
+            return Ok(false);
+        }
+        self.annotation_store()
+            .await?
+            .delete_async(&id)
+            .await
+            .map_err(storage_error)
+    }
+
+    async fn annotation_belongs_to(
+        &self,
+        id: &AnnotationId,
+        local_path: &str,
+        fingerprint: &DocumentFingerprint,
+    ) -> Result<bool, BridgeError> {
+        self.annotation_store()
+            .await?
+            .get_async(id, false)
+            .await
+            .map_err(storage_error)
+            .map(|annotation| {
+                annotation.is_some_and(|value| {
+                    value.book_id.is_none()
+                        && value.local_path.as_deref() == Some(local_path)
+                        && value.fingerprint == *fingerprint
+                })
+            })
     }
 
     pub async fn render_page(
@@ -539,6 +775,50 @@ impl Bridge {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         check_cancelled(&cancellation)?;
         self.store_buffer(request.document, rendered, buffer_bytes, buffer_slot)
+    }
+
+    pub async fn selection_surface(
+        &self,
+        document: DocumentHandle,
+        unit: usize,
+        scale: f32,
+        width: f32,
+        font_size: f32,
+        cancellation: Cancellation,
+    ) -> Result<SelectionSurface, BridgeError> {
+        check_cancelled(&cancellation)?;
+        if !scale.is_finite()
+            || scale <= 0.0
+            || !width.is_finite()
+            || width <= 0.0
+            || !font_size.is_finite()
+            || font_size <= 0.0
+        {
+            return Err(BridgeError::InvalidRequest(
+                "selection layout values must be finite and positive".to_owned(),
+            ));
+        }
+        let _request_slot = try_acquire_slot(
+            Arc::clone(&self.admission.request_slots),
+            BridgeError::RequestLimit,
+        )?;
+        let render_slot =
+            acquire_permits(Arc::clone(&self.admission.render_slots), 1, &cancellation).await?;
+        let retained = self.document(document)?;
+        let worker_cancellation = cancellation.clone();
+        let (surface, guards) = tokio::task::spawn_blocking(move || {
+            let surface = guarded(|| {
+                selection_surface(&retained.document, unit, scale, width, font_size, &|| {
+                    worker_cancellation.is_cancelled()
+                })
+            });
+            (surface, (_request_slot, render_slot))
+        })
+        .await
+        .map_err(|_| BridgeError::Worker)?;
+        drop(guards);
+        check_cancelled(&cancellation)?;
+        surface
     }
 
     /// Copy a retained raster into the bridge generator's `Uint8List` representation.
@@ -786,6 +1066,130 @@ fn render(
             .render_page_cancellable(page, scale, is_cancelled)
             .map_err(map_render_error),
         OpenDocument::Epub(_) => Err(BridgeError::UnsupportedOperation(BookFormat::Epub)),
+    }
+}
+
+fn selection_surface(
+    document: &OpenDocument,
+    unit: usize,
+    scale: f32,
+    width: f32,
+    font_size: f32,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<SelectionSurface, BridgeError> {
+    if is_cancelled() {
+        return Err(BridgeError::Cancelled);
+    }
+    match document {
+        OpenDocument::Pdf(document) => {
+            let snapshot = document
+                .selection_snapshot(unit, scale)
+                .map_err(map_render_error)?;
+            let (bitmap_width, bitmap_height) = snapshot.bitmap_size();
+            let text = document.page_text(unit).map_err(map_render_error)?;
+            Ok(SelectionSurface {
+                width: bitmap_width as f32,
+                height: bitmap_height as f32,
+                text,
+                resource_path: None,
+                endpoints: snapshot
+                    .endpoints()
+                    .into_iter()
+                    .map(|(rect, endpoint)| SelectionEndpoint {
+                        offset: endpoint.character,
+                        range_start: endpoint.character,
+                        range_end: endpoint.character.saturating_add(1),
+                        rect: SelectionRect {
+                            left: rect.left,
+                            top: rect.top,
+                            right: rect.right,
+                            bottom: rect.bottom,
+                        },
+                    })
+                    .collect(),
+            })
+        }
+        OpenDocument::Epub(document) => {
+            let chapter =
+                document
+                    .presentation()
+                    .chapter(unit)
+                    .ok_or(BridgeError::InvalidPage {
+                        page: unit,
+                        page_count: document.chapter_count(),
+                    })?;
+            let text = chapter.search_text().to_owned();
+            let layout = document
+                .fonts()
+                .measure_text(&EpubTextRequest {
+                    runs: vec![EpubTextRun {
+                        text: text.clone(),
+                        family: None,
+                        monospace: false,
+                        font_size,
+                        bold: false,
+                        italic: false,
+                        foreground: [0, 0, 0, 255],
+                        link: None,
+                    }],
+                    max_width: width,
+                    line_height: font_size * 1.5,
+                    scale,
+                    align: EpubTextAlign::Left,
+                    direction: EpubTextDirection::LeftToRight,
+                    highlights: Vec::new(),
+                })
+                .map_err(map_render_error)?;
+            let path = document.chapter(unit).map(|chapter| chapter.path.clone());
+            Ok(SelectionSurface {
+                width: layout.width,
+                height: layout.height,
+                text,
+                resource_path: path,
+                endpoints: layout
+                    .endpoints
+                    .into_iter()
+                    .map(|endpoint| SelectionEndpoint {
+                        offset: endpoint.scalar,
+                        range_start: endpoint.scalar_start,
+                        range_end: endpoint.scalar_end,
+                        rect: SelectionRect {
+                            left: endpoint.rect.x,
+                            top: endpoint.rect.y,
+                            right: endpoint.rect.x + endpoint.rect.width,
+                            bottom: endpoint.rect.y + endpoint.rect.height,
+                        },
+                    })
+                    .collect(),
+            })
+        }
+        OpenDocument::Cbz(_) => Err(BridgeError::UnsupportedOperation(BookFormat::Cbz)),
+    }
+}
+
+fn storage_error(error: impl std::fmt::Display) -> BridgeError {
+    BridgeError::Storage(error.to_string())
+}
+
+fn annotation_dto(annotation: Annotation) -> BridgeAnnotation {
+    let (unit, start, end) = match annotation.target {
+        AnnotationTarget::Epub(anchor) => (
+            anchor.spine_occurrence as usize,
+            anchor.scalar_start as usize,
+            anchor.scalar_end as usize,
+        ),
+        AnnotationTarget::Pdf(anchor) => {
+            let (start, end) = anchor.character_range.unwrap_or((0, 0));
+            (anchor.page as usize, start as usize, end as usize)
+        }
+    };
+    BridgeAnnotation {
+        id: annotation.id.to_string(),
+        unit,
+        start,
+        end,
+        color: annotation.color,
+        body: annotation.body,
     }
 }
 

@@ -27,8 +27,8 @@ pub use font::{
 pub use limits::EpubLimits;
 pub use math::{MathContent, MathDisplay, MathExpression};
 pub use native_text::{
-    EPUB_TEXT_MAX_SCALARS, EpubTextAlign, EpubTextDirection, EpubTextHighlight, EpubTextHit,
-    EpubTextLayout, EpubTextLine, EpubTextRect, EpubTextRequest, EpubTextRun,
+    EPUB_TEXT_MAX_SCALARS, EpubTextAlign, EpubTextDirection, EpubTextEndpoint, EpubTextHighlight,
+    EpubTextHit, EpubTextLayout, EpubTextLine, EpubTextRect, EpubTextRequest, EpubTextRun,
 };
 pub use parser::{EpubDoc, EpubInspection};
 pub use presentation::{EpubChapterPresentation, EpubPresentation};
