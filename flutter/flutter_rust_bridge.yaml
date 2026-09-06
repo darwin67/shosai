@@ -2,3 +2,4 @@ rust_input: crate::api
 rust_root: ../crates/shosai-flutter-bridge
 dart_output: lib/src/rust
 web: false
+full_dep: true
