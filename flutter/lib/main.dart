@@ -157,18 +157,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
       if (mounted && operation == _operation) {
         _error = error.message;
       }
-      if (opened != null) {
-        _bridge.releaseDocument(handle: opened.handle);
-        _document = null;
-      }
+      _releaseOpenedDocument(opened);
     } catch (error) {
       if (mounted && operation == _operation) {
         _error = error.toString();
       }
-      if (opened != null) {
-        _bridge.releaseDocument(handle: opened.handle);
-        _document = null;
-      }
+      _releaseOpenedDocument(opened);
     } finally {
       _bridge.releaseCancellation(id: cancellation);
       if (_activeCancellation == cancellation) {
@@ -197,6 +191,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _document = null;
     if (document != null) {
       _bridge.releaseDocument(handle: document.handle);
+    }
+  }
+
+  void _releaseOpenedDocument(FlutterDocumentSummary? opened) {
+    if (opened != null && _document?.handle == opened.handle) {
+      _bridge.releaseDocument(handle: opened.handle);
+      _document = null;
     }
   }
 

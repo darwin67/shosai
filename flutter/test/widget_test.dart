@@ -93,10 +93,14 @@ void main() {
 
     final recorder = ui.PictureRecorder();
     ui.Canvas(recorder).drawColor(const ui.Color(0xffffffff), ui.BlendMode.src);
-    decode.complete(await recorder.endRecording().toImage(1, 1));
+    final picture = recorder.endRecording();
+    final image = await picture.toImage(1, 1);
+    picture.dispose();
+    decode.complete(image);
     await bridge.disposed.future;
 
     expect(tester.takeException(), isNull);
+    expect(image.debugDisposed, isTrue);
     expect(bridge.releasedDocuments, [_documentHandle]);
     expect(bridge.releasedCancellations, [BigInt.one]);
     expect(bridge.disposeCount, 1);
@@ -131,6 +135,55 @@ void main() {
     expect(bridge.releasedCancellations, [BigInt.one]);
     expect(bridge.disposeCount, 1);
     expect(bridge.events, ['cancel', 'cancellation', 'dispose']);
+  });
+
+  testWidgets('decoder failure after disposal still completes cleanup', (
+    tester,
+  ) async {
+    final bridge = _FakeBridge()..completeOpen(FlutterBookFormat.pdf);
+    final decodeStarted = Completer<void>();
+    final decode = Completer<ui.Image>();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) {
+            decodeStarted.complete();
+            return decode.future;
+          },
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book.pdf');
+    await tester.tap(find.text('Open document'));
+    await tester.pump();
+    await bridge.renderStarted.future;
+
+    await tester.pumpWidget(const SizedBox());
+    bridge.renderCompleter.complete(
+      FlutterRenderedBuffer(
+        handle: _bufferHandle,
+        width: 1,
+        height: 1,
+        byteLen: BigInt.from(4),
+      ),
+    );
+    await decodeStarted.future;
+    decode.completeError(StateError('decode failed'));
+    await bridge.disposed.future;
+
+    expect(tester.takeException(), isNull);
+    expect(bridge.releasedBuffers, [_bufferHandle]);
+    expect(bridge.releasedDocuments, [_documentHandle]);
+    expect(bridge.releasedCancellations, [BigInt.one]);
+    expect(bridge.disposeCount, 1);
+    expect(bridge.events, [
+      'cancel',
+      'document',
+      'buffer',
+      'cancellation',
+      'dispose',
+    ]);
   });
 
   test('premultiplies translucent RGBA pixels in place', () {
