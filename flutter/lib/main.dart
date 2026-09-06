@@ -56,10 +56,18 @@ class ShosaiApp extends StatelessWidget {
   }
 }
 
+typedef PageDecoder =
+    Future<ui.Image> Function(
+      Uint8List pixels, {
+      required int width,
+      required int height,
+    });
+
 class ReaderScreen extends StatefulWidget {
-  const ReaderScreen({super.key, this.bridge});
+  const ReaderScreen({super.key, this.bridge, this.decoder = _decodeRgba});
 
   final FlutterBridge? bridge;
+  final PageDecoder decoder;
 
   @override
   State<ReaderScreen> createState() => _ReaderScreenState();
@@ -133,7 +141,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         if (opened.format == FlutterBookFormat.cbz) {
           premultiplyRgba(pixels);
         }
-        final image = await _decodeRgba(
+        final image = await widget.decoder(
           pixels,
           width: rendered.width,
           height: rendered.height,
