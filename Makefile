@@ -76,7 +76,18 @@ flutter-linux-debug: check-flutter-codegen
 
 ## Build the macOS Flutter host in debug mode
 flutter-macos-debug: check-flutter-codegen
-	cd flutter && flutter build macos --debug
+	cd flutter && env -i \
+		HOME="$$HOME" \
+		PATH="$$PATH" \
+		TMPDIR="$${TMPDIR:-/tmp}" \
+		DEVELOPER_DIR="$$DEVELOPER_DIR" \
+		SDKROOT="$$(/usr/bin/xcrun --sdk macosx --show-sdk-path)" \
+		MACOSX_DEPLOYMENT_TARGET=13.0 \
+		DYLD_LIBRARY_PATH="$$DYLD_LIBRARY_PATH" \
+		CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="$$CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER" \
+		CC_aarch64_apple_darwin="$$CC_aarch64_apple_darwin" \
+		CXX_aarch64_apple_darwin="$$CXX_aarch64_apple_darwin" \
+		flutter build macos --debug
 
 ## Build the Linux Flutter host in release mode
 flutter-release: flutter-codegen

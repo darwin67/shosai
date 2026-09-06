@@ -143,6 +143,8 @@
           pkgs.lib.optionals pkgs.stdenv.isDarwin [
             cocoapods
             hostXcrun
+            # Flutter 3.41 relies on GNU rsync's --chmod before in-place lipo.
+            rsync
           ];
 
         # Windows-specific dependencies (when cross-compiling or running on Windows)
