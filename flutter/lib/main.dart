@@ -15,11 +15,18 @@ Future<void> main() async {
 }
 
 ExternalLibrary? _nativeLibrary() {
-  if (!Platform.isLinux) return null;
   final executableDirectory = File(Platform.resolvedExecutable).parent.path;
-  return ExternalLibrary.open(
-    '$executableDirectory/lib/libshosai_flutter_bridge.so',
-  );
+  if (Platform.isLinux) {
+    return ExternalLibrary.open(
+      '$executableDirectory/lib/libshosai_flutter_bridge.so',
+    );
+  }
+  if (Platform.isMacOS) {
+    return ExternalLibrary.open(
+      '$executableDirectory/../Frameworks/libshosai_flutter_bridge.dylib',
+    );
+  }
+  return null;
 }
 
 class ShosaiApp extends StatelessWidget {

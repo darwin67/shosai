@@ -121,18 +121,15 @@ pub(crate) fn is_backend_unavailable(error: &anyhow::Error) -> bool {
 }
 
 fn create_pdfium() -> Result<Pdfium> {
-    let bundled = std::env::current_exe()
+    let library = std::env::current_exe()
         .ok()
         .and_then(|executable| bundled_pdfium_path(&executable))
-        .filter(|path| path.is_file());
+        .filter(|path| path.is_file())
+        .or_else(configured_pdfium_path);
 
-    let bindings = match bundled {
-        Some(path) => Pdfium::bind_to_library(&path).with_context(|| {
-            format!(
-                "failed to load bundled PDFium library at {}",
-                path.display()
-            )
-        }),
+    let bindings = match library {
+        Some(path) => Pdfium::bind_to_library(&path)
+            .with_context(|| format!("failed to load PDFium library at {}", path.display())),
         None => Pdfium::bind_to_system_library().context("failed to load PDFium system library"),
     }
     .map_err(|error| {
@@ -143,6 +140,12 @@ fn create_pdfium() -> Result<Pdfium> {
     })?;
 
     Ok(Pdfium::new(bindings))
+}
+
+fn configured_pdfium_path() -> Option<PathBuf> {
+    std::env::var_os("SHOSAI_PDFIUM_LIBRARY")
+        .map(PathBuf::from)
+        .filter(|path| path.is_file())
 }
 
 fn bundled_pdfium_path(executable: &Path) -> Option<PathBuf> {

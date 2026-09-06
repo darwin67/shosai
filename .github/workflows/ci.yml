@@ -116,6 +116,10 @@ jobs:
         if: runner.os == 'Linux'
         run: nix develop --command make flutter-linux-debug
 
+      - name: Build Flutter macOS host
+        if: runner.os == 'macOS'
+        run: nix develop --command make flutter-macos-debug
+
   test-windows:
     name: Test (Windows)
     runs-on: windows-latest

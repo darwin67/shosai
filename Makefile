@@ -1,4 +1,4 @@
-.PHONY: dev reset lint lint-flutter fmt test test-flutter test-scripts check-frb check-flutter-codegen flutter-codegen check-flutter flutter-dev flutter-linux-debug flutter-release check-rfds changelog next-version
+.PHONY: dev reset lint lint-flutter fmt test test-flutter test-scripts check-frb check-flutter-codegen flutter-codegen check-flutter flutter-dev flutter-linux-debug flutter-macos-debug flutter-release check-rfds changelog next-version
 
 DEV_DATA_HOME := $(CURDIR)/target
 
@@ -34,7 +34,11 @@ test:
 ## Verify bindings and run Flutter unit and native bridge tests
 test-flutter: check-flutter-codegen
 	cargo build --package shosai-flutter-bridge
-	cd flutter && flutter test
+	cd flutter && \
+		if [ "$$(uname -s)" = Darwin ]; then \
+			export SHOSAI_PDFIUM_LIBRARY="$${DYLD_LIBRARY_PATH%%:*}/libpdfium.dylib"; \
+		fi; \
+		flutter test
 
 ## Run tests for repository scripts
 test-scripts:
@@ -69,6 +73,10 @@ flutter-dev: flutter-codegen
 ## Build the Linux Flutter host in debug mode
 flutter-linux-debug: check-flutter-codegen
 	cd flutter && flutter build linux --debug
+
+## Build the macOS Flutter host in debug mode
+flutter-macos-debug: check-flutter-codegen
+	cd flutter && flutter build macos --debug
 
 ## Build the Linux Flutter host in release mode
 flutter-release: flutter-codegen
