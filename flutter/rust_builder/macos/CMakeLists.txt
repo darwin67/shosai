@@ -1,0 +1,72 @@
+cmake_minimum_required(VERSION 3.10)
+
+set(PROJECT_NAME "shosai_flutter_bridge")
+project(${PROJECT_NAME} LANGUAGES CXX)
+
+find_program(CARGO_EXECUTABLE cargo REQUIRED)
+get_filename_component(PLUGIN_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." REALPATH)
+get_filename_component(WORKSPACE_ROOT "${PLUGIN_ROOT}/../.." REALPATH)
+set(RUST_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo-target")
+set(BUNDLE_DIR "${CMAKE_CURRENT_BINARY_DIR}/bundle")
+
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  set(CARGO_PROFILE "debug")
+  set(CARGO_PROFILE_FLAG "")
+else()
+  set(CARGO_PROFILE "release")
+  set(CARGO_PROFILE_FLAG "--release")
+endif()
+
+set(RUST_LIBRARY
+  "${RUST_TARGET_DIR}/${CARGO_PROFILE}/libshosai_flutter_bridge.dylib"
+)
+set(BUNDLED_RUST_LIBRARY "${BUNDLE_DIR}/libshosai_flutter_bridge.dylib")
+
+if(DEFINED ENV{SHOSAI_PDFIUM_LIBRARY} AND NOT "$ENV{SHOSAI_PDFIUM_LIBRARY}" STREQUAL "")
+  set(PDFIUM_LIBRARY "$ENV{SHOSAI_PDFIUM_LIBRARY}" CACHE FILEPATH
+    "Path to the PDFium library" FORCE)
+endif()
+if(NOT PDFIUM_LIBRARY)
+  string(REPLACE ":" ";" PDFIUM_HINTS "$ENV{DYLD_LIBRARY_PATH}")
+  find_library(PDFIUM_LIBRARY pdfium HINTS ${PDFIUM_HINTS} REQUIRED)
+endif()
+if(NOT EXISTS "${PDFIUM_LIBRARY}")
+  message(FATAL_ERROR "PDFium library does not exist: ${PDFIUM_LIBRARY}")
+endif()
+
+find_program(LIPO_EXECUTABLE lipo REQUIRED)
+execute_process(
+  COMMAND uname -m
+  OUTPUT_VARIABLE HOST_ARCHITECTURE
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  COMMAND_ERROR_IS_FATAL ANY
+)
+execute_process(
+  COMMAND "${LIPO_EXECUTABLE}" -archs "${PDFIUM_LIBRARY}"
+  OUTPUT_VARIABLE PDFIUM_ARCHITECTURES
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  COMMAND_ERROR_IS_FATAL ANY
+)
+if(NOT " ${PDFIUM_ARCHITECTURES} " MATCHES " ${HOST_ARCHITECTURE} ")
+  message(FATAL_ERROR
+    "PDFium architectures (${PDFIUM_ARCHITECTURES}) do not include host ${HOST_ARCHITECTURE}"
+  )
+endif()
+
+set(BUNDLED_PDFIUM_LIBRARY "${BUNDLE_DIR}/libpdfium.dylib")
+add_custom_target(${PROJECT_NAME}_bundle ALL
+  COMMAND "${CMAKE_COMMAND}" -E env
+    "CARGO_TARGET_DIR=${RUST_TARGET_DIR}"
+    "${CARGO_EXECUTABLE}" build
+    --manifest-path "${WORKSPACE_ROOT}/Cargo.toml"
+    --package shosai-flutter-bridge
+    ${CARGO_PROFILE_FLAG}
+  COMMAND "${CMAKE_COMMAND}" -E make_directory "${BUNDLE_DIR}"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+    "${RUST_LIBRARY}" "${BUNDLED_RUST_LIBRARY}"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+    "${PDFIUM_LIBRARY}" "${BUNDLED_PDFIUM_LIBRARY}"
+  BYPRODUCTS "${BUNDLED_RUST_LIBRARY}" "${BUNDLED_PDFIUM_LIBRARY}"
+  WORKING_DIRECTORY "${WORKSPACE_ROOT}"
+  VERBATIM
+)

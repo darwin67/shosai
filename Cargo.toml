@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/shosai-core", "crates/shosai-app"]
+members = [
+    "crates/shosai-core",
+    "crates/shosai-app",
+    "crates/shosai-flutter-bridge",
+]
 resolver = "3"
 
 [workspace.package]

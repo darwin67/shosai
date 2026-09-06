@@ -1,4 +1,4 @@
-.PHONY: dev reset lint fmt test test-scripts check-frb check-rfds changelog next-version
+.PHONY: dev reset lint lint-flutter fmt test test-flutter test-scripts check-frb check-flutter-codegen flutter-codegen check-flutter flutter-dev flutter-linux-debug flutter-macos-debug flutter-macos-smoke flutter-release check-rfds changelog next-version
 
 DEV_DATA_HOME := $(CURDIR)/target
 
@@ -13,16 +13,28 @@ reset:
 ## Run clippy lints on the workspace
 lint:
 	cargo clippy --workspace --all-targets -- -D warnings
+	$(MAKE) lint-flutter
 
-## Format all Rust source files
+## Run Flutter static analysis
+lint-flutter:
+	cd flutter && flutter analyze
+
+## Format all Rust and Dart source files
 fmt:
 	cargo fmt --all
+	cd flutter && dart format lib test
 
 ## Run all tests
 test:
 	cargo test --workspace --no-fail-fast
 	$(MAKE) test-scripts
 	$(MAKE) check-frb
+	$(MAKE) test-flutter
+
+## Verify bindings and run Flutter unit and native bridge tests
+test-flutter: check-flutter-codegen
+	cargo build --package shosai-flutter-bridge
+	cd flutter && flutter test
 
 ## Run tests for repository scripts
 test-scripts:
@@ -34,6 +46,58 @@ test-scripts:
 ## Verify that the core bridge API is accepted by flutter_rust_bridge codegen
 check-frb:
 	@./scripts/check-frb-codegen.sh
+
+## Verify checked-in Flutter bindings match the bridge API
+check-flutter-codegen:
+	@./scripts/check-flutter-codegen.sh
+
+## Generate Rust/Dart bindings
+flutter-codegen:
+	cd flutter && flutter_rust_bridge_codegen generate
+	cargo fmt --package shosai-flutter-bridge
+
+## Validate generated bindings and the Flutter host
+check-flutter: check-flutter-codegen
+	cd flutter && dart format --output=none --set-exit-if-changed lib test
+	cd flutter && flutter analyze
+	$(MAKE) test-flutter
+
+## Run the Linux Flutter host in debug mode
+flutter-dev: flutter-codegen
+	cd flutter && flutter run -d linux
+
+## Build the Linux Flutter host in debug mode
+flutter-linux-debug: check-flutter-codegen
+	cd flutter && flutter build linux --debug
+
+## Build the macOS Flutter host in debug mode
+flutter-macos-debug: check-flutter-codegen
+	@./scripts/build-flutter-macos.sh
+
+## Launch the packaged macOS host and verify that it remains running
+flutter-macos-smoke: flutter-macos-debug
+	@set -eu; \
+		app="flutter/build/macos/Build/Products/Debug/shosai_flutter.app"; \
+		verify_signatures() { \
+			/usr/bin/codesign --verify --strict "$$app/Contents/Frameworks/libshosai_flutter_bridge.dylib"; \
+			/usr/bin/codesign --verify --strict "$$app/Contents/Frameworks/libpdfium.dylib"; \
+			/usr/bin/codesign --verify --deep --strict --verbose=2 "$$app"; \
+		}; \
+		verify_signatures; \
+		$(MAKE) flutter-macos-debug; \
+		verify_signatures; \
+		log="$$(mktemp)"; \
+		"$$app/Contents/MacOS/shosai_flutter" >"$$log" 2>&1 & pid=$$!; \
+		trap 'kill "$$pid" 2>/dev/null || true; wait "$$pid" 2>/dev/null || true; rm -f "$$log"' EXIT; \
+		sleep 5; \
+		if ! kill -0 "$$pid" 2>/dev/null; then \
+			cat "$$log"; \
+			exit 1; \
+		fi
+
+## Build the Linux Flutter host in release mode
+flutter-release: flutter-codegen
+	cd flutter && flutter build linux --release
 
 ## Validate RFD sources and the checker regression fixtures
 check-rfds:

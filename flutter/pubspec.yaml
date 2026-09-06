@@ -1,0 +1,23 @@
+name: shosai_flutter
+description: "Cross-platform frontend for Shōsai."
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.11.3
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_rust_bridge: 2.11.1
+  shosai_flutter_bridge:
+    path: rust_builder
+
+dev_dependencies:
+  ffigen: ^20.1.1
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true

@@ -143,6 +143,8 @@
           pkgs.lib.optionals pkgs.stdenv.isDarwin [
             cocoapods
             hostXcrun
+            # Flutter 3.41 relies on GNU rsync's --chmod before in-place lipo.
+            rsync
           ];
 
         # Windows-specific dependencies (when cross-compiling or running on Windows)
@@ -240,6 +242,7 @@
           }
           // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
             DYLD_LIBRARY_PATH = pkgs.lib.makeLibraryPath packageRuntimeDeps;
+            SHOSAI_PDFIUM_LIBRARY = "${pkgs.pdfium-binaries}/lib/libpdfium.dylib";
           }
         );
       in
@@ -301,6 +304,7 @@
           // (pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
             # macOS: DYLD_LIBRARY_PATH for dynamic libraries
             DYLD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ pkgs.pdfium-binaries ];
+            SHOSAI_PDFIUM_LIBRARY = "${pkgs.pdfium-binaries}/lib/libpdfium.dylib";
 
             # Release artifacts must use the host Apple SDK and system libraries,
             # rather than embedding dependencies from the Nix SDK or store.
