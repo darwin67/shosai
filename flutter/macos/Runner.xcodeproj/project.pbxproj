@@ -208,8 +208,8 @@
 				33CC10EA2044A3C60003C045 /* Frameworks */,
 				33CC10EB2044A3C60003C045 /* Resources */,
 				33CC110E2044A8840003C045 /* Bundle Framework */,
-				3399D490228B24CF009A79C7 /* ShellScript */,
 				53484F534149425249444745 /* Build and Bundle Rust Bridge */,
+				3399D490228B24CF009A79C7 /* ShellScript */,
 			);
 			buildRules = (
 			);
@@ -324,6 +324,8 @@
 			outputFileListPaths = (
 			);
 			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/libshosai_flutter_bridge.dylib",
+				"$(TARGET_BUILD_DIR)/$(FRAMEWORKS_FOLDER_PATH)/libpdfium.dylib",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;

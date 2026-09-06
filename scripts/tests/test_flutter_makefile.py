@@ -64,6 +64,17 @@ class FlutterMakefileTest(unittest.TestCase):
             ["/pinned/libpdfium.dylib", "test"],
         )
 
+    def test_macos_smoke_rebuilds_and_verifies_the_complete_app_signature(self):
+        makefile = (ROOT / "Makefile").read_text()
+        smoke = makefile.split("flutter-macos-smoke:", 1)[1].split(
+            "\n## ", 1
+        )[0]
+
+        self.assertIn("@set -eu;", smoke)
+        self.assertIn("$(MAKE) flutter-macos-debug", smoke)
+        self.assertEqual(smoke.count("verify_signatures;"), 2)
+        self.assertIn("codesign --verify --deep --strict --verbose=2", smoke)
+
 
 if __name__ == "__main__":
     unittest.main()

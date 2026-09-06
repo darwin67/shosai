@@ -76,9 +76,18 @@ flutter-macos-debug: check-flutter-codegen
 
 ## Launch the packaged macOS host and verify that it remains running
 flutter-macos-smoke: flutter-macos-debug
-	@log="$$(mktemp)"; \
-		app="flutter/build/macos/Build/Products/Debug/shosai_flutter.app/Contents/MacOS/shosai_flutter"; \
-		"$$app" >"$$log" 2>&1 & pid=$$!; \
+	@set -eu; \
+		app="flutter/build/macos/Build/Products/Debug/shosai_flutter.app"; \
+		verify_signatures() { \
+			/usr/bin/codesign --verify --strict "$$app/Contents/Frameworks/libshosai_flutter_bridge.dylib"; \
+			/usr/bin/codesign --verify --strict "$$app/Contents/Frameworks/libpdfium.dylib"; \
+			/usr/bin/codesign --verify --deep --strict --verbose=2 "$$app"; \
+		}; \
+		verify_signatures; \
+		$(MAKE) flutter-macos-debug; \
+		verify_signatures; \
+		log="$$(mktemp)"; \
+		"$$app/Contents/MacOS/shosai_flutter" >"$$log" 2>&1 & pid=$$!; \
 		trap 'kill "$$pid" 2>/dev/null || true; wait "$$pid" 2>/dev/null || true; rm -f "$$log"' EXIT; \
 		sleep 5; \
 		if ! kill -0 "$$pid" 2>/dev/null; then \
