@@ -50,14 +50,16 @@ class ShosaiApp extends StatelessWidget {
 }
 
 class ReaderScreen extends StatefulWidget {
-  const ReaderScreen({super.key});
+  const ReaderScreen({super.key, this.bridge});
+
+  final FlutterBridge? bridge;
 
   @override
   State<ReaderScreen> createState() => _ReaderScreenState();
 }
 
 class _ReaderScreenState extends State<ReaderScreen> {
-  final FlutterBridge _bridge = FlutterBridge();
+  late final FlutterBridge _bridge = widget.bridge ?? FlutterBridge();
   final TextEditingController _path = TextEditingController();
 
   FlutterDocumentSummary? _document;
@@ -66,17 +68,20 @@ class _ReaderScreenState extends State<ReaderScreen> {
   String? _error;
   bool _busy = false;
   int _operation = 0;
+  int _activeBridgeOperations = 0;
+  bool _disposeBridgeWhenIdle = false;
 
   @override
   void dispose() {
     _operation += 1;
+    _disposeBridgeWhenIdle = true;
     final cancellation = _activeCancellation;
     if (cancellation != null) {
       _bridge.cancel(id: cancellation);
     }
     _releaseDocument();
     _path.dispose();
-    _bridge.dispose();
+    _disposeBridgeIfIdle();
     super.dispose();
   }
 
@@ -87,6 +92,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final operation = ++_operation;
     _releaseDocument();
     final cancellation = _bridge.createCancellation();
+    _activeBridgeOperations += 1;
     _activeCancellation = cancellation;
     setState(() {
       _busy = true;
@@ -111,22 +117,26 @@ class _ReaderScreenState extends State<ReaderScreen> {
           scale: 1,
           cancellationId: cancellation,
         );
+        late final Uint8List pixels;
         try {
-          final pixels = _bridge.takeBuffer(handle: rendered.handle);
-          final image = await _decodeRgba(
-            pixels,
-            width: rendered.width,
-            height: rendered.height,
-          );
-          if (!mounted || operation != _operation) {
-            image.dispose();
-            return;
-          }
-          _pageImage?.dispose();
-          _pageImage = image;
+          pixels = _bridge.takeBuffer(handle: rendered.handle);
         } finally {
           _bridge.releaseBuffer(handle: rendered.handle);
         }
+        if (opened.format == FlutterBookFormat.cbz) {
+          premultiplyRgba(pixels);
+        }
+        final image = await _decodeRgba(
+          pixels,
+          width: rendered.width,
+          height: rendered.height,
+        );
+        if (!mounted || operation != _operation) {
+          image.dispose();
+          return;
+        }
+        _pageImage?.dispose();
+        _pageImage = image;
       }
     } on FlutterBridgeError catch (error) {
       if (mounted && operation == _operation) {
@@ -152,6 +162,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
       if (mounted && operation == _operation) {
         setState(() => _busy = false);
       }
+      _activeBridgeOperations -= 1;
+      _disposeBridgeIfIdle();
+    }
+  }
+
+  void _disposeBridgeIfIdle() {
+    if (_disposeBridgeWhenIdle &&
+        _activeBridgeOperations == 0 &&
+        !_bridge.isDisposed) {
+      _bridge.dispose();
     }
   }
 
@@ -302,6 +322,16 @@ class _PagePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_PagePainter oldDelegate) => oldDelegate.image != image;
+}
+
+Uint8List premultiplyRgba(Uint8List pixels) {
+  for (var offset = 0; offset < pixels.length; offset += 4) {
+    final alpha = pixels[offset + 3];
+    pixels[offset] = (pixels[offset] * alpha + 127) ~/ 255;
+    pixels[offset + 1] = (pixels[offset + 1] * alpha + 127) ~/ 255;
+    pixels[offset + 2] = (pixels[offset + 2] * alpha + 127) ~/ 255;
+  }
+  return pixels;
 }
 
 Future<ui.Image> _decodeRgba(
