@@ -15,6 +15,23 @@ final _documentHandle = FlutterDocumentHandle(
 final _bufferHandle = FlutterBufferHandle(registry: BigInt.one, id: BigInt.one);
 
 void main() {
+  testWidgets('application does not publish a desktop window title', (
+    tester,
+  ) async {
+    late MaterialApp app;
+    await tester.pumpWidget(
+      Builder(
+        builder: (context) {
+          app = const ShosaiApp().build(context) as MaterialApp;
+          return const SizedBox();
+        },
+      ),
+    );
+
+    expect(app.title, isEmpty);
+    expect(app.onGenerateTitle, isNull);
+  });
+
   testWidgets('welcome panel describes the native bridge action', (
     tester,
   ) async {
