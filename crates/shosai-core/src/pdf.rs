@@ -159,6 +159,10 @@ fn bundled_pdfium_path(executable: &Path) -> Option<PathBuf> {
 
     #[cfg(not(target_os = "macos"))]
     {
+        let adjacent_library = executable_dir.join("lib/libpdfium.so");
+        if adjacent_library.is_file() {
+            return Some(adjacent_library);
+        }
         let package_dir = executable_dir.parent()?;
         Some(package_dir.join("lib/libpdfium.so"))
     }
@@ -261,6 +265,18 @@ mod tests {
         let executable = Path::new("/opt/shosai/bin/shosai");
 
         assert_eq!(bundled_pdfium_path(executable), Some(expected));
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let directory = tempfile::tempdir().unwrap();
+            let library_dir = directory.path().join("lib");
+            std::fs::create_dir(&library_dir).unwrap();
+            let expected = library_dir.join("libpdfium.so");
+            std::fs::write(&expected, []).unwrap();
+            let executable = directory.path().join("shosai_flutter");
+
+            assert_eq!(bundled_pdfium_path(&executable), Some(expected));
+        }
     }
 
     #[test]

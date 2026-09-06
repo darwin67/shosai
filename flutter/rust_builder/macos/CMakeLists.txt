@@ -22,13 +22,32 @@ set(RUST_LIBRARY
 )
 set(BUNDLED_RUST_LIBRARY "${BUNDLE_DIR}/libshosai_flutter_bridge.dylib")
 
-file(GLOB_RECURSE RUST_SOURCES CONFIGURE_DEPENDS
-  "${WORKSPACE_ROOT}/crates/shosai-core/src/*.rs"
-  "${WORKSPACE_ROOT}/crates/shosai-flutter-bridge/src/*.rs"
-)
+if(NOT PDFIUM_LIBRARY)
+  string(REPLACE ":" ";" PDFIUM_HINTS "$ENV{DYLD_LIBRARY_PATH}")
+  find_library(PDFIUM_LIBRARY pdfium HINTS ${PDFIUM_HINTS} REQUIRED)
+endif()
 
-add_custom_command(
-  OUTPUT "${BUNDLED_RUST_LIBRARY}"
+find_program(LIPO_EXECUTABLE lipo REQUIRED)
+execute_process(
+  COMMAND uname -m
+  OUTPUT_VARIABLE HOST_ARCHITECTURE
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  COMMAND_ERROR_IS_FATAL ANY
+)
+execute_process(
+  COMMAND "${LIPO_EXECUTABLE}" -archs "${PDFIUM_LIBRARY}"
+  OUTPUT_VARIABLE PDFIUM_ARCHITECTURES
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  COMMAND_ERROR_IS_FATAL ANY
+)
+if(NOT " ${PDFIUM_ARCHITECTURES} " MATCHES " ${HOST_ARCHITECTURE} ")
+  message(FATAL_ERROR
+    "PDFium architectures (${PDFIUM_ARCHITECTURES}) do not include host ${HOST_ARCHITECTURE}"
+  )
+endif()
+
+set(BUNDLED_PDFIUM_LIBRARY "${BUNDLE_DIR}/libpdfium.dylib")
+add_custom_target(${PROJECT_NAME}_bundle ALL
   COMMAND "${CMAKE_COMMAND}" -E env
     "CARGO_TARGET_DIR=${RUST_TARGET_DIR}"
     "${CARGO_EXECUTABLE}" build
@@ -38,32 +57,9 @@ add_custom_command(
   COMMAND "${CMAKE_COMMAND}" -E make_directory "${BUNDLE_DIR}"
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
     "${RUST_LIBRARY}" "${BUNDLED_RUST_LIBRARY}"
-  DEPENDS
-    ${RUST_SOURCES}
-    "${WORKSPACE_ROOT}/Cargo.toml"
-    "${WORKSPACE_ROOT}/Cargo.lock"
-    "${WORKSPACE_ROOT}/crates/shosai-core/Cargo.toml"
-    "${WORKSPACE_ROOT}/crates/shosai-flutter-bridge/Cargo.toml"
-  WORKING_DIRECTORY "${WORKSPACE_ROOT}"
-  VERBATIM
-)
-
-if(NOT PDFIUM_LIBRARY)
-  string(REPLACE ":" ";" PDFIUM_HINTS "$ENV{DYLD_LIBRARY_PATH}")
-  find_library(PDFIUM_LIBRARY pdfium HINTS ${PDFIUM_HINTS} REQUIRED)
-endif()
-
-set(BUNDLED_PDFIUM_LIBRARY "${BUNDLE_DIR}/libpdfium.dylib")
-add_custom_command(
-  OUTPUT "${BUNDLED_PDFIUM_LIBRARY}"
-  COMMAND "${CMAKE_COMMAND}" -E make_directory "${BUNDLE_DIR}"
   COMMAND "${CMAKE_COMMAND}" -E copy_if_different
     "${PDFIUM_LIBRARY}" "${BUNDLED_PDFIUM_LIBRARY}"
-  DEPENDS "${PDFIUM_LIBRARY}"
+  BYPRODUCTS "${BUNDLED_RUST_LIBRARY}" "${BUNDLED_PDFIUM_LIBRARY}"
+  WORKING_DIRECTORY "${WORKSPACE_ROOT}"
   VERBATIM
-)
-
-add_custom_target(${PROJECT_NAME}_bundle ALL DEPENDS
-  "${BUNDLED_RUST_LIBRARY}"
-  "${BUNDLED_PDFIUM_LIBRARY}"
 )
