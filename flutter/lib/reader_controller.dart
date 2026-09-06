@@ -157,9 +157,18 @@ final class ReaderController implements Listenable {
     final path = message.path.trim();
     if (path.isEmpty || _model.busy || _closing) return;
 
-    _releaseModelResources();
     final generation = _model.generation + 1;
-    final cancellation = _bridge.createCancellation();
+    _releaseModelResources();
+    late final BigInt cancellation;
+    try {
+      cancellation = _bridge.createCancellation();
+    } on FlutterBridgeError catch (error) {
+      _emit(_model.copyWith(error: error.message, generation: generation));
+      return;
+    } catch (error) {
+      _emit(_model.copyWith(error: error.toString(), generation: generation));
+      return;
+    }
     _activeCancellation = cancellation;
     _activeBridgeOperations += 1;
     _emit(
@@ -295,11 +304,13 @@ final class ReaderController implements Listenable {
         try {
           listener();
         } catch (error, stackTrace) {
-          FlutterError.reportError(
-            FlutterErrorDetails(
-              exception: error,
-              stack: stackTrace,
-              library: 'shosai_flutter',
+          scheduleMicrotask(
+            () => FlutterError.reportError(
+              FlutterErrorDetails(
+                exception: error,
+                stack: stackTrace,
+                library: 'shosai_flutter',
+              ),
             ),
           );
         }
@@ -308,8 +319,10 @@ final class ReaderController implements Listenable {
   }
 
   void _releaseModelResources() {
-    _model.pageImage?.dispose();
+    final pageImage = _model.pageImage;
     final document = _model.document;
+    _model = _model.copyWith(document: null, pageImage: null);
+    pageImage?.dispose();
     if (document != null) {
       _bridge.releaseDocument(handle: document.handle);
     }

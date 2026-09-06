@@ -85,7 +85,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
     super.initState();
     _controller = ReaderController(
       bridge: widget.bridge ?? FlutterBridge(),
-      decoder: widget.decoder,
+      decoder: (pixels, {required width, required height}) =>
+          widget.decoder(pixels, width: width, height: height),
     )..addListener(_modelChanged);
   }
 
