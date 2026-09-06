@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.1.0] - 2026-09-05
+## [0.1.0] - 2026-09-06
 
 ### 🚀 Features
 
@@ -32,6 +32,7 @@ All notable changes to this project will be documented in this file.
 - *(reader)* Prove cross-format selection contracts (#75)
 - *(core)* Prepare annotation core for Flutter migration (#76)
 - *(core)* Add bounded application bridge and resource admission (#79)
+- *(flutter)* Deliver the desktop feasibility slice (#87)
 
 ### 🐛 Bug Fixes
 
