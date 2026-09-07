@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -423,14 +423,14 @@ impl Bridge {
     ///
     /// Production hosts may keep using [`Self::new`]. Tests and platform hosts
     /// that own application-data placement can inject the exact database path.
-    pub fn with_database_path(database: impl AsRef<Path>) -> Self {
+    pub fn with_database_path(database: PathBuf) -> Self {
         let admission = Arc::clone(GLOBAL_ADMISSION.get_or_init(|| {
             Arc::new(BridgeAdmission::new(
                 MAX_BRIDGE_RETAINED_BUFFER_BYTES,
                 MAX_BRIDGE_RENDER_WORKERS,
             ))
         }));
-        Self::with_admission_database(admission, Some(Arc::new(database.as_ref().to_path_buf())))
+        Self::with_admission_database(admission, Some(Arc::new(database)))
     }
 
     #[cfg(test)]

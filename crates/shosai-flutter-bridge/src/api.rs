@@ -322,7 +322,7 @@ impl FlutterBridge {
     /// Construct a bridge with a host-provided SQLite database path.
     #[flutter_rust_bridge::frb(sync)]
     pub fn with_database_path(database_path: String) -> Self {
-        Self::from_bridge(Bridge::with_database_path(database_path))
+        Self::from_bridge(Bridge::with_database_path(database_path.into()))
     }
 
     fn from_bridge(bridge: Bridge) -> Self {
