@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueNom,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -2134432610;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1364596129;
 
 // Section: executor
 
@@ -96,6 +96,7 @@ fn wire__crate__api__FlutterBridge_create_annotation_impl(
     end: impl CstDecode<usize>,
     color: impl CstDecode<crate::api::FlutterHighlightColor>,
     body: impl CstDecode<Option<String>>,
+    cancellation_id: impl CstDecode<u64>,
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::DcoCodec, _, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
@@ -111,6 +112,7 @@ fn wire__crate__api__FlutterBridge_create_annotation_impl(
             let api_end = end.cst_decode();
             let api_color = color.cst_decode();
             let api_body = body.cst_decode();
+            let api_cancellation_id = cancellation_id.cst_decode();
             move |context| async move {
                 transform_result_dco::<_, _, crate::api::FlutterBridgeError>(
                     (move || async move {
@@ -139,6 +141,7 @@ fn wire__crate__api__FlutterBridge_create_annotation_impl(
                             api_end,
                             api_color,
                             api_body,
+                            api_cancellation_id,
                         )
                         .await?;
                         Ok(output_ok)
@@ -487,6 +490,45 @@ fn wire__crate__api__FlutterBridge_release_document_impl(
         },
     )
 }
+fn wire__crate__api__FlutterBridge_release_selection_impl(
+    that: impl CstDecode<
+        RustOpaqueNom<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FlutterBridge>>,
+    >,
+    handle: impl CstDecode<crate::api::FlutterSelectionHandle>,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FlutterBridge_release_selection",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let api_that = that.cst_decode();
+            let api_handle = handle.cst_decode();
+            transform_result_dco::<_, _, ()>((move || {
+                let mut api_that_guard = None;
+                let decode_indices_ =
+                    flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
+                        flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                            &api_that, 0, false,
+                        ),
+                    ]);
+                for i in decode_indices_ {
+                    match i {
+                        0 => api_that_guard = Some(api_that.lockable_decode_sync_ref()),
+                        _ => unreachable!(),
+                    }
+                }
+                let api_that_guard = api_that_guard.unwrap();
+                let output_ok = Result::<_, ()>::Ok(crate::api::FlutterBridge::release_selection(
+                    &*api_that_guard,
+                    api_handle,
+                ))?;
+                Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__FlutterBridge_render_page_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     that: impl CstDecode<
@@ -701,6 +743,26 @@ fn wire__crate__api__FlutterBridge_update_annotation_impl(
                     .await,
                 )
             }
+        },
+    )
+}
+fn wire__crate__api__FlutterBridge_with_database_path_impl(
+    database_path: impl CstDecode<String>,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::DcoCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "FlutterBridge_with_database_path",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let api_database_path = database_path.cst_decode();
+            transform_result_dco::<_, _, ()>((move || {
+                let output_ok = Result::<_, ()>::Ok(
+                    crate::api::FlutterBridge::with_database_path(api_database_path),
+                )?;
+                Ok(output_ok)
+            })())
         },
     )
 }
@@ -1016,6 +1078,18 @@ impl SseDecode for crate::api::FlutterSelectionEndpoint {
     }
 }
 
+impl SseDecode for crate::api::FlutterSelectionHandle {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_registry = <u64>::sse_decode(deserializer);
+        let mut var_id = <u64>::sse_decode(deserializer);
+        return crate::api::FlutterSelectionHandle {
+            registry: var_registry,
+            id: var_id,
+        };
+    }
+}
+
 impl SseDecode for crate::api::FlutterSelectionRect {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1035,17 +1109,21 @@ impl SseDecode for crate::api::FlutterSelectionRect {
 impl SseDecode for crate::api::FlutterSelectionSurface {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_handle = <crate::api::FlutterSelectionHandle>::sse_decode(deserializer);
         let mut var_width = <f32>::sse_decode(deserializer);
         let mut var_height = <f32>::sse_decode(deserializer);
         let mut var_text = <String>::sse_decode(deserializer);
         let mut var_resourcePath = <Option<String>>::sse_decode(deserializer);
+        let mut var_raster = <Option<crate::api::FlutterRenderedBuffer>>::sse_decode(deserializer);
         let mut var_endpoints =
             <Vec<crate::api::FlutterSelectionEndpoint>>::sse_decode(deserializer);
         return crate::api::FlutterSelectionSurface {
+            handle: var_handle,
             width: var_width,
             height: var_height,
             text: var_text,
             resource_path: var_resourcePath,
+            raster: var_raster,
             endpoints: var_endpoints,
         };
     }
@@ -1112,6 +1190,19 @@ impl SseDecode for Option<crate::api::FlutterBookFormat> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::FlutterBookFormat>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::FlutterRenderedBuffer> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::FlutterRenderedBuffer>::sse_decode(
+                deserializer,
+            ));
         } else {
             return None;
         }
@@ -1441,6 +1532,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::FlutterSelectionEndpoint>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::FlutterSelectionHandle {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.registry.into_into_dart().into_dart(),
+            self.id.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::FlutterSelectionHandle
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::FlutterSelectionHandle>
+    for crate::api::FlutterSelectionHandle
+{
+    fn into_into_dart(self) -> crate::api::FlutterSelectionHandle {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::FlutterSelectionRect {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -1467,10 +1579,12 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::FlutterSelectionRect>
 impl flutter_rust_bridge::IntoDart for crate::api::FlutterSelectionSurface {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
+            self.handle.into_into_dart().into_dart(),
             self.width.into_into_dart().into_dart(),
             self.height.into_into_dart().into_dart(),
             self.text.into_into_dart().into_dart(),
             self.resource_path.into_into_dart().into_dart(),
+            self.raster.into_into_dart().into_dart(),
             self.endpoints.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -1661,6 +1775,14 @@ impl SseEncode for crate::api::FlutterSelectionEndpoint {
     }
 }
 
+impl SseEncode for crate::api::FlutterSelectionHandle {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u64>::sse_encode(self.registry, serializer);
+        <u64>::sse_encode(self.id, serializer);
+    }
+}
+
 impl SseEncode for crate::api::FlutterSelectionRect {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1674,10 +1796,12 @@ impl SseEncode for crate::api::FlutterSelectionRect {
 impl SseEncode for crate::api::FlutterSelectionSurface {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::FlutterSelectionHandle>::sse_encode(self.handle, serializer);
         <f32>::sse_encode(self.width, serializer);
         <f32>::sse_encode(self.height, serializer);
         <String>::sse_encode(self.text, serializer);
         <Option<String>>::sse_encode(self.resource_path, serializer);
+        <Option<crate::api::FlutterRenderedBuffer>>::sse_encode(self.raster, serializer);
         <Vec<crate::api::FlutterSelectionEndpoint>>::sse_encode(self.endpoints, serializer);
     }
 }
@@ -1735,6 +1859,16 @@ impl SseEncode for Option<crate::api::FlutterBookFormat> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::FlutterBookFormat>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::FlutterRenderedBuffer> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::FlutterRenderedBuffer>::sse_encode(value, serializer);
         }
     }
 }
@@ -1856,6 +1990,20 @@ mod io {
             CstDecode::<crate::api::FlutterOpenRequest>::cst_decode(*wrap).into()
         }
     }
+    impl CstDecode<crate::api::FlutterRenderedBuffer> for *mut wire_cst_flutter_rendered_buffer {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> crate::api::FlutterRenderedBuffer {
+            let wrap = unsafe { flutter_rust_bridge::for_generated::box_from_leak_ptr(self) };
+            CstDecode::<crate::api::FlutterRenderedBuffer>::cst_decode(*wrap).into()
+        }
+    }
+    impl CstDecode<crate::api::FlutterSelectionHandle> for *mut wire_cst_flutter_selection_handle {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> crate::api::FlutterSelectionHandle {
+            let wrap = unsafe { flutter_rust_bridge::for_generated::box_from_leak_ptr(self) };
+            CstDecode::<crate::api::FlutterSelectionHandle>::cst_decode(*wrap).into()
+        }
+    }
     impl CstDecode<crate::api::FlutterAnnotation> for wire_cst_flutter_annotation {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> crate::api::FlutterAnnotation {
@@ -1939,6 +2087,15 @@ mod io {
             }
         }
     }
+    impl CstDecode<crate::api::FlutterSelectionHandle> for wire_cst_flutter_selection_handle {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> crate::api::FlutterSelectionHandle {
+            crate::api::FlutterSelectionHandle {
+                registry: self.registry.cst_decode(),
+                id: self.id.cst_decode(),
+            }
+        }
+    }
     impl CstDecode<crate::api::FlutterSelectionRect> for wire_cst_flutter_selection_rect {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> crate::api::FlutterSelectionRect {
@@ -1954,10 +2111,12 @@ mod io {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> crate::api::FlutterSelectionSurface {
             crate::api::FlutterSelectionSurface {
+                handle: self.handle.cst_decode(),
                 width: self.width.cst_decode(),
                 height: self.height.cst_decode(),
                 text: self.text.cst_decode(),
                 resource_path: self.resource_path.cst_decode(),
+                raster: self.raster.cst_decode(),
                 endpoints: self.endpoints.cst_decode(),
             }
         }
@@ -2108,6 +2267,19 @@ mod io {
             Self::new_with_null_ptr()
         }
     }
+    impl NewWithNullPtr for wire_cst_flutter_selection_handle {
+        fn new_with_null_ptr() -> Self {
+            Self {
+                registry: Default::default(),
+                id: Default::default(),
+            }
+        }
+    }
+    impl Default for wire_cst_flutter_selection_handle {
+        fn default() -> Self {
+            Self::new_with_null_ptr()
+        }
+    }
     impl NewWithNullPtr for wire_cst_flutter_selection_rect {
         fn new_with_null_ptr() -> Self {
             Self {
@@ -2126,10 +2298,12 @@ mod io {
     impl NewWithNullPtr for wire_cst_flutter_selection_surface {
         fn new_with_null_ptr() -> Self {
             Self {
+                handle: Default::default(),
                 width: Default::default(),
                 height: Default::default(),
                 text: core::ptr::null_mut(),
                 resource_path: core::ptr::null_mut(),
+                raster: core::ptr::null_mut(),
                 endpoints: core::ptr::null_mut(),
             }
         }
@@ -2158,9 +2332,18 @@ mod io {
         end: usize,
         color: i32,
         body: *mut wire_cst_list_prim_u_8_strict,
+        cancellation_id: u64,
     ) {
         wire__crate__api__FlutterBridge_create_annotation_impl(
-            port_, that, document, unit, start, end, color, body,
+            port_,
+            that,
+            document,
+            unit,
+            start,
+            end,
+            color,
+            body,
+            cancellation_id,
         )
     }
 
@@ -2236,6 +2419,14 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_shosai_flutter_wire__crate__api__FlutterBridge_release_selection(
+        that: usize,
+        handle: *mut wire_cst_flutter_selection_handle,
+    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
+        wire__crate__api__FlutterBridge_release_selection_impl(that, handle)
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_shosai_flutter_wire__crate__api__FlutterBridge_render_page(
         port_: i64,
         that: usize,
@@ -2300,6 +2491,13 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_shosai_flutter_wire__crate__api__FlutterBridge_with_database_path(
+        database_path: *mut wire_cst_list_prim_u_8_strict,
+    ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartDco {
+        wire__crate__api__FlutterBridge_with_database_path_impl(database_path)
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_shosai_flutter_wire__crate__api__init_app(port_: i64) {
         wire__crate__api__init_app_impl(port_)
     }
@@ -2350,6 +2548,22 @@ mod io {
     -> *mut wire_cst_flutter_open_request {
         flutter_rust_bridge::for_generated::new_leak_box_ptr(
             wire_cst_flutter_open_request::new_with_null_ptr(),
+        )
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_shosai_flutter_cst_new_box_autoadd_flutter_rendered_buffer()
+    -> *mut wire_cst_flutter_rendered_buffer {
+        flutter_rust_bridge::for_generated::new_leak_box_ptr(
+            wire_cst_flutter_rendered_buffer::new_with_null_ptr(),
+        )
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_shosai_flutter_cst_new_box_autoadd_flutter_selection_handle()
+    -> *mut wire_cst_flutter_selection_handle {
+        flutter_rust_bridge::for_generated::new_leak_box_ptr(
+            wire_cst_flutter_selection_handle::new_with_null_ptr(),
         )
     }
 
@@ -2453,6 +2667,12 @@ mod io {
     }
     #[repr(C)]
     #[derive(Clone, Copy)]
+    pub struct wire_cst_flutter_selection_handle {
+        registry: u64,
+        id: u64,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
     pub struct wire_cst_flutter_selection_rect {
         left: f32,
         top: f32,
@@ -2462,10 +2682,12 @@ mod io {
     #[repr(C)]
     #[derive(Clone, Copy)]
     pub struct wire_cst_flutter_selection_surface {
+        handle: wire_cst_flutter_selection_handle,
         width: f32,
         height: f32,
         text: *mut wire_cst_list_prim_u_8_strict,
         resource_path: *mut wire_cst_list_prim_u_8_strict,
+        raster: *mut wire_cst_flutter_rendered_buffer,
         endpoints: *mut wire_cst_list_flutter_selection_endpoint,
     }
     #[repr(C)]

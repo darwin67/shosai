@@ -66,7 +66,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -2134432610;
+  int get rustContentHash => -1364596129;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -90,6 +90,7 @@ abstract class RustLibApi extends BaseApi {
     required BigInt end,
     required FlutterHighlightColor color,
     String? body,
+    required BigInt cancellationId,
   });
 
   BigInt crateApiFlutterBridgeCreateCancellation({required FlutterBridge that});
@@ -130,6 +131,11 @@ abstract class RustLibApi extends BaseApi {
     required FlutterDocumentHandle handle,
   });
 
+  bool crateApiFlutterBridgeReleaseSelection({
+    required FlutterBridge that,
+    required FlutterSelectionHandle handle,
+  });
+
   Future<FlutterRenderedBuffer> crateApiFlutterBridgeRenderPage({
     required FlutterBridge that,
     required FlutterDocumentHandle document,
@@ -159,6 +165,10 @@ abstract class RustLibApi extends BaseApi {
     required String id,
     required FlutterHighlightColor color,
     String? body,
+  });
+
+  FlutterBridge crateApiFlutterBridgeWithDatabasePath({
+    required String databasePath,
   });
 
   Future<void> crateApiInitApp();
@@ -222,6 +232,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required BigInt end,
     required FlutterHighlightColor color,
     String? body,
+    required BigInt cancellationId,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -236,6 +247,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           var arg4 = cst_encode_usize(end);
           var arg5 = cst_encode_flutter_highlight_color(color);
           var arg6 = cst_encode_opt_String(body);
+          var arg7 = cst_encode_u_64(cancellationId);
           return wire.wire__crate__api__FlutterBridge_create_annotation(
             port_,
             arg0,
@@ -245,6 +257,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             arg4,
             arg5,
             arg6,
+            arg7,
           );
         },
         codec: DcoCodec(
@@ -252,7 +265,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: dco_decode_flutter_bridge_error,
         ),
         constMeta: kCrateApiFlutterBridgeCreateAnnotationConstMeta,
-        argValues: [that, document, unit, start, end, color, body],
+        argValues: [
+          that,
+          document,
+          unit,
+          start,
+          end,
+          color,
+          body,
+          cancellationId,
+        ],
         apiImpl: this,
       ),
     );
@@ -261,7 +283,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiFlutterBridgeCreateAnnotationConstMeta =>
       const TaskConstMeta(
         debugName: "FlutterBridge_create_annotation",
-        argNames: ["that", "document", "unit", "start", "end", "color", "body"],
+        argNames: [
+          "that",
+          "document",
+          "unit",
+          "start",
+          "end",
+          "color",
+          "body",
+          "cancellationId",
+        ],
       );
 
   @override
@@ -558,6 +589,41 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  bool crateApiFlutterBridgeReleaseSelection({
+    required FlutterBridge that,
+    required FlutterSelectionHandle handle,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          var arg0 =
+              cst_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFlutterBridge(
+                that,
+              );
+          var arg1 = cst_encode_box_autoadd_flutter_selection_handle(handle);
+          return wire.wire__crate__api__FlutterBridge_release_selection(
+            arg0,
+            arg1,
+          );
+        },
+        codec: DcoCodec(
+          decodeSuccessData: dco_decode_bool,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiFlutterBridgeReleaseSelectionConstMeta,
+        argValues: [that, handle],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiFlutterBridgeReleaseSelectionConstMeta =>
+      const TaskConstMeta(
+        debugName: "FlutterBridge_release_selection",
+        argNames: ["that", "handle"],
+      );
+
+  @override
   Future<FlutterRenderedBuffer> crateApiFlutterBridgeRenderPage({
     required FlutterBridge that,
     required FlutterDocumentHandle document,
@@ -747,6 +813,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  FlutterBridge crateApiFlutterBridgeWithDatabasePath({
+    required String databasePath,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          var arg0 = cst_encode_String(databasePath);
+          return wire.wire__crate__api__FlutterBridge_with_database_path(arg0);
+        },
+        codec: DcoCodec(
+          decodeSuccessData:
+              dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFlutterBridge,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiFlutterBridgeWithDatabasePathConstMeta,
+        argValues: [databasePath],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiFlutterBridgeWithDatabasePathConstMeta =>
+      const TaskConstMeta(
+        debugName: "FlutterBridge_with_database_path",
+        argNames: ["databasePath"],
+      );
+
+  @override
   Future<void> crateApiInitApp() {
     return handler.executeNormal(
       NormalTask(
@@ -840,6 +934,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   FlutterOpenRequest dco_decode_box_autoadd_flutter_open_request(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_flutter_open_request(raw);
+  }
+
+  @protected
+  FlutterRenderedBuffer dco_decode_box_autoadd_flutter_rendered_buffer(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_flutter_rendered_buffer(raw);
+  }
+
+  @protected
+  FlutterSelectionHandle dco_decode_box_autoadd_flutter_selection_handle(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_flutter_selection_handle(raw);
   }
 
   @protected
@@ -974,6 +1084,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  FlutterSelectionHandle dco_decode_flutter_selection_handle(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return FlutterSelectionHandle(
+      registry: dco_decode_u_64(arr[0]),
+      id: dco_decode_u_64(arr[1]),
+    );
+  }
+
+  @protected
   FlutterSelectionRect dco_decode_flutter_selection_rect(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -991,14 +1113,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   FlutterSelectionSurface dco_decode_flutter_selection_surface(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return FlutterSelectionSurface(
-      width: dco_decode_f_32(arr[0]),
-      height: dco_decode_f_32(arr[1]),
-      text: dco_decode_String(arr[2]),
-      resourcePath: dco_decode_opt_String(arr[3]),
-      endpoints: dco_decode_list_flutter_selection_endpoint(arr[4]),
+      handle: dco_decode_flutter_selection_handle(arr[0]),
+      width: dco_decode_f_32(arr[1]),
+      height: dco_decode_f_32(arr[2]),
+      text: dco_decode_String(arr[3]),
+      resourcePath: dco_decode_opt_String(arr[4]),
+      raster: dco_decode_opt_box_autoadd_flutter_rendered_buffer(arr[5]),
+      endpoints: dco_decode_list_flutter_selection_endpoint(arr[6]),
     );
   }
 
@@ -1042,6 +1166,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_flutter_book_format(raw);
+  }
+
+  @protected
+  FlutterRenderedBuffer? dco_decode_opt_box_autoadd_flutter_rendered_buffer(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null
+        ? null
+        : dco_decode_box_autoadd_flutter_rendered_buffer(raw);
   }
 
   @protected
@@ -1153,6 +1287,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_flutter_open_request(deserializer));
+  }
+
+  @protected
+  FlutterRenderedBuffer sse_decode_box_autoadd_flutter_rendered_buffer(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_flutter_rendered_buffer(deserializer));
+  }
+
+  @protected
+  FlutterSelectionHandle sse_decode_box_autoadd_flutter_selection_handle(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_flutter_selection_handle(deserializer));
   }
 
   @protected
@@ -1308,6 +1458,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  FlutterSelectionHandle sse_decode_flutter_selection_handle(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_registry = sse_decode_u_64(deserializer);
+    var var_id = sse_decode_u_64(deserializer);
+    return FlutterSelectionHandle(registry: var_registry, id: var_id);
+  }
+
+  @protected
   FlutterSelectionRect sse_decode_flutter_selection_rect(
     SseDeserializer deserializer,
   ) {
@@ -1329,18 +1489,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_handle = sse_decode_flutter_selection_handle(deserializer);
     var var_width = sse_decode_f_32(deserializer);
     var var_height = sse_decode_f_32(deserializer);
     var var_text = sse_decode_String(deserializer);
     var var_resourcePath = sse_decode_opt_String(deserializer);
+    var var_raster = sse_decode_opt_box_autoadd_flutter_rendered_buffer(
+      deserializer,
+    );
     var var_endpoints = sse_decode_list_flutter_selection_endpoint(
       deserializer,
     );
     return FlutterSelectionSurface(
+      handle: var_handle,
       width: var_width,
       height: var_height,
       text: var_text,
       resourcePath: var_resourcePath,
+      raster: var_raster,
       endpoints: var_endpoints,
     );
   }
@@ -1405,6 +1571,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_flutter_book_format(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  FlutterRenderedBuffer? sse_decode_opt_box_autoadd_flutter_rendered_buffer(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_flutter_rendered_buffer(deserializer));
     } else {
       return null;
     }
@@ -1611,6 +1790,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_flutter_rendered_buffer(
+    FlutterRenderedBuffer self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_flutter_rendered_buffer(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_flutter_selection_handle(
+    FlutterSelectionHandle self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_flutter_selection_handle(self, serializer);
+  }
+
+  @protected
   void sse_encode_f_32(double self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putFloat32(self);
@@ -1735,6 +1932,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_flutter_selection_handle(
+    FlutterSelectionHandle self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_64(self.registry, serializer);
+    sse_encode_u_64(self.id, serializer);
+  }
+
+  @protected
   void sse_encode_flutter_selection_rect(
     FlutterSelectionRect self,
     SseSerializer serializer,
@@ -1752,10 +1959,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_flutter_selection_handle(self.handle, serializer);
     sse_encode_f_32(self.width, serializer);
     sse_encode_f_32(self.height, serializer);
     sse_encode_String(self.text, serializer);
     sse_encode_opt_String(self.resourcePath, serializer);
+    sse_encode_opt_box_autoadd_flutter_rendered_buffer(self.raster, serializer);
     sse_encode_list_flutter_selection_endpoint(self.endpoints, serializer);
   }
 
@@ -1823,6 +2032,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_flutter_rendered_buffer(
+    FlutterRenderedBuffer? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_flutter_rendered_buffer(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_u_32(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putUint32(self);
@@ -1881,6 +2103,7 @@ class FlutterBridgeImpl extends RustOpaque implements FlutterBridge {
     required BigInt end,
     required FlutterHighlightColor color,
     String? body,
+    required BigInt cancellationId,
   }) => RustLib.instance.api.crateApiFlutterBridgeCreateAnnotation(
     that: this,
     document: document,
@@ -1889,6 +2112,7 @@ class FlutterBridgeImpl extends RustOpaque implements FlutterBridge {
     end: end,
     color: color,
     body: body,
+    cancellationId: cancellationId,
   );
 
   BigInt createCancellation() =>
@@ -1931,6 +2155,11 @@ class FlutterBridgeImpl extends RustOpaque implements FlutterBridge {
       .instance
       .api
       .crateApiFlutterBridgeReleaseDocument(that: this, handle: handle);
+
+  bool releaseSelection({required FlutterSelectionHandle handle}) => RustLib
+      .instance
+      .api
+      .crateApiFlutterBridgeReleaseSelection(that: this, handle: handle);
 
   Future<FlutterRenderedBuffer> renderPage({
     required FlutterDocumentHandle document,

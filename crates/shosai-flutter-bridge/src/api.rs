@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use shosai_core::annotations::HighlightColor;
 use shosai_core::bridge::{
-    Bridge, BridgeAnnotation, BridgeError, BufferHandle, Cancellation, DocumentHandle, OpenRequest,
-    RenderRequest, SelectionSurface,
+    Bridge, BridgeAnnotation, BridgeError, BufferHandle, Cancellation, CreateAnnotationRequest,
+    DocumentHandle, OpenRequest, RenderRequest, SelectionHandle, SelectionSurface,
 };
 use shosai_core::library::BookFormat;
 use thiserror::Error;
@@ -148,6 +148,30 @@ impl From<FlutterBufferHandle> for BufferHandle {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlutterSelectionHandle {
+    pub registry: u64,
+    pub id: u64,
+}
+
+impl From<SelectionHandle> for FlutterSelectionHandle {
+    fn from(value: SelectionHandle) -> Self {
+        Self {
+            registry: value.registry,
+            id: value.id,
+        }
+    }
+}
+
+impl From<FlutterSelectionHandle> for SelectionHandle {
+    fn from(value: FlutterSelectionHandle) -> Self {
+        Self {
+            registry: value.registry,
+            id: value.id,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FlutterDocumentSummary {
     pub handle: FlutterDocumentHandle,
@@ -156,7 +180,7 @@ pub struct FlutterDocumentSummary {
     pub logical_unit_count: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FlutterRenderedBuffer {
     pub handle: FlutterBufferHandle,
     pub width: u32,
@@ -182,20 +206,29 @@ pub struct FlutterSelectionEndpoint {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlutterSelectionSurface {
+    pub handle: FlutterSelectionHandle,
     pub width: f32,
     pub height: f32,
     pub text: String,
     pub resource_path: Option<String>,
+    pub raster: Option<FlutterRenderedBuffer>,
     pub endpoints: Vec<FlutterSelectionEndpoint>,
 }
 
 impl From<SelectionSurface> for FlutterSelectionSurface {
     fn from(value: SelectionSurface) -> Self {
         Self {
+            handle: value.handle.into(),
             width: value.width,
             height: value.height,
             text: value.text,
             resource_path: value.resource_path,
+            raster: value.raster.map(|raster| FlutterRenderedBuffer {
+                handle: raster.handle.into(),
+                width: raster.width,
+                height: raster.height,
+                byte_len: raster.byte_len,
+            }),
             endpoints: value
                 .endpoints
                 .into_iter()
@@ -283,8 +316,18 @@ impl Default for FlutterBridge {
 impl FlutterBridge {
     #[flutter_rust_bridge::frb(sync)]
     pub fn new() -> Self {
+        Self::from_bridge(Bridge::new())
+    }
+
+    /// Construct a bridge with a host-provided SQLite database path.
+    #[flutter_rust_bridge::frb(sync)]
+    pub fn with_database_path(database_path: String) -> Self {
+        Self::from_bridge(Bridge::with_database_path(database_path))
+    }
+
+    fn from_bridge(bridge: Bridge) -> Self {
         Self {
-            bridge: Bridge::new(),
+            bridge,
             next_cancellation: AtomicU64::new(1),
             cancellations: Mutex::new(HashMap::new()),
         }
@@ -400,6 +443,7 @@ impl FlutterBridge {
             .map_err(Into::into)
     }
 
+    #[allow(clippy::too_many_arguments)] // FRB exposes these as named Dart arguments.
     pub async fn create_annotation(
         &self,
         document: FlutterDocumentHandle,
@@ -408,9 +452,21 @@ impl FlutterBridge {
         end: usize,
         color: FlutterHighlightColor,
         body: Option<String>,
+        cancellation_id: u64,
     ) -> Result<FlutterAnnotation, FlutterBridgeError> {
+        let cancellation = self.cancellation(cancellation_id)?;
         self.bridge
-            .create_annotation(document.into(), unit, start, end, color.into(), body)
+            .create_annotation(
+                CreateAnnotationRequest {
+                    document: document.into(),
+                    unit,
+                    start,
+                    end,
+                    color: color.into(),
+                    body,
+                },
+                cancellation,
+            )
             .await
             .map(Into::into)
             .map_err(Into::into)
@@ -464,6 +520,11 @@ impl FlutterBridge {
     #[flutter_rust_bridge::frb(sync)]
     pub fn release_buffer(&self, handle: FlutterBufferHandle) -> bool {
         self.bridge.release_buffer(handle.into())
+    }
+
+    #[flutter_rust_bridge::frb(sync)]
+    pub fn release_selection(&self, handle: FlutterSelectionHandle) -> bool {
+        self.bridge.release_selection(handle.into())
     }
 
     fn cancellation(&self, id: u64) -> Result<Cancellation, FlutterBridgeError> {

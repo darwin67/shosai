@@ -6,8 +6,8 @@
 import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `cancellation`, `invalid_request`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
+// These functions are ignored because they are not marked as `pub`: `cancellation`, `from_bridge`, `invalid_request`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
 // Rust type: RustOpaqueNom<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FlutterBridge>>
 abstract class FlutterBridge implements RustOpaqueInterface {
@@ -20,6 +20,7 @@ abstract class FlutterBridge implements RustOpaqueInterface {
     required BigInt end,
     required FlutterHighlightColor color,
     String? body,
+    required BigInt cancellationId,
   });
 
   BigInt createCancellation();
@@ -49,6 +50,8 @@ abstract class FlutterBridge implements RustOpaqueInterface {
 
   bool releaseDocument({required FlutterDocumentHandle handle});
 
+  bool releaseSelection({required FlutterSelectionHandle handle});
+
   Future<FlutterRenderedBuffer> renderPage({
     required FlutterDocumentHandle document,
     required BigInt page,
@@ -73,6 +76,12 @@ abstract class FlutterBridge implements RustOpaqueInterface {
     required FlutterHighlightColor color,
     String? body,
   });
+
+  /// Construct a bridge with a host-provided SQLite database path.
+  static FlutterBridge withDatabasePath({required String databasePath}) =>
+      RustLib.instance.api.crateApiFlutterBridgeWithDatabasePath(
+        databasePath: databasePath,
+      );
 }
 
 class FlutterAnnotation {
@@ -295,6 +304,24 @@ class FlutterSelectionEndpoint {
           rect == other.rect;
 }
 
+class FlutterSelectionHandle {
+  final BigInt registry;
+  final BigInt id;
+
+  const FlutterSelectionHandle({required this.registry, required this.id});
+
+  @override
+  int get hashCode => registry.hashCode ^ id.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FlutterSelectionHandle &&
+          runtimeType == other.runtimeType &&
+          registry == other.registry &&
+          id == other.id;
+}
+
 class FlutterSelectionRect {
   final double left;
   final double top;
@@ -324,26 +351,32 @@ class FlutterSelectionRect {
 }
 
 class FlutterSelectionSurface {
+  final FlutterSelectionHandle handle;
   final double width;
   final double height;
   final String text;
   final String? resourcePath;
+  final FlutterRenderedBuffer? raster;
   final List<FlutterSelectionEndpoint> endpoints;
 
   const FlutterSelectionSurface({
+    required this.handle,
     required this.width,
     required this.height,
     required this.text,
     this.resourcePath,
+    this.raster,
     required this.endpoints,
   });
 
   @override
   int get hashCode =>
+      handle.hashCode ^
       width.hashCode ^
       height.hashCode ^
       text.hashCode ^
       resourcePath.hashCode ^
+      raster.hashCode ^
       endpoints.hashCode;
 
   @override
@@ -351,9 +384,11 @@ class FlutterSelectionSurface {
       identical(this, other) ||
       other is FlutterSelectionSurface &&
           runtimeType == other.runtimeType &&
+          handle == other.handle &&
           width == other.width &&
           height == other.height &&
           text == other.text &&
           resourcePath == other.resourcePath &&
+          raster == other.raster &&
           endpoints == other.endpoints;
 }
