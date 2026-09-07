@@ -107,13 +107,13 @@ coordinates.
 
 - [X] Create the Flutter application and native Rust library integration with
   reproducible debug and release commands.
-- [ ] Open one representative PDF and EPUB, render visible content, and release
+- [X] Open one representative PDF and EPUB, render visible content, and release
   document and buffer handles deterministically.
 - [ ] Reproduce RFD 6's shared idle/selecting/selected/committing interaction for
   mouse, keyboard, and touch using the same logical endpoint and anchor contract.
-- [ ] Draw temporary and saved overlays without rerendering PDF pages during drag
+- [X] Draw temporary and saved overlays without rerendering PDF pages during drag
   or changing EPUB pagination geometry.
-- [ ] Persist, reopen, navigate to, recolor, annotate, and delete one highlight
+- [X] Persist, reopen, navigate to, recolor, annotate, and delete one highlight
   in each format through the Rust annotation store.
 - [ ] Verify PDF zoom/DPI and EPUB viewport/font/theme relayout preserve anchors;
   surface exact, recovered, ambiguous, and orphaned states.
