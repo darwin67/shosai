@@ -37,39 +37,28 @@ on:
       - ".github/workflows/release-pr.yml"
 
 jobs:
-  fmt:
-    name: Format
+  rust-format:
+    name: Rust format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
+      - run: nix develop --command make check-fmt-rust
 
-      # Cache Cargo dependencies
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-fmt-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-fmt-cargo-
-            ${{ runner.os }}-cargo-
-
-      - run: nix develop --command cargo fmt --all -- --check
-      - run: nix develop --command bash -c 'cd flutter && dart format --output=none --set-exit-if-changed lib test'
-
-  lint:
-    name: Lint
+  dart-format:
+    name: Dart format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: make check-rfds
       - uses: DeterminateSystems/nix-installer-action@main
+      - run: nix develop --command make check-fmt-flutter
 
-      # Cache Cargo dependencies
+  rust-lint:
+    name: Rust lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         with:
@@ -82,11 +71,46 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-lint-cargo-
             ${{ runner.os }}-cargo-
+      - run: nix develop --command make lint-rust
 
-      - run: nix develop --command make lint
+  flutter-analyze:
+    name: Flutter analyze
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - run: nix develop --command make lint-flutter
 
-  test:
-    name: Test
+  rfd-validation:
+    name: RFD validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make check-rfds
+
+  bridge-codegen:
+    name: Bridge codegen compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-bridge-codegen-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bridge-codegen-cargo-
+            ${{ runner.os }}-cargo-
+      - run: nix develop --command make check-frb
+      - run: nix develop --command make check-flutter-codegen
+
+  rust-test:
+    name: Rust tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -105,23 +129,86 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-test-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-test-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-test-cargo-
+            ${{ runner.os }}-rust-test-cargo-
             ${{ runner.os }}-cargo-
+      - run: nix develop --command make test-rust
 
-      - run: nix develop --command make test
+  flutter-test:
+    name: Flutter tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-flutter-test-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-flutter-test-cargo-
+            ${{ runner.os }}-cargo-
+      - run: nix develop --command make test-flutter
 
-      - name: Build Flutter Linux host
-        if: runner.os == 'Linux'
-        run: nix develop --command make flutter-linux-debug
+  script-test:
+    name: Script tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - run: nix develop --command make test-scripts
 
-      - name: Build and launch Flutter macOS host
-        if: runner.os == 'macOS'
-        run: nix develop --command make flutter-macos-smoke
+  flutter-linux-host:
+    name: Flutter Linux host
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            flutter/build/**/cargo-target/
+          key: ${{ runner.os }}-flutter-host-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-flutter-host-cargo-
+            ${{ runner.os }}-cargo-
+      - run: nix develop --command make flutter-linux-debug
+
+  flutter-macos-host:
+    name: Flutter macOS host
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            flutter/build/**/cargo-target/
+          key: ${{ runner.os }}-flutter-host-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-flutter-host-cargo-
+            ${{ runner.os }}-cargo-
+      - run: nix develop --command make flutter-macos-smoke
 
   test-windows:
-    name: Test (Windows)
+    name: Rust tests (Windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

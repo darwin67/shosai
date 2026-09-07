@@ -13,19 +13,48 @@ typedef PageDecoder =
       required int height,
     });
 
+typedef NoteEditor = Future<String?> Function(String? initialValue);
+
 const _unchanged = Object();
 
 final class ReaderModel {
-  const ReaderModel({
+  ReaderModel({
     this.document,
     this.pageImage,
+    FlutterSelectionSurface? selectionSurface,
+    this.selectionPhase = ReaderSelectionPhase.idle,
+    this.anchor,
+    this.focus,
+    List<ReaderSelection> savedSelections = const [],
+    List<FlutterAnnotation> annotations = const [],
+    Set<String> annotationOperations = const {},
+    this.selectionError,
+    this.annotationError,
+    this.annotationsReady = false,
+    this.contentState = ReaderContentState.loading,
     this.error,
     this.busy = false,
     this.generation = 0,
-  });
+  }) : selectionSurface = selectionSurface == null
+           ? null
+           : _freezeSurface(selectionSurface),
+       savedSelections = List.unmodifiable(savedSelections),
+       annotations = List.unmodifiable(annotations),
+       annotationOperations = Set.unmodifiable(annotationOperations);
 
   final FlutterDocumentSummary? document;
   final ui.Image? pageImage;
+  final FlutterSelectionSurface? selectionSurface;
+  final ReaderSelectionPhase selectionPhase;
+  final int? anchor;
+  final int? focus;
+  final List<ReaderSelection> savedSelections;
+  final List<FlutterAnnotation> annotations;
+  final Set<String> annotationOperations;
+  final String? selectionError;
+  final String? annotationError;
+  final bool annotationsReady;
+  final ReaderContentState contentState;
   final String? error;
   final bool busy;
   final int generation;
@@ -33,6 +62,17 @@ final class ReaderModel {
   ReaderModel copyWith({
     Object? document = _unchanged,
     Object? pageImage = _unchanged,
+    Object? selectionSurface = _unchanged,
+    ReaderSelectionPhase? selectionPhase,
+    Object? anchor = _unchanged,
+    Object? focus = _unchanged,
+    List<ReaderSelection>? savedSelections,
+    List<FlutterAnnotation>? annotations,
+    Set<String>? annotationOperations,
+    Object? selectionError = _unchanged,
+    Object? annotationError = _unchanged,
+    bool? annotationsReady,
+    ReaderContentState? contentState,
     Object? error = _unchanged,
     bool? busy,
     int? generation,
@@ -44,11 +84,46 @@ final class ReaderModel {
       pageImage: identical(pageImage, _unchanged)
           ? this.pageImage
           : pageImage as ui.Image?,
+      selectionSurface: identical(selectionSurface, _unchanged)
+          ? this.selectionSurface
+          : selectionSurface as FlutterSelectionSurface?,
+      selectionPhase: selectionPhase ?? this.selectionPhase,
+      anchor: identical(anchor, _unchanged) ? this.anchor : anchor as int?,
+      focus: identical(focus, _unchanged) ? this.focus : focus as int?,
+      savedSelections: savedSelections == null
+          ? this.savedSelections
+          : List.unmodifiable(savedSelections),
+      annotations: annotations == null
+          ? this.annotations
+          : List.unmodifiable(annotations),
+      annotationOperations: annotationOperations == null
+          ? this.annotationOperations
+          : Set.unmodifiable(annotationOperations),
+      selectionError: identical(selectionError, _unchanged)
+          ? this.selectionError
+          : selectionError as String?,
+      annotationError: identical(annotationError, _unchanged)
+          ? this.annotationError
+          : annotationError as String?,
+      annotationsReady: annotationsReady ?? this.annotationsReady,
+      contentState: contentState ?? this.contentState,
       error: identical(error, _unchanged) ? this.error : error as String?,
       busy: busy ?? this.busy,
       generation: generation ?? this.generation,
     );
   }
+}
+
+enum ReaderSelectionPhase { idle, selecting, selected, committing }
+
+enum ReaderContentState { loading, ready, failed }
+
+final class ReaderSelection {
+  const ReaderSelection(this.start, this.end, [this.color]);
+
+  final int start;
+  final int end;
+  final FlutterHighlightColor? color;
 }
 
 sealed class ReaderMessage {
@@ -59,6 +134,71 @@ final class ReaderOpenRequested extends ReaderMessage {
   const ReaderOpenRequested(this.path);
 
   final String path;
+}
+
+final class ReaderSelectionStarted extends ReaderMessage {
+  const ReaderSelectionStarted(this.offset);
+  final int offset;
+}
+
+final class ReaderSelectionExtended extends ReaderMessage {
+  const ReaderSelectionExtended(this.offset);
+  final int offset;
+}
+
+final class ReaderSelectionEnded extends ReaderMessage {
+  const ReaderSelectionEnded();
+}
+
+final class ReaderSelectionCommitted extends ReaderMessage {
+  const ReaderSelectionCommitted();
+}
+
+final class ReaderAnnotationUpdated extends ReaderMessage {
+  const ReaderAnnotationUpdated(this.id, this.color, this.body);
+  final String id;
+  final FlutterHighlightColor color;
+  final String? body;
+}
+
+final class ReaderAnnotationNoteRequested extends ReaderMessage {
+  const ReaderAnnotationNoteRequested(this.id);
+  final String id;
+}
+
+/// Completion from a controller-owned note editor effect.
+final class _ReaderAnnotationNoteCompleted extends ReaderMessage {
+  const _ReaderAnnotationNoteCompleted(
+    this.generation,
+    this.revision,
+    this.id,
+    this.body,
+  );
+  final int generation;
+  final int revision;
+  final String id;
+  final String body;
+}
+
+final class _ReaderAnnotationNoteFailed extends ReaderMessage {
+  const _ReaderAnnotationNoteFailed(this.generation, this.revision, this.error);
+  final int generation;
+  final int revision;
+  final String error;
+}
+
+final class ReaderAnnotationDeleted extends ReaderMessage {
+  const ReaderAnnotationDeleted(this.id);
+  final String id;
+}
+
+final class ReaderAnnotationNavigated extends ReaderMessage {
+  const ReaderAnnotationNavigated(this.id);
+  final String id;
+}
+
+final class ReaderSelectionCancelled extends ReaderMessage {
+  const ReaderSelectionCancelled();
 }
 
 final class _ReaderDocumentOpened extends ReaderMessage {
@@ -79,6 +219,53 @@ final class _ReaderImageDecoded extends ReaderMessage {
 
   final int generation;
   final ui.Image? pageImage;
+}
+
+final class _ReaderSurfaceLoaded extends ReaderMessage {
+  const _ReaderSurfaceLoaded({required this.generation, required this.surface});
+  final int generation;
+  final FlutterSelectionSurface surface;
+}
+
+final class _ReaderEpubContentLoaded extends ReaderMessage {
+  const _ReaderEpubContentLoaded({
+    required this.generation,
+    required this.surface,
+    required this.pageImage,
+  });
+  final int generation;
+  final FlutterSelectionSurface surface;
+  final ui.Image pageImage;
+}
+
+final class _ReaderSelectionSupportFailed extends ReaderMessage {
+  const _ReaderSelectionSupportFailed(this.generation, this.error);
+  final int generation;
+  final String error;
+}
+
+final class _ReaderAnnotationListFailed extends ReaderMessage {
+  const _ReaderAnnotationListFailed(this.generation, this.revision, this.error);
+  final int generation;
+  final int revision;
+  final String error;
+}
+
+final class _ReaderAnnotationsChanged extends ReaderMessage {
+  const _ReaderAnnotationsChanged(
+    this.generation,
+    this.revision,
+    this.operationId,
+    this.selectionRevision,
+    this.items, [
+    this.error,
+  ]);
+  final int generation;
+  final int revision;
+  final String? operationId;
+  final int? selectionRevision;
+  final List<FlutterAnnotation>? items;
+  final String? error;
 }
 
 final class _ReaderOpenFailed extends ReaderMessage {
@@ -103,6 +290,15 @@ final class _ReaderOperationFinished extends ReaderMessage {
   final BigInt cancellation;
 }
 
+final class _ReaderAnnotationCreateFinished extends ReaderMessage {
+  const _ReaderAnnotationCreateFinished(this.cancellation);
+  final BigInt cancellation;
+}
+
+final class _ReaderAnnotationOperationFinished extends ReaderMessage {
+  const _ReaderAnnotationOperationFinished();
+}
+
 final class _ReaderDisposeRequested extends ReaderMessage {
   const _ReaderDisposeRequested();
 }
@@ -111,15 +307,23 @@ final class ReaderController implements Listenable {
   ReaderController({
     required FlutterBridge bridge,
     required PageDecoder decoder,
+    NoteEditor? noteEditor,
   }) : _bridge = bridge,
-       _decoder = decoder;
+       _decoder = decoder,
+       _noteEditor = noteEditor ?? ((_) async => null);
 
   final FlutterBridge _bridge;
   final PageDecoder _decoder;
+  final NoteEditor _noteEditor;
 
-  ReaderModel _model = const ReaderModel();
+  ReaderModel _model = ReaderModel();
   BigInt? _activeCancellation;
+  final Set<BigInt> _annotationCancellations = {};
   int _activeBridgeOperations = 0;
+  int _annotationRevision = 0;
+  int _selectionRevision = 0;
+  int _nextOperationId = 0;
+  int _noteRevision = 0;
   bool _closing = false;
   bool _listenersDisposed = false;
   final Set<VoidCallback> _listeners = {};
@@ -140,14 +344,91 @@ final class ReaderController implements Listenable {
     switch (message) {
       case ReaderOpenRequested():
         _openRequested(message);
+      case ReaderSelectionStarted():
+        _selectionStarted(message.offset);
+      case ReaderSelectionExtended():
+        _selectionExtended(message.offset);
+      case ReaderSelectionEnded():
+        _selectionEnded();
+      case ReaderSelectionCommitted():
+        _selectionCommitted();
+      case ReaderAnnotationUpdated():
+        unawaited(_updateAnnotation(message));
+      case ReaderAnnotationNoteRequested():
+        _noteRequested(message.id);
+      case _ReaderAnnotationNoteCompleted():
+        _noteCompleted(message);
+      case _ReaderAnnotationNoteFailed():
+        if (_isCurrent(message.generation) &&
+            message.revision == _noteRevision) {
+          _emit(_model.copyWith(annotationError: message.error));
+        }
+      case ReaderAnnotationDeleted():
+        unawaited(_deleteAnnotation(message.id));
+      case ReaderAnnotationNavigated():
+        _navigateAnnotation(message.id);
+      case ReaderSelectionCancelled():
+        _selectionCancelled();
       case _ReaderDocumentOpened():
         _documentOpened(message);
       case _ReaderImageDecoded():
         _imageDecoded(message);
+      case _ReaderSurfaceLoaded():
+        if (_isCurrent(message.generation)) {
+          _emit(
+            _model.copyWith(
+              selectionSurface: _freezeSurface(message.surface),
+              contentState: ReaderContentState.ready,
+            ),
+          );
+        } else {
+          _releaseSurface(message.surface);
+        }
+      case _ReaderEpubContentLoaded():
+        if (_isCurrent(message.generation)) {
+          _emit(
+            _model.copyWith(
+              selectionSurface: _freezeSurface(message.surface),
+              pageImage: message.pageImage,
+              contentState: ReaderContentState.ready,
+            ),
+          );
+        } else {
+          message.pageImage.dispose();
+          _releaseSurface(message.surface);
+        }
+      case _ReaderSelectionSupportFailed():
+        if (_isCurrent(message.generation)) {
+          final mandatory = _model.document?.format == FlutterBookFormat.epub;
+          _emit(
+            _model.copyWith(
+              selectionError: message.error,
+              contentState: mandatory
+                  ? ReaderContentState.failed
+                  : _model.contentState,
+              error: mandatory ? message.error : _unchanged,
+            ),
+          );
+        }
+      case _ReaderAnnotationListFailed():
+        if (_isCurrent(message.generation) &&
+            message.revision == _annotationRevision) {
+          _emit(_model.copyWith(annotationError: message.error));
+        }
+      case _ReaderAnnotationsChanged():
+        _annotationsChanged(message);
       case _ReaderOpenFailed():
         _openFailed(message);
       case _ReaderOperationFinished():
         _operationFinished(message);
+      case _ReaderAnnotationCreateFinished():
+        _annotationCancellations.remove(message.cancellation);
+        _bridge.releaseCancellation(id: message.cancellation);
+        _activeBridgeOperations -= 1;
+        _disposeBridgeIfIdle();
+      case _ReaderAnnotationOperationFinished():
+        _activeBridgeOperations -= 1;
+        _disposeBridgeIfIdle();
       case _ReaderDisposeRequested():
         _disposeRequested();
     }
@@ -155,9 +436,15 @@ final class ReaderController implements Listenable {
 
   void _openRequested(ReaderOpenRequested message) {
     final path = message.path.trim();
-    if (path.isEmpty || _model.busy || _closing) return;
+    if (path.isEmpty ||
+        _model.busy ||
+        _model.annotationOperations.isNotEmpty ||
+        _closing) {
+      return;
+    }
 
     final generation = _model.generation + 1;
+    _annotationRevision += 1;
     _releaseModelResources();
     late final BigInt cancellation;
     try {
@@ -176,6 +463,17 @@ final class ReaderController implements Listenable {
         document: null,
         pageImage: null,
         error: null,
+        selectionSurface: null,
+        selectionPhase: ReaderSelectionPhase.idle,
+        anchor: null,
+        focus: null,
+        savedSelections: const [],
+        annotations: const [],
+        annotationOperations: const {},
+        selectionError: null,
+        annotationError: null,
+        annotationsReady: false,
+        contentState: ReaderContentState.loading,
         busy: true,
         generation: generation,
       ),
@@ -201,6 +499,93 @@ final class ReaderController implements Listenable {
       opened = null;
       if (!_isCurrent(generation)) return;
 
+      if (document.format != FlutterBookFormat.cbz) {
+        FlutterSelectionSurface? effectSurface;
+        try {
+          final surface = await _bridge.selectionSurface(
+            document: document.handle,
+            unit: BigInt.zero,
+            scale: 1,
+            width: 680,
+            fontSize: 18,
+            cancellationId: cancellation,
+          );
+          effectSurface = surface;
+          if (!_isCurrent(generation)) {
+            if (surface.raster case final raster?) {
+              _bridge.releaseBuffer(handle: raster.handle);
+            }
+            _releaseSurface(surface);
+            effectSurface = null;
+            return;
+          }
+          if (document.format == FlutterBookFormat.epub) {
+            final raster = surface.raster;
+            if (raster == null) {
+              _releaseSurface(surface);
+              effectSurface = null;
+              throw StateError('EPUB selection surface is missing its raster');
+            }
+            late final ui.Image image;
+            try {
+              final pixels = _bridge.takeBuffer(handle: raster.handle);
+              premultiplyRgba(pixels);
+              image = await _decoder(
+                pixels,
+                width: raster.width,
+                height: raster.height,
+              );
+            } finally {
+              _bridge.releaseBuffer(handle: raster.handle);
+            }
+            if (!_isCurrent(generation)) {
+              image.dispose();
+              _releaseSurface(surface);
+              effectSurface = null;
+              return;
+            }
+            dispatch(
+              _ReaderEpubContentLoaded(
+                generation: generation,
+                surface: surface,
+                pageImage: image,
+              ),
+            );
+            effectSurface = null;
+          } else {
+            dispatch(
+              _ReaderSurfaceLoaded(generation: generation, surface: surface),
+            );
+            effectSurface = null;
+          }
+        } catch (error) {
+          if (effectSurface case final surface?) _releaseSurface(surface);
+          if (!_isCurrent(generation)) return;
+          dispatch(_ReaderSelectionSupportFailed(generation, error.toString()));
+        }
+        final revision = _annotationRevision;
+        try {
+          final annotations = await _bridge.listAnnotations(
+            document: document.handle,
+          );
+          if (!_isCurrent(generation)) return;
+          dispatch(
+            _ReaderAnnotationsChanged(
+              generation,
+              revision,
+              null,
+              null,
+              annotations,
+            ),
+          );
+        } catch (error) {
+          if (!_isCurrent(generation)) return;
+          dispatch(
+            _ReaderAnnotationListFailed(generation, revision, error.toString()),
+          );
+        }
+      }
+
       if (document.format != FlutterBookFormat.epub) {
         final rendered = await _bridge.renderPage(
           document: document.handle,
@@ -208,20 +593,28 @@ final class ReaderController implements Listenable {
           scale: 1,
           cancellationId: cancellation,
         );
-        late final Uint8List pixels;
+        if (!_isCurrent(generation)) {
+          _bridge.releaseBuffer(handle: rendered.handle);
+          return;
+        }
+        late final ui.Image image;
         try {
-          pixels = _bridge.takeBuffer(handle: rendered.handle);
+          final pixels = _bridge.takeBuffer(handle: rendered.handle);
+          if (document.format == FlutterBookFormat.cbz) {
+            premultiplyRgba(pixels);
+          }
+          image = await _decoder(
+            pixels,
+            width: rendered.width,
+            height: rendered.height,
+          );
         } finally {
           _bridge.releaseBuffer(handle: rendered.handle);
         }
-        if (document.format == FlutterBookFormat.cbz) {
-          premultiplyRgba(pixels);
+        if (!_isCurrent(generation)) {
+          image.dispose();
+          return;
         }
-        final image = await _decoder(
-          pixels,
-          width: rendered.width,
-          height: rendered.height,
-        );
         dispatch(_ReaderImageDecoded(generation: generation, pageImage: image));
       }
     } on FlutterBridgeError catch (error) {
@@ -266,7 +659,344 @@ final class ReaderController implements Listenable {
       message.pageImage?.dispose();
       return;
     }
-    _emit(_model.copyWith(pageImage: message.pageImage));
+    _emit(
+      _model.copyWith(
+        pageImage: message.pageImage,
+        contentState: ReaderContentState.ready,
+      ),
+    );
+  }
+
+  void _selectionStarted(int offset) {
+    if (_model.selectionSurface == null || _closing) return;
+    _selectionRevision += 1;
+    _emit(
+      _model.copyWith(
+        selectionPhase: ReaderSelectionPhase.selecting,
+        anchor: offset,
+        focus: offset,
+      ),
+    );
+  }
+
+  void _selectionExtended(int offset) {
+    if (_model.selectionPhase != ReaderSelectionPhase.selecting) return;
+    _emit(_model.copyWith(focus: offset));
+  }
+
+  void _selectionEnded() {
+    if (_model.selectionPhase != ReaderSelectionPhase.selecting) return;
+    final anchor = _model.anchor;
+    final focus = _model.focus;
+    _emit(
+      _model.copyWith(
+        selectionPhase: anchor != null && focus != null && anchor != focus
+            ? ReaderSelectionPhase.selected
+            : ReaderSelectionPhase.idle,
+        anchor: anchor == focus ? null : anchor,
+        focus: anchor == focus ? null : focus,
+      ),
+    );
+  }
+
+  void _selectionCommitted() {
+    final anchor = _model.anchor;
+    final focus = _model.focus;
+    if (_model.selectionPhase != ReaderSelectionPhase.selected ||
+        anchor == null ||
+        focus == null ||
+        !_model.annotationsReady ||
+        _model.busy) {
+      return;
+    }
+    final selection = ReaderSelection(
+      anchor < focus ? anchor : focus,
+      anchor < focus ? focus : anchor,
+    );
+    final document = _model.document;
+    if (document == null) return;
+    final generation = _model.generation;
+    final selectionRevision = _selectionRevision;
+    if (_model.annotationOperations.isNotEmpty || _closing) return;
+    final revision = ++_annotationRevision;
+    final operationId = 'create:${++_nextOperationId}';
+    late final BigInt cancellation;
+    try {
+      cancellation = _bridge.createCancellation();
+    } catch (error) {
+      _emit(_model.copyWith(selectionError: error.toString()));
+      return;
+    }
+    _annotationCancellations.add(cancellation);
+    _activeBridgeOperations += 1;
+    _emit(
+      _model.copyWith(
+        selectionPhase: ReaderSelectionPhase.committing,
+        annotationOperations: {operationId},
+      ),
+    );
+    unawaited(() async {
+      try {
+        final created = await _bridge.createAnnotation(
+          document: document.handle,
+          unit: BigInt.zero,
+          start: BigInt.from(selection.start),
+          end: BigInt.from(selection.end),
+          color: FlutterHighlightColor.yellow,
+          cancellationId: cancellation,
+        );
+        if (!_isCurrent(generation)) return;
+        dispatch(
+          _ReaderAnnotationsChanged(
+            generation,
+            revision,
+            operationId,
+            selectionRevision,
+            [..._model.annotations, created],
+          ),
+        );
+      } catch (error) {
+        dispatch(
+          _ReaderAnnotationsChanged(
+            generation,
+            revision,
+            operationId,
+            selectionRevision,
+            null,
+            error.toString(),
+          ),
+        );
+      } finally {
+        dispatch(_ReaderAnnotationCreateFinished(cancellation));
+      }
+    }());
+  }
+
+  void _setAnnotations(
+    List<FlutterAnnotation> annotations, {
+    bool? annotationsReady,
+  }) {
+    _emit(
+      _model.copyWith(
+        annotations: List.unmodifiable(annotations),
+        annotationsReady: annotationsReady,
+        savedSelections: List.unmodifiable(
+          annotations
+              .where((item) => item.unit == BigInt.zero)
+              .map(
+                (item) => ReaderSelection(
+                  item.start.toInt(),
+                  item.end.toInt(),
+                  item.color,
+                ),
+              ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _updateAnnotation(ReaderAnnotationUpdated message) async {
+    final document = _model.document;
+    if (document == null ||
+        !_model.annotationsReady ||
+        _model.annotationOperations.isNotEmpty ||
+        _closing) {
+      return;
+    }
+    final generation = _model.generation;
+    final revision = ++_annotationRevision;
+    final operationId = 'update:${message.id}:${++_nextOperationId}';
+    _activeBridgeOperations += 1;
+    _emit(_model.copyWith(annotationOperations: {operationId}));
+    try {
+      final changed = await _bridge.updateAnnotation(
+        document: document.handle,
+        id: message.id,
+        color: message.color,
+        body: message.body,
+      );
+      if (!_isCurrent(generation)) return;
+      final items = changed
+          ? await _bridge.listAnnotations(document: document.handle)
+          : _model.annotations;
+      if (!_isCurrent(generation)) return;
+      dispatch(
+        _ReaderAnnotationsChanged(
+          generation,
+          revision,
+          operationId,
+          null,
+          items,
+        ),
+      );
+    } catch (error) {
+      dispatch(
+        _ReaderAnnotationsChanged(
+          generation,
+          revision,
+          operationId,
+          null,
+          null,
+          error.toString(),
+        ),
+      );
+    } finally {
+      dispatch(const _ReaderAnnotationOperationFinished());
+    }
+  }
+
+  Future<void> _deleteAnnotation(String id) async {
+    final document = _model.document;
+    if (document == null ||
+        !_model.annotationsReady ||
+        _model.annotationOperations.isNotEmpty ||
+        _closing) {
+      return;
+    }
+    final generation = _model.generation;
+    final revision = ++_annotationRevision;
+    final operationId = 'delete:$id:${++_nextOperationId}';
+    _activeBridgeOperations += 1;
+    _emit(_model.copyWith(annotationOperations: {operationId}));
+    try {
+      final changed = await _bridge.deleteAnnotation(
+        document: document.handle,
+        id: id,
+      );
+      if (!_isCurrent(generation)) return;
+      dispatch(
+        _ReaderAnnotationsChanged(
+          generation,
+          revision,
+          operationId,
+          null,
+          changed
+              ? _model.annotations.where((item) => item.id != id).toList()
+              : _model.annotations,
+        ),
+      );
+    } catch (error) {
+      dispatch(
+        _ReaderAnnotationsChanged(
+          generation,
+          revision,
+          operationId,
+          null,
+          null,
+          error.toString(),
+        ),
+      );
+    } finally {
+      dispatch(const _ReaderAnnotationOperationFinished());
+    }
+  }
+
+  void _noteRequested(String id) {
+    if (_closing) return;
+    final annotation = _model.annotations
+        .where((item) => item.id == id)
+        .firstOrNull;
+    if (annotation == null) return;
+    final generation = _model.generation;
+    final revision = ++_noteRevision;
+    unawaited(() async {
+      try {
+        final body = await _noteEditor(annotation.body);
+        if (body != null) {
+          dispatch(
+            _ReaderAnnotationNoteCompleted(generation, revision, id, body),
+          );
+        }
+      } catch (error) {
+        dispatch(
+          _ReaderAnnotationNoteFailed(generation, revision, error.toString()),
+        );
+      }
+    }());
+  }
+
+  void _noteCompleted(_ReaderAnnotationNoteCompleted message) {
+    if (!_isCurrent(message.generation) || message.revision != _noteRevision) {
+      return;
+    }
+    final annotation = _model.annotations
+        .where((item) => item.id == message.id)
+        .firstOrNull;
+    if (annotation == null) return;
+    if (_model.annotationOperations.isNotEmpty) {
+      _emit(
+        _model.copyWith(
+          annotationError:
+              'Finish the current highlight change, then save the note again.',
+        ),
+      );
+      return;
+    }
+    unawaited(
+      _updateAnnotation(
+        ReaderAnnotationUpdated(
+          annotation.id,
+          annotation.color,
+          message.body.isEmpty ? null : message.body,
+        ),
+      ),
+    );
+  }
+
+  void _annotationsChanged(_ReaderAnnotationsChanged message) {
+    if (!_isCurrent(message.generation)) {
+      return;
+    }
+    final operation = message.operationId;
+    if (operation != null) {
+      final pending = {..._model.annotationOperations}..remove(operation);
+      _emit(_model.copyWith(annotationOperations: pending));
+    }
+    if (message.revision != _annotationRevision) return;
+    if (message.items case final items?) {
+      _setAnnotations(items, annotationsReady: operation == null ? true : null);
+    }
+    if (operation == null) return;
+    final ownsSelection =
+        operation.startsWith('create:') &&
+        message.selectionRevision == _selectionRevision;
+    _emit(
+      _model.copyWith(
+        selectionPhase: ownsSelection
+            ? (message.error == null
+                  ? ReaderSelectionPhase.idle
+                  : ReaderSelectionPhase.selected)
+            : null,
+        anchor: ownsSelection && message.error == null ? null : _unchanged,
+        focus: ownsSelection && message.error == null ? null : _unchanged,
+        error: message.error ?? _unchanged,
+      ),
+    );
+  }
+
+  void _navigateAnnotation(String id) {
+    final item = _model.annotations.where((item) => item.id == id).firstOrNull;
+    if (item != null && item.unit == BigInt.zero) {
+      _selectionRevision += 1;
+      _emit(
+        _model.copyWith(
+          anchor: item.start.toInt(),
+          focus: item.end.toInt(),
+          selectionPhase: ReaderSelectionPhase.selected,
+        ),
+      );
+    }
+  }
+
+  void _selectionCancelled() {
+    _selectionRevision += 1;
+    _emit(
+      _model.copyWith(
+        selectionPhase: ReaderSelectionPhase.idle,
+        anchor: null,
+        focus: null,
+      ),
+    );
   }
 
   void _openFailed(_ReaderOpenFailed message) {
@@ -277,7 +1007,12 @@ final class ReaderController implements Listenable {
     if (_isCurrent(message.generation)) {
       _releaseModelResources();
       _emit(
-        _model.copyWith(document: null, pageImage: null, error: message.error),
+        _model.copyWith(
+          document: null,
+          pageImage: null,
+          contentState: ReaderContentState.failed,
+          error: message.error,
+        ),
       );
     }
   }
@@ -321,11 +1056,24 @@ final class ReaderController implements Listenable {
   void _releaseModelResources() {
     final pageImage = _model.pageImage;
     final document = _model.document;
-    _model = _model.copyWith(document: null, pageImage: null);
+    final surface = _model.selectionSurface;
+    _model = _model.copyWith(
+      document: null,
+      pageImage: null,
+      selectionSurface: null,
+      selectionPhase: ReaderSelectionPhase.idle,
+      anchor: null,
+      focus: null,
+    );
     pageImage?.dispose();
+    if (surface != null) _releaseSurface(surface);
     if (document != null) {
       _bridge.releaseDocument(handle: document.handle);
     }
+  }
+
+  void _releaseSurface(FlutterSelectionSurface surface) {
+    _bridge.releaseSelection(handle: surface.handle);
   }
 
   void _disposeRequested() {
@@ -335,18 +1083,16 @@ final class ReaderController implements Listenable {
     if (cancellation != null) {
       _bridge.cancel(id: cancellation);
     }
-    _releaseModelResources();
-    _model = _model.copyWith(
-      document: null,
-      pageImage: null,
-      busy: false,
-      generation: _model.generation + 1,
-    );
+    for (final cancellation in _annotationCancellations) {
+      _bridge.cancel(id: cancellation);
+    }
+    _model = _model.copyWith(busy: false, generation: _model.generation + 1);
     _disposeBridgeIfIdle();
   }
 
   void _disposeBridgeIfIdle() {
     if (_closing && _activeBridgeOperations == 0 && !_bridge.isDisposed) {
+      _releaseModelResources();
       _bridge.dispose();
     }
     if (_closing && _activeBridgeOperations == 0 && !_listenersDisposed) {
@@ -359,6 +1105,17 @@ final class ReaderController implements Listenable {
     dispatch(const _ReaderDisposeRequested());
   }
 }
+
+FlutterSelectionSurface _freezeSurface(FlutterSelectionSurface surface) =>
+    FlutterSelectionSurface(
+      handle: surface.handle,
+      width: surface.width,
+      height: surface.height,
+      text: surface.text,
+      resourcePath: surface.resourcePath,
+      raster: surface.raster,
+      endpoints: List.unmodifiable(surface.endpoints),
+    );
 
 Uint8List premultiplyRgba(Uint8List pixels) {
   for (var offset = 0; offset < pixels.length; offset += 4) {

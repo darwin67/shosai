@@ -40,6 +40,29 @@ void main() {
         document = summary.handle;
         expect(summary.format, FlutterBookFormat.pdf);
 
+        final surface = await bridge.selectionSurface(
+          document: summary.handle,
+          unit: BigInt.zero,
+          scale: 1,
+          width: 680,
+          fontSize: 18,
+          cancellationId: cancellation,
+        );
+        expect(surface.width, greaterThan(0));
+        expect(surface.height, greaterThan(0));
+        expect(surface.endpoints, isNotEmpty);
+        expect(
+          surface.endpoints.every(
+            (endpoint) =>
+                endpoint.rangeStart < endpoint.rangeEnd &&
+                endpoint.offset >= endpoint.rangeStart &&
+                endpoint.offset <= endpoint.rangeEnd,
+          ),
+          isTrue,
+        );
+        expect(bridge.releaseSelection(handle: surface.handle), isTrue);
+        expect(bridge.releaseSelection(handle: surface.handle), isFalse);
+
         final rendered = await bridge.renderPage(
           document: summary.handle,
           page: BigInt.zero,
@@ -67,6 +90,184 @@ void main() {
     },
     skip: supported ? false : 'native bridge smoke test supports desktop hosts',
   );
+
+  test(
+    'opens and lays out an EPUB selection surface through the native bridge',
+    () async {
+      final bridge = FlutterBridge();
+      final cancellation = bridge.createCancellation();
+      FlutterDocumentHandle? document;
+      try {
+        final summary = await bridge.openDocument(
+          request: const FlutterOpenRequest(
+            localId: 'native-epub-test',
+            pathKey: '../crates/shosai-core/tests/fixtures/sample.epub',
+          ),
+          cancellationId: cancellation,
+        );
+        document = summary.handle;
+        expect(summary.format, FlutterBookFormat.epub);
+        final surface = await bridge.selectionSurface(
+          document: summary.handle,
+          unit: BigInt.zero,
+          scale: 1,
+          width: 680,
+          fontSize: 18,
+          cancellationId: cancellation,
+        );
+        expect(surface.text, isNotEmpty);
+        expect(surface.resourcePath, isNotEmpty);
+        expect(surface.endpoints, isNotEmpty);
+        final raster = surface.raster!;
+        expect(raster.width, greaterThan(0));
+        expect(raster.height, greaterThan(0));
+        final pixels = bridge.takeBuffer(handle: raster.handle);
+        expect(pixels, hasLength(raster.width * raster.height * 4));
+        expect(
+          pixels.any((component) => component != 0),
+          isTrue,
+          reason: 'Flutter must receive Rust rasterized glyph pixels',
+        );
+        expect(bridge.releaseBuffer(handle: raster.handle), isTrue);
+        expect(bridge.releaseBuffer(handle: raster.handle), isFalse);
+        expect(bridge.releaseSelection(handle: surface.handle), isTrue);
+        expect(
+          surface.endpoints.every(
+            (endpoint) =>
+                endpoint.rangeStart < endpoint.rangeEnd &&
+                endpoint.offset >= endpoint.rangeStart &&
+                endpoint.offset <= endpoint.rangeEnd &&
+                endpoint.rect.left >= 0 &&
+                endpoint.rect.top >= 0 &&
+                endpoint.rect.right <= surface.width &&
+                endpoint.rect.bottom <= surface.height,
+          ),
+          isTrue,
+        );
+      } finally {
+        if (document != null) bridge.releaseDocument(handle: document);
+        bridge.releaseCancellation(id: cancellation);
+        bridge.dispose();
+      }
+    },
+    skip: supported ? false : 'native bridge smoke test supports desktop hosts',
+  );
+
+  Future<void> verifyPersistedHighlight({
+    required String format,
+    required FlutterBookFormat expectedFormat,
+  }) async {
+    final directory = await Directory.systemTemp.createTemp(
+      'shosai-native-persistence-',
+    );
+    final databasePath = '${directory.path}/annotations.sqlite';
+    final fixture = '../crates/shosai-core/tests/fixtures/sample.$format';
+    final localId = 'native-$format-persistence-test';
+    FlutterBridge? bridge;
+    FlutterDocumentHandle? document;
+    BigInt? cancellation;
+
+    Future<FlutterDocumentSummary> open() async {
+      bridge = FlutterBridge.withDatabasePath(databasePath: databasePath);
+      cancellation = bridge!.createCancellation();
+      final summary = await bridge!.openDocument(
+        request: FlutterOpenRequest(localId: localId, pathKey: fixture),
+        cancellationId: cancellation!,
+      );
+      document = summary.handle;
+      return summary;
+    }
+
+    void release() {
+      if (document != null) bridge!.releaseDocument(handle: document!);
+      if (cancellation != null) {
+        bridge!.releaseCancellation(id: cancellation!);
+      }
+      bridge?.dispose();
+      bridge = null;
+      document = null;
+      cancellation = null;
+    }
+
+    try {
+      final firstOpen = await open();
+      expect(firstOpen.format, expectedFormat);
+      final surface = await bridge!.selectionSurface(
+        document: document!,
+        unit: BigInt.zero,
+        scale: 1,
+        width: 680,
+        fontSize: 18,
+        cancellationId: cancellation!,
+      );
+      final endpoint = surface.endpoints.firstWhere(
+        (value) => value.rangeStart < value.rangeEnd,
+      );
+      expect(endpoint.rect.right, greaterThan(endpoint.rect.left));
+      expect(endpoint.rect.bottom, greaterThan(endpoint.rect.top));
+      if (surface.raster case final raster?) {
+        expect(bridge!.releaseBuffer(handle: raster.handle), isTrue);
+      }
+      expect(bridge!.releaseSelection(handle: surface.handle), isTrue);
+      final created = await bridge!.createAnnotation(
+        document: document!,
+        unit: BigInt.zero,
+        start: endpoint.rangeStart,
+        end: endpoint.rangeEnd,
+        color: FlutterHighlightColor.yellow,
+        cancellationId: cancellation!,
+      );
+      expect(created.start, endpoint.rangeStart);
+      expect(created.end, endpoint.rangeEnd);
+      expect(await File(databasePath).exists(), isTrue);
+
+      release();
+      await open();
+      var listed = await bridge!.listAnnotations(document: document!);
+      expect(listed, hasLength(1));
+      expect(listed.single.id, created.id);
+      expect(listed.single.color, FlutterHighlightColor.yellow);
+
+      expect(
+        await bridge!.updateAnnotation(
+          document: document!,
+          id: created.id,
+          color: FlutterHighlightColor.purple,
+          body: 'native bridge note',
+        ),
+        isTrue,
+      );
+      listed = await bridge!.listAnnotations(document: document!);
+      expect(listed, hasLength(1));
+      expect(listed.single.color, FlutterHighlightColor.purple);
+      expect(listed.single.body, 'native bridge note');
+
+      expect(
+        await bridge!.deleteAnnotation(document: document!, id: created.id),
+        isTrue,
+      );
+      expect(await bridge!.listAnnotations(document: document!), isEmpty);
+    } finally {
+      release();
+      await directory.delete(recursive: true);
+    }
+  }
+
+  for (final testCase in [
+    (format: 'pdf', expectedFormat: FlutterBookFormat.pdf),
+    (format: 'epub', expectedFormat: FlutterBookFormat.epub),
+  ]) {
+    test(
+      'persists a ${testCase.format.toUpperCase()} highlight through the native bridge',
+      () => verifyPersistedHighlight(
+        format: testCase.format,
+        expectedFormat: testCase.expectedFormat,
+      ),
+      skip: supported
+          ? false
+          : 'native bridge persistence test supports desktop hosts',
+    );
+  }
 
   test(
     'preserves straight alpha when rendering a translucent CBZ page',

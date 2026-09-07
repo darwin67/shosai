@@ -74,6 +74,6 @@ flutter_rust_bridge_codegen generate \
 
 test -s "$rust_output"
 test -n "$(find "$temporary/dart/lib/generated" -type f -print -quit)"
-for declaration in openDocument renderPage takeBuffer releaseDocument releaseBuffer cancel; do
+for declaration in openDocument renderPage selectionSurface takeBuffer releaseDocument releaseBuffer cancel; do
   grep -Rq "$declaration" "$temporary/dart/lib/generated"
 done

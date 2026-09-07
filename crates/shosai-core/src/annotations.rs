@@ -2,10 +2,14 @@
 
 use std::ops::Range;
 use std::str::FromStr;
+#[cfg(test)]
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use sqlx::Row;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
+#[cfg(test)]
+use tokio::sync::Semaphore;
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
@@ -385,11 +389,59 @@ pub struct Annotation {
 #[derive(Debug, Clone)]
 pub struct AnnotationStore {
     pool: SqlitePool,
+    #[cfg(test)]
+    persistence_gate: Option<Arc<AnnotationPersistenceTestGate>>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct AnnotationPersistenceTestGate {
+    entered: Semaphore,
+    release: Semaphore,
+}
+
+#[cfg(test)]
+impl AnnotationPersistenceTestGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            entered: Semaphore::new(0),
+            release: Semaphore::new(0),
+        }
+    }
+
+    pub(crate) async fn wait_until_entered(&self) {
+        self.entered.acquire().await.unwrap().forget();
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.add_permits(1);
+    }
 }
 
 impl AnnotationStore {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            #[cfg(test)]
+            persistence_gate: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_persistence_gate(
+        pool: SqlitePool,
+        persistence_gate: Option<Arc<AnnotationPersistenceTestGate>>,
+    ) -> Self {
+        Self {
+            pool,
+            persistence_gate,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn execute_test_sql(&self, sql: &str) -> Result<()> {
+        sqlx::query(sql).execute(&self.pool).await?;
+        Ok(())
     }
 
     pub async fn create_async(&self, annotation: &NewAnnotation) -> Result<Annotation> {
@@ -399,6 +451,11 @@ impl AnnotationStore {
             .begin()
             .await
             .context("failed to begin annotation insert")?;
+        #[cfg(test)]
+        if let Some(gate) = &self.persistence_gate {
+            gate.entered.add_permits(1);
+            gate.release.acquire().await.unwrap().forget();
+        }
         let (format, epub, pdf) = match &annotation.target {
             AnnotationTarget::Epub(anchor) => ("epub", Some(anchor), None),
             AnnotationTarget::Pdf(anchor) => ("pdf", None, Some(anchor)),
@@ -518,6 +575,40 @@ impl AnnotationStore {
             let rectangle_rows = sqlx::query(
                 "SELECT left, bottom, right, top FROM annotation_pdf_rectangles
                  WHERE annotation_id = ? ORDER BY rect_index LIMIT ?",
+            )
+            .bind(id)
+            .bind(i64::try_from(MAX_PDF_RECTANGLES + 1).expect("rectangle limit fits in i64"))
+            .fetch_all(&mut *transaction)
+            .await
+            .context("failed to load PDF annotation rectangles")?;
+            annotations.push(row_to_annotation(row, rows_to_rectangles(rectangle_rows)?)?);
+        }
+        transaction
+            .commit()
+            .await
+            .context("failed to finish annotation list snapshot")?;
+        Ok(annotations)
+    }
+
+    /// List live annotations associated with an untracked device-local path.
+    pub async fn list_for_local_path_async(&self, local_path: &str) -> Result<Vec<Annotation>> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("failed to begin annotation list snapshot")?;
+        let rows = sqlx::query(
+            "SELECT * FROM annotations WHERE book_id IS NULL AND local_path = ? AND deleted_at IS NULL ORDER BY created_at, id",
+        )
+        .bind(local_path)
+        .fetch_all(&mut *transaction)
+        .await
+        .context("failed to list annotations for local path")?;
+        let mut annotations = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: String = row.try_get("id")?;
+            let rectangle_rows = sqlx::query(
+                "SELECT left, bottom, right, top FROM annotation_pdf_rectangles WHERE annotation_id = ? ORDER BY rect_index LIMIT ?",
             )
             .bind(id)
             .bind(i64::try_from(MAX_PDF_RECTANGLES + 1).expect("rectangle limit fits in i64"))
@@ -786,7 +877,7 @@ fn quote_context_v1(value: &str, direction: ContextDirection) -> String {
                     }
                 })
                 .map_or(0, |index| index + 1);
-            graphemes[start..].concat()
+            graphemes[start..].concat().trim_start().to_owned()
         }
         ContextDirection::Suffix => {
             let mut scalars = 0;
@@ -802,7 +893,7 @@ fn quote_context_v1(value: &str, direction: ContextDirection) -> String {
                     }
                 })
                 .unwrap_or(graphemes.len());
-            graphemes[..end].concat()
+            graphemes[..end].concat().trim_end().to_owned()
         }
     }
 }

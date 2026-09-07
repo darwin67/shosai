@@ -723,17 +723,6 @@ impl OpenDocumentPlan {
         OpenDocument::from_admitted_bytes(self.read_bytes()?)
     }
 
-    pub(crate) fn open_cancellable(
-        self,
-        cancellation: crate::bridge::Cancellation,
-    ) -> Result<OpenDocument, OpenDocumentError> {
-        let is_cancelled = || cancellation.is_cancelled();
-        OpenDocument::from_admitted_bytes_cancellable(
-            self.read_bytes_cancellable(Some(&is_cancelled))?,
-            &is_cancelled,
-        )
-    }
-
     #[doc(hidden)]
     pub fn open_with_content_hash(self) -> Result<(OpenDocument, String), OpenDocumentError> {
         let admitted = self.read_bytes()?;

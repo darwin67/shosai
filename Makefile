@@ -1,4 +1,4 @@
-.PHONY: dev reset lint lint-flutter fmt test test-flutter test-scripts check-frb check-flutter-codegen flutter-codegen check-flutter flutter-dev flutter-linux-debug flutter-macos-debug flutter-macos-smoke flutter-release check-rfds changelog next-version
+.PHONY: dev reset lint lint-rust lint-flutter fmt fmt-rust fmt-flutter check-fmt-rust check-fmt-flutter test test-rust test-flutter test-scripts check-frb check-flutter-codegen flutter-codegen check-flutter flutter-dev flutter-linux-debug flutter-macos-debug flutter-macos-smoke flutter-release check-rfds changelog next-version
 
 DEV_DATA_HOME := $(CURDIR)/target
 
@@ -11,28 +11,49 @@ reset:
 	@XDG_DATA_HOME="$(DEV_DATA_HOME)" python3 scripts/reset-local-data.py
 
 ## Run clippy lints on the workspace
-lint:
+lint: lint-rust lint-flutter
+
+## Run Rust lints
+lint-rust:
 	cargo clippy --workspace --all-targets -- -D warnings
-	$(MAKE) lint-flutter
 
 ## Run Flutter static analysis
 lint-flutter:
 	cd flutter && flutter analyze
 
 ## Format all Rust and Dart source files
-fmt:
+fmt: fmt-rust fmt-flutter
+
+## Format Rust source files
+fmt-rust:
 	cargo fmt --all
+
+## Format Dart source files
+fmt-flutter:
 	cd flutter && dart format lib test
 
-## Run all tests
+## Check Rust formatting without changing files
+check-fmt-rust:
+	cargo fmt --all -- --check
+
+## Check Dart formatting without changing files
+check-fmt-flutter:
+	cd flutter && dart format --output=none --set-exit-if-changed lib test
+
+## Run all Rust, script, bridge, and Flutter tests
 test:
-	cargo test --workspace --no-fail-fast
+	$(MAKE) test-rust
 	$(MAKE) test-scripts
 	$(MAKE) check-frb
+	$(MAKE) check-flutter-codegen
 	$(MAKE) test-flutter
 
-## Verify bindings and run Flutter unit and native bridge tests
-test-flutter: check-flutter-codegen
+## Run Rust workspace tests
+test-rust:
+	cargo test --workspace --no-fail-fast
+
+## Build the bridge and run Flutter unit and native bridge tests
+test-flutter:
 	cargo build --package shosai-flutter-bridge
 	cd flutter && flutter test
 
@@ -67,11 +88,11 @@ flutter-dev: flutter-codegen
 	cd flutter && flutter run -d linux
 
 ## Build the Linux Flutter host in debug mode
-flutter-linux-debug: check-flutter-codegen
+flutter-linux-debug:
 	cd flutter && flutter build linux --debug
 
 ## Build the macOS Flutter host in debug mode
-flutter-macos-debug: check-flutter-codegen
+flutter-macos-debug:
 	@./scripts/build-flutter-macos.sh
 
 ## Launch the packaged macOS host and verify that it remains running
