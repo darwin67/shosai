@@ -118,6 +118,15 @@ enum ReaderSelectionPhase { idle, selecting, selected, committing }
 
 enum ReaderContentState { loading, ready, failed }
 
+enum ReaderSelectionMovement {
+  previousGrapheme,
+  nextGrapheme,
+  previousWord,
+  nextWord,
+  previousLine,
+  nextLine,
+}
+
 final class ReaderSelection {
   const ReaderSelection(this.start, this.end, [this.color]);
 
@@ -144,6 +153,11 @@ final class ReaderSelectionStarted extends ReaderMessage {
 final class ReaderSelectionExtended extends ReaderMessage {
   const ReaderSelectionExtended(this.offset);
   final int offset;
+}
+
+final class ReaderSelectionKeyboardExtended extends ReaderMessage {
+  const ReaderSelectionKeyboardExtended(this.movement);
+  final ReaderSelectionMovement movement;
 }
 
 final class ReaderSelectionEnded extends ReaderMessage {
@@ -348,6 +362,8 @@ final class ReaderController implements Listenable {
         _selectionStarted(message.offset);
       case ReaderSelectionExtended():
         _selectionExtended(message.offset);
+      case ReaderSelectionKeyboardExtended():
+        _selectionKeyboardExtended(message.movement);
       case ReaderSelectionEnded():
         _selectionEnded();
       case ReaderSelectionCommitted():
@@ -682,6 +698,61 @@ final class ReaderController implements Listenable {
   void _selectionExtended(int offset) {
     if (_model.selectionPhase != ReaderSelectionPhase.selecting) return;
     _emit(_model.copyWith(focus: offset));
+  }
+
+  void _selectionKeyboardExtended(ReaderSelectionMovement movement) {
+    final surface = _model.selectionSurface;
+    if (surface == null || surface.endpoints.isEmpty || _closing) return;
+    final offsets =
+        surface.endpoints
+            .map((endpoint) => endpoint.offset.toInt())
+            .toSet()
+            .toList()
+          ..sort();
+    if (offsets.length < 2) return;
+
+    final forward = switch (movement) {
+      ReaderSelectionMovement.nextGrapheme ||
+      ReaderSelectionMovement.nextWord ||
+      ReaderSelectionMovement.nextLine => true,
+      _ => false,
+    };
+    final current = _model.focus;
+    final next = switch (movement) {
+      ReaderSelectionMovement.previousGrapheme ||
+      ReaderSelectionMovement.nextGrapheme => _adjacentOffset(
+        offsets,
+        current,
+        forward,
+      ),
+      ReaderSelectionMovement.previousWord ||
+      ReaderSelectionMovement.nextWord => _wordOffset(
+        surface.text,
+        offsets,
+        current,
+        forward,
+      ),
+      ReaderSelectionMovement.previousLine ||
+      ReaderSelectionMovement.nextLine => _lineOffset(
+        surface.endpoints,
+        current,
+        forward,
+      ),
+    };
+    if (next == null) return;
+    final anchor = _model.anchor ?? (forward ? offsets.first : offsets.last);
+    if (anchor == next) {
+      _selectionCancelled();
+      return;
+    }
+    _selectionRevision += 1;
+    _emit(
+      _model.copyWith(
+        selectionPhase: ReaderSelectionPhase.selected,
+        anchor: anchor,
+        focus: next,
+      ),
+    );
   }
 
   void _selectionEnded() {
@@ -1104,6 +1175,93 @@ final class ReaderController implements Listenable {
   void dispose() {
     dispatch(const _ReaderDisposeRequested());
   }
+}
+
+int? _adjacentOffset(List<int> offsets, int? current, bool forward) {
+  if (current == null) {
+    return forward ? offsets[1] : offsets[offsets.length - 2];
+  }
+  if (forward) {
+    for (final offset in offsets) {
+      if (offset > current) return offset;
+    }
+  } else {
+    for (final offset in offsets.reversed) {
+      if (offset < current) return offset;
+    }
+  }
+  return null;
+}
+
+int? _wordOffset(String text, List<int> offsets, int? current, bool forward) {
+  final scalars = text.runes.toList(growable: false);
+  var target = current ?? (forward ? offsets.first : offsets.last);
+  target = target.clamp(0, scalars.length);
+  if (forward) {
+    while (target < scalars.length && !_isWhitespace(scalars[target])) {
+      target += 1;
+    }
+    while (target < scalars.length && _isWhitespace(scalars[target])) {
+      target += 1;
+    }
+    for (final offset in offsets) {
+      if (offset >= target && offset > (current ?? offsets.first)) {
+        return offset;
+      }
+    }
+  } else {
+    while (target > 0 && _isWhitespace(scalars[target - 1])) {
+      target -= 1;
+    }
+    while (target > 0 && !_isWhitespace(scalars[target - 1])) {
+      target -= 1;
+    }
+    for (final offset in offsets.reversed) {
+      if (offset <= target && offset < (current ?? offsets.last)) return offset;
+    }
+  }
+  return null;
+}
+
+bool _isWhitespace(int scalar) => String.fromCharCode(scalar).trim().isEmpty;
+
+int? _lineOffset(
+  List<FlutterSelectionEndpoint> endpoints,
+  int? current,
+  bool forward,
+) {
+  FlutterSelectionEndpoint origin;
+  if (current == null) {
+    origin = forward ? endpoints.first : endpoints.last;
+  } else {
+    final matches = endpoints.where(
+      (endpoint) => endpoint.offset.toInt() == current,
+    );
+    if (matches.isEmpty) return null;
+    origin = matches.first;
+  }
+  final originX = (origin.rect.left + origin.rect.right) / 2;
+  final originY = (origin.rect.top + origin.rect.bottom) / 2;
+  FlutterSelectionEndpoint? best;
+  double? bestLineDistance;
+  double? bestColumnDistance;
+  for (final endpoint in endpoints) {
+    if (endpoint.offset == origin.offset) continue;
+    final y = (endpoint.rect.top + endpoint.rect.bottom) / 2;
+    if (forward ? y <= originY : y >= originY) continue;
+    final lineDistance = (y - originY).abs();
+    final x = (endpoint.rect.left + endpoint.rect.right) / 2;
+    final columnDistance = (x - originX).abs();
+    if (best == null ||
+        lineDistance < bestLineDistance! ||
+        (lineDistance == bestLineDistance &&
+            columnDistance < bestColumnDistance!)) {
+      best = endpoint;
+      bestLineDistance = lineDistance;
+      bestColumnDistance = columnDistance;
+    }
+  }
+  return best?.offset.toInt();
 }
 
 FlutterSelectionSurface _freezeSurface(FlutterSelectionSurface surface) =>

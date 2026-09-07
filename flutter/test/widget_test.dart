@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:collection';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shosai_flutter/main.dart';
 import 'package:shosai_flutter/src/rust/api.dart';
@@ -1332,75 +1332,177 @@ void main() {
   });
 
   for (final format in [FlutterBookFormat.pdf, FlutterBookFormat.epub]) {
-    testWidgets(
-      '$format rendered surface selects, saves, and reopens highlight',
-      (tester) async {
-        final bridge = _ControlledBridge(format: format);
-        await tester.pumpWidget(
-          MaterialApp(
-            home: ReaderScreen(
-              bridge: bridge,
-              decoder: (pixels, {required width, required height}) =>
-                  _testImage(),
+    for (final device in [
+      ui.PointerDeviceKind.mouse,
+      ui.PointerDeviceKind.touch,
+    ]) {
+      testWidgets(
+        '$format rendered surface accepts $device selection endpoints',
+        (tester) async {
+          final bridge = _ControlledBridge(format: format);
+          await tester.pumpWidget(
+            MaterialApp(
+              home: ReaderScreen(
+                bridge: bridge,
+                decoder: (pixels, {required width, required height}) =>
+                    _testImage(),
+              ),
             ),
-          ),
-        );
-        await tester.enterText(find.byType(TextField), '/tmp/book');
-        await tester.tap(find.text('Open document'));
-        await tester.pumpAndSettle();
+          );
+          await tester.enterText(find.byType(TextField), '/tmp/book');
+          await tester.tap(find.text('Open document'));
+          await tester.pumpAndSettle();
 
-        final surface = find.byKey(const ValueKey('reader-selection-surface'));
-        final rect = tester.getRect(surface);
-        final side = rect.shortestSide;
-        final surfaceTopLeft = rect.center - Offset(side / 2, side / 2);
-        final beforeSelectionCalls = bridge.selectionCalls;
-        final beforeRenderCalls = bridge.renderCalls;
-        PagePainter painter() =>
-            tester
-                    .widget<CustomPaint>(
-                      find.byWidgetPredicate(
-                        (widget) =>
-                            widget is CustomPaint &&
-                            widget.painter is PagePainter,
-                      ),
-                    )
-                    .painter!
-                as PagePainter;
-        expect(painter().anchor, isNull);
-        expect(painter().savedSelections, isEmpty);
-        await tester.dragFrom(
-          surfaceTopLeft + Offset(side * .2, side * .2),
-          Offset(side * .5, side * .5),
-        );
-        await tester.pump();
+          final surface = find.byKey(
+            const ValueKey('reader-selection-surface'),
+          );
+          final rect = tester.getRect(surface);
+          final side = rect.shortestSide;
+          final surfaceTopLeft = rect.center - Offset(side / 2, side / 2);
+          final beforeSelectionCalls = bridge.selectionCalls;
+          final beforeRenderCalls = bridge.renderCalls;
+          PagePainter painter() =>
+              tester
+                      .widget<CustomPaint>(
+                        find.byWidgetPredicate(
+                          (widget) =>
+                              widget is CustomPaint &&
+                              widget.painter is PagePainter,
+                        ),
+                      )
+                      .painter!
+                  as PagePainter;
+          expect(painter().anchor, isNull);
+          expect(painter().savedSelections, isEmpty);
+          final gesture = await tester.createGesture(kind: device);
+          await gesture.down(surfaceTopLeft + Offset(side * .2, side * .2));
+          await gesture.moveBy(Offset(side * .05, side * .05));
+          await tester.pump();
+          await gesture.moveBy(Offset(side * .45, side * .45));
+          await gesture.up();
+          await tester.pump();
 
-        expect(find.text('Save highlight'), findsOneWidget);
-        expect(bridge.selectionCalls, beforeSelectionCalls);
-        expect(bridge.renderCalls, beforeRenderCalls);
-        expect(bridge.createCalls, 0);
-        expect(painter().anchor, 1);
-        expect(painter().focus, 8);
+          expect(find.text('Save highlight'), findsOneWidget);
+          expect(bridge.selectionCalls, beforeSelectionCalls);
+          expect(bridge.renderCalls, beforeRenderCalls);
+          expect(bridge.createCalls, 0);
+          expect(painter().anchor, 1);
+          expect(painter().focus, 8);
 
-        await tester.tap(find.text('Save highlight'));
-        await tester.pumpAndSettle();
-        expect(bridge.createCalls, 1);
-        expect(bridge.createdRanges.single, (BigInt.one, BigInt.from(8)));
-        expect(find.text('Highlight 1'), findsOneWidget);
-        expect(painter().savedSelections.single.start, 1);
-        expect(painter().savedSelections.single.end, 8);
+          await tester.tap(find.text('Save highlight'));
+          await tester.pumpAndSettle();
+          expect(bridge.createCalls, 1);
+          expect(bridge.createdRanges.single, (BigInt.one, BigInt.from(8)));
+          expect(find.text('Highlight 1'), findsOneWidget);
+          expect(painter().savedSelections.single.start, 1);
+          expect(painter().savedSelections.single.end, 8);
 
-        await tester.enterText(find.byType(TextField), '/tmp/book');
-        await tester.tap(find.text('Open document'));
-        await tester.pumpAndSettle();
-        expect(find.text('Highlight 1'), findsOneWidget);
-        expect(painter().savedSelections.single.start, 1);
-        expect(painter().savedSelections.single.end, 8);
+          await tester.enterText(find.byType(TextField), '/tmp/book');
+          await tester.tap(find.text('Open document'));
+          await tester.pumpAndSettle();
+          expect(find.text('Highlight 1'), findsOneWidget);
+          expect(painter().savedSelections.single.start, 1);
+          expect(painter().savedSelections.single.end, 8);
 
-        await tester.pumpWidget(const SizedBox());
-        await bridge.disposed.future;
-      },
-    );
+          await tester.pumpWidget(const SizedBox());
+          await bridge.disposed.future;
+        },
+      );
+    }
   }
+
+  testWidgets('keyboard extends, opens, cancels, and commits selection', (
+    tester,
+  ) async {
+    final bridge = _ControlledBridge(format: FlutterBookFormat.epub);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('reader-selection-surface')));
+    await tester.pump();
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pump();
+    expect(find.text('Save highlight'), findsOneWidget);
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.f10);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pump();
+    expect(find.text('Save highlight'), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
+    expect(find.text('Save highlight'), findsNothing);
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(bridge.createdRanges.single, (BigInt.one, BigInt.from(8)));
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('losing pointer capture cancels a temporary selection', (
+    tester,
+  ) async {
+    final bridge = _ControlledBridge(format: FlutterBookFormat.pdf);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+
+    final surface = find.byKey(const ValueKey('reader-selection-surface'));
+    final rect = tester.getRect(surface);
+    final side = rect.shortestSide;
+    final topLeft = rect.center - Offset(side / 2, side / 2);
+    final gesture = await tester.createGesture(
+      kind: ui.PointerDeviceKind.mouse,
+    );
+    await gesture.down(topLeft + Offset(side * .2, side * .2));
+    await gesture.moveBy(Offset(side * .05, side * .05));
+    await tester.pump();
+    await gesture.moveBy(Offset(side * .45, side * .45));
+    await gesture.cancel();
+    await tester.pump();
+
+    final painter =
+        tester
+                .widget<CustomPaint>(
+                  find.byWidgetPredicate(
+                    (widget) =>
+                        widget is CustomPaint && widget.painter is PagePainter,
+                  ),
+                )
+                .painter!
+            as PagePainter;
+    expect(painter.anchor, isNull);
+    expect(find.text('Save highlight'), findsNothing);
+    expect(bridge.createCalls, 0);
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
 }
 
 FlutterAnnotation _annotation(String id) => FlutterAnnotation(

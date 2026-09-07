@@ -25,6 +25,8 @@ export 'package:shosai_flutter/reader_controller.dart'
         ReaderSelectionCommitted,
         ReaderSelectionEnded,
         ReaderSelectionExtended,
+        ReaderSelectionKeyboardExtended,
+        ReaderSelectionMovement,
         ReaderSelectionPhase,
         ReaderContentState,
         ReaderSelectionStarted,
@@ -247,8 +249,84 @@ class _DocumentView extends StatelessWidget {
                     dispatch(const ReaderSelectionCancelled()),
                 const SingleActivator(LogicalKeyboardKey.enter): () =>
                     dispatch(const ReaderSelectionCommitted()),
+                const SingleActivator(
+                  LogicalKeyboardKey.arrowLeft,
+                  shift: true,
+                ): () => dispatch(
+                  const ReaderSelectionKeyboardExtended(
+                    ReaderSelectionMovement.previousGrapheme,
+                  ),
+                ),
+                const SingleActivator(
+                  LogicalKeyboardKey.arrowRight,
+                  shift: true,
+                ): () => dispatch(
+                  const ReaderSelectionKeyboardExtended(
+                    ReaderSelectionMovement.nextGrapheme,
+                  ),
+                ),
+                const SingleActivator(
+                  LogicalKeyboardKey.arrowLeft,
+                  shift: true,
+                  control: true,
+                ): () => dispatch(
+                  const ReaderSelectionKeyboardExtended(
+                    ReaderSelectionMovement.previousWord,
+                  ),
+                ),
+                const SingleActivator(
+                  LogicalKeyboardKey.arrowRight,
+                  shift: true,
+                  control: true,
+                ): () => dispatch(
+                  const ReaderSelectionKeyboardExtended(
+                    ReaderSelectionMovement.nextWord,
+                  ),
+                ),
+                const SingleActivator(
+                  LogicalKeyboardKey.arrowLeft,
+                  shift: true,
+                  alt: true,
+                ): () => dispatch(
+                  const ReaderSelectionKeyboardExtended(
+                    ReaderSelectionMovement.previousWord,
+                  ),
+                ),
+                const SingleActivator(
+                  LogicalKeyboardKey.arrowRight,
+                  shift: true,
+                  alt: true,
+                ): () => dispatch(
+                  const ReaderSelectionKeyboardExtended(
+                    ReaderSelectionMovement.nextWord,
+                  ),
+                ),
+                const SingleActivator(
+                  LogicalKeyboardKey.arrowUp,
+                  shift: true,
+                ): () => dispatch(
+                  const ReaderSelectionKeyboardExtended(
+                    ReaderSelectionMovement.previousLine,
+                  ),
+                ),
+                const SingleActivator(
+                  LogicalKeyboardKey.arrowDown,
+                  shift: true,
+                ): () => dispatch(
+                  const ReaderSelectionKeyboardExtended(
+                    ReaderSelectionMovement.nextLine,
+                  ),
+                ),
+                const SingleActivator(LogicalKeyboardKey.contextMenu): () =>
+                    dispatch(const ReaderSelectionEnded()),
+                const SingleActivator(
+                  LogicalKeyboardKey.f10,
+                  shift: true,
+                ): () =>
+                    dispatch(const ReaderSelectionEnded()),
               },
               child: Focus(
+                key: const ValueKey('reader-selection-focus'),
                 autofocus: true,
                 child: _SelectableSurface(
                   surface: surface,
@@ -444,36 +522,48 @@ class _SelectableSurface extends StatelessWidget {
           return null;
         }
 
-        return GestureDetector(
-          key: const ValueKey('reader-selection-surface'),
-          behavior: HitTestBehavior.opaque,
-          onPanStart: (details) {
-            final value = endpoint(details.localPosition);
-            if (value != null) dispatch(ReaderSelectionStarted(value));
-          },
-          onPanUpdate: (details) {
-            final value = endpoint(details.localPosition);
-            if (value != null) dispatch(ReaderSelectionExtended(value));
-          },
-          onPanEnd: (_) => dispatch(const ReaderSelectionEnded()),
-          child: RepaintBoundary(
-            key: const ValueKey('reader-page-paint'),
-            child: CustomPaint(
-              painter: PagePainter(
-                image: image,
-                surface: surface,
-                backgroundColor: pageColors(
-                  Theme.of(context).colorScheme,
-                ).background,
-                foregroundColor: pageColors(
-                  Theme.of(context).colorScheme,
-                ).foreground,
-                recolorImage: model.document?.format == FlutterBookFormat.epub,
-                anchor: model.anchor,
-                focus: model.focus,
-                savedSelections: model.savedSelections,
+        return Listener(
+          onPointerCancel: (_) => dispatch(const ReaderSelectionCancelled()),
+          child: GestureDetector(
+            key: const ValueKey('reader-selection-surface'),
+            behavior: HitTestBehavior.opaque,
+            onTapDown: (details) {
+              Focus.of(context).requestFocus();
+              if (endpoint(details.localPosition) == null) {
+                dispatch(const ReaderSelectionCancelled());
+              }
+            },
+            onPanStart: (details) {
+              Focus.of(context).requestFocus();
+              final value = endpoint(details.localPosition);
+              if (value != null) dispatch(ReaderSelectionStarted(value));
+            },
+            onPanUpdate: (details) {
+              final value = endpoint(details.localPosition);
+              if (value != null) dispatch(ReaderSelectionExtended(value));
+            },
+            onPanEnd: (_) => dispatch(const ReaderSelectionEnded()),
+            onPanCancel: () => dispatch(const ReaderSelectionCancelled()),
+            child: RepaintBoundary(
+              key: const ValueKey('reader-page-paint'),
+              child: CustomPaint(
+                painter: PagePainter(
+                  image: image,
+                  surface: surface,
+                  backgroundColor: pageColors(
+                    Theme.of(context).colorScheme,
+                  ).background,
+                  foregroundColor: pageColors(
+                    Theme.of(context).colorScheme,
+                  ).foreground,
+                  recolorImage:
+                      model.document?.format == FlutterBookFormat.epub,
+                  anchor: model.anchor,
+                  focus: model.focus,
+                  savedSelections: model.savedSelections,
+                ),
+                child: const SizedBox.expand(),
               ),
-              child: const SizedBox.expand(),
             ),
           ),
         );
