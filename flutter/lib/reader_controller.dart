@@ -18,6 +18,7 @@ typedef ReaderFocusAdapter = void Function(ReaderFocusTarget target);
 typedef SelectionCopier = Future<void> Function(String text);
 
 const _unchanged = Object();
+final _frozenSurfaces = Expando<bool>();
 
 final class ReaderModel {
   ReaderModel({
@@ -30,10 +31,12 @@ final class ReaderModel {
     this.selectionPointer,
     this.selectionVisualLine,
     this.selectionPreferredX,
+    this.keyboardActionInvocation = false,
     List<ReaderSelection> savedSelections = const [],
     List<FlutterAnnotation> annotations = const [],
     Set<String> annotationOperations = const {},
     this.selectionError,
+    this.selectionActionError,
     this.annotationError,
     this.annotationsReady = false,
     this.contentState = ReaderContentState.loading,
@@ -56,10 +59,12 @@ final class ReaderModel {
   final int? selectionPointer;
   final int? selectionVisualLine;
   final double? selectionPreferredX;
+  final bool keyboardActionInvocation;
   final List<ReaderSelection> savedSelections;
   final List<FlutterAnnotation> annotations;
   final Set<String> annotationOperations;
   final String? selectionError;
+  final String? selectionActionError;
   final String? annotationError;
   final bool annotationsReady;
   final ReaderContentState contentState;
@@ -71,15 +76,18 @@ final class ReaderModel {
     final surface = selectionSurface;
     final first = anchor;
     final second = focus;
-    if (surface == null || first == null || second == null || first == second) {
+    if (surface == null ||
+        !surface.copyEligible ||
+        first == null ||
+        second == null ||
+        first == second) {
       return null;
     }
     final start = first < second ? first : second;
     final end = first < second ? second : first;
     final scalars = surface.text.runes.toList(growable: false);
     if (start < 0 || end > scalars.length) return null;
-    final text = String.fromCharCodes(scalars.sublist(start, end));
-    return text.contains('\u{fffd}') ? null : text;
+    return String.fromCharCodes(scalars.sublist(start, end));
   }
 
   ReaderModel copyWith({
@@ -92,10 +100,12 @@ final class ReaderModel {
     Object? selectionPointer = _unchanged,
     Object? selectionVisualLine = _unchanged,
     Object? selectionPreferredX = _unchanged,
+    bool? keyboardActionInvocation,
     List<ReaderSelection>? savedSelections,
     List<FlutterAnnotation>? annotations,
     Set<String>? annotationOperations,
     Object? selectionError = _unchanged,
+    Object? selectionActionError = _unchanged,
     Object? annotationError = _unchanged,
     bool? annotationsReady,
     ReaderContentState? contentState,
@@ -125,6 +135,8 @@ final class ReaderModel {
       selectionPreferredX: identical(selectionPreferredX, _unchanged)
           ? this.selectionPreferredX
           : selectionPreferredX as double?,
+      keyboardActionInvocation:
+          keyboardActionInvocation ?? this.keyboardActionInvocation,
       savedSelections: savedSelections == null
           ? this.savedSelections
           : List.unmodifiable(savedSelections),
@@ -137,6 +149,9 @@ final class ReaderModel {
       selectionError: identical(selectionError, _unchanged)
           ? this.selectionError
           : selectionError as String?,
+      selectionActionError: identical(selectionActionError, _unchanged)
+          ? this.selectionActionError
+          : selectionActionError as String?,
       annotationError: identical(annotationError, _unchanged)
           ? this.annotationError
           : annotationError as String?,
@@ -162,6 +177,8 @@ enum ReaderSelectionMovement {
   nextWord,
   previousLine,
   nextLine,
+  lineStart,
+  lineEnd,
 }
 
 final class ReaderSelection {
@@ -196,13 +213,22 @@ final class ReaderSelectionPointerStarted extends ReaderMessage {
   const ReaderSelectionPointerStarted(
     this.pointer,
     this.offset, {
+    this.rangeStart,
+    this.rangeEnd,
     this.x,
     this.y,
   });
   final int pointer;
   final int offset;
+  final int? rangeStart;
+  final int? rangeEnd;
   final double? x;
   final double? y;
+}
+
+final class ReaderSelectionPointerPressedOutside extends ReaderMessage {
+  const ReaderSelectionPointerPressedOutside(this.pointer);
+  final int pointer;
 }
 
 final class ReaderSelectionPointerMoved extends ReaderMessage {
@@ -455,6 +481,8 @@ final class ReaderController implements Listenable {
   ReaderModel _model = ReaderModel();
   BigInt? _activeCancellation;
   final Set<BigInt> _annotationCancellations = {};
+  final Map<BigInt, int> _selectionCancellations = {};
+  final Set<int> _cancelledSelectionCreates = {};
   int _activeBridgeOperations = 0;
   int _annotationRevision = 0;
   int _selectionRevision = 0;
@@ -488,9 +516,15 @@ final class ReaderController implements Listenable {
         _selectionPointerStarted(
           message.pointer,
           message.offset,
+          message.rangeStart,
+          message.rangeEnd,
           message.x,
           message.y,
         );
+      case ReaderSelectionPointerPressedOutside():
+        if (_model.selectionPointer == null) {
+          _selectionCancelled();
+        }
       case ReaderSelectionPointerMoved():
         _selectionPointerMoved(
           message.pointer,
@@ -508,6 +542,7 @@ final class ReaderController implements Listenable {
         _selectionEnded();
       case ReaderSelectionActionsRequested():
         if (_model.selectionPhase == ReaderSelectionPhase.selected) {
+          _emit(_model.copyWith(keyboardActionInvocation: true));
           _focusAdapter(ReaderFocusTarget.actions);
         }
       case ReaderSelectionCommitted():
@@ -526,7 +561,7 @@ final class ReaderController implements Listenable {
         if (_isCurrent(message.generation) &&
             message.revision == _noteRevision &&
             message.selectionRevision == _selectionRevision) {
-          _emit(_model.copyWith(selectionError: message.error));
+          _emit(_model.copyWith(selectionActionError: message.error));
         }
       case ReaderAnnotationUpdated():
         unawaited(_updateAnnotation(message));
@@ -598,7 +633,13 @@ final class ReaderController implements Listenable {
       case _ReaderOperationFinished():
         _operationFinished(message);
       case _ReaderAnnotationCreateFinished():
+        final selectionRevision = _selectionCancellations[message.cancellation];
         _annotationCancellations.remove(message.cancellation);
+        _selectionCancellations.remove(message.cancellation);
+        if (selectionRevision != null &&
+            !_selectionCancellations.containsValue(selectionRevision)) {
+          _cancelledSelectionCreates.remove(selectionRevision);
+        }
         _bridge.releaseCancellation(id: message.cancellation);
         _activeBridgeOperations -= 1;
         _disposeBridgeIfIdle();
@@ -650,6 +691,8 @@ final class ReaderController implements Listenable {
         annotations: const [],
         annotationOperations: const {},
         selectionError: null,
+        selectionActionError: null,
+        keyboardActionInvocation: false,
         annotationError: null,
         annotationsReady: false,
         contentState: ReaderContentState.loading,
@@ -848,6 +891,7 @@ final class ReaderController implements Listenable {
 
   void _selectionStarted(int offset) {
     if (_model.selectionSurface == null || _closing) return;
+    _cancelSelectionCreates();
     _selectionRevision += 1;
     _emit(
       _model.copyWith(
@@ -857,6 +901,8 @@ final class ReaderController implements Listenable {
         selectionPointer: null,
         selectionVisualLine: null,
         selectionPreferredX: null,
+        selectionActionError: null,
+        keyboardActionInvocation: false,
       ),
     );
   }
@@ -866,20 +912,29 @@ final class ReaderController implements Listenable {
     _emit(_model.copyWith(focus: offset));
   }
 
-  void _selectionPointerStarted(int pointer, int offset, double? x, double? y) {
+  void _selectionPointerStarted(
+    int pointer,
+    int offset,
+    int? rangeStart,
+    int? rangeEnd,
+    double? x,
+    double? y,
+  ) {
     final surface = _model.selectionSurface;
     if (surface == null || _closing) return;
+    if (_model.selectionPointer case final owner? when owner != pointer) return;
     _focusAdapter(ReaderFocusTarget.surface);
     final anchor = _model.anchor;
     final focus = _model.focus;
     if (_model.selectionPhase == ReaderSelectionPhase.selected &&
         anchor != null &&
         focus != null &&
-        offset >= (anchor < focus ? anchor : focus) &&
-        offset <= (anchor < focus ? focus : anchor)) {
+        (rangeStart ?? offset) >= (anchor < focus ? anchor : focus) &&
+        (rangeEnd ?? offset) <= (anchor < focus ? focus : anchor)) {
       return;
     }
     final affinity = _caretNear(surface.visualLines, offset, x, y);
+    _cancelSelectionCreates();
     _selectionRevision += 1;
     _emit(
       _model.copyWith(
@@ -889,6 +944,7 @@ final class ReaderController implements Listenable {
         selectionPointer: pointer,
         selectionVisualLine: affinity?.line,
         selectionPreferredX: affinity?.preferredX,
+        selectionActionError: null,
       ),
     );
   }
@@ -933,7 +989,8 @@ final class ReaderController implements Listenable {
     final forward = switch (movement) {
       ReaderSelectionMovement.nextGrapheme ||
       ReaderSelectionMovement.nextWord ||
-      ReaderSelectionMovement.nextLine => true,
+      ReaderSelectionMovement.nextLine ||
+      ReaderSelectionMovement.lineEnd => true,
       _ => false,
     };
     final current = _model.focus;
@@ -944,6 +1001,13 @@ final class ReaderController implements Listenable {
         current,
         _model.selectionVisualLine,
         _model.selectionPreferredX,
+        forward,
+      ),
+      ReaderSelectionMovement.lineStart ||
+      ReaderSelectionMovement.lineEnd => _currentLineEdge(
+        surface.visualLines,
+        current,
+        _model.selectionVisualLine,
         forward,
       ),
       _ => null,
@@ -967,7 +1031,9 @@ final class ReaderController implements Listenable {
             forward,
           ),
           ReaderSelectionMovement.previousLine ||
-          ReaderSelectionMovement.nextLine => null,
+          ReaderSelectionMovement.nextLine ||
+          ReaderSelectionMovement.lineStart ||
+          ReaderSelectionMovement.lineEnd => null,
         };
     if (next == null) return;
     final anchor =
@@ -978,6 +1044,7 @@ final class ReaderController implements Listenable {
     final vertical =
         movement == ReaderSelectionMovement.previousLine ||
         movement == ReaderSelectionMovement.nextLine;
+    _cancelSelectionCreates();
     _selectionRevision += 1;
     if (anchor == next) {
       _emit(
@@ -990,6 +1057,8 @@ final class ReaderController implements Listenable {
           selectionPreferredX: vertical
               ? _model.selectionPreferredX ?? affinity?.preferredX
               : affinity?.preferredX,
+          selectionActionError: null,
+          keyboardActionInvocation: false,
         ),
       );
       return;
@@ -1004,6 +1073,8 @@ final class ReaderController implements Listenable {
         selectionPreferredX: vertical
             ? _model.selectionPreferredX ?? affinity?.preferredX
             : affinity?.preferredX,
+        selectionActionError: null,
+        keyboardActionInvocation: false,
       ),
     );
   }
@@ -1017,15 +1088,17 @@ final class ReaderController implements Listenable {
         selectionPhase: anchor != null && focus != null && anchor != focus
             ? ReaderSelectionPhase.selected
             : ReaderSelectionPhase.idle,
-        anchor: anchor == focus ? null : anchor,
-        focus: anchor == focus ? null : focus,
+        anchor: anchor,
+        focus: focus,
         selectionPointer: null,
+        keyboardActionInvocation: false,
       ),
     );
   }
 
   void _selectionNoteRequested() {
     if (_model.selectionPhase != ReaderSelectionPhase.selected) return;
+    _emit(_model.copyWith(selectionActionError: null));
     final generation = _model.generation;
     final revision = ++_noteRevision;
     final selectionRevision = _selectionRevision;
@@ -1061,6 +1134,7 @@ final class ReaderController implements Listenable {
         text == null) {
       return;
     }
+    _emit(_model.copyWith(selectionActionError: null));
     final generation = _model.generation;
     final revision = ++_noteRevision;
     final selectionRevision = _selectionRevision;
@@ -1105,15 +1179,17 @@ final class ReaderController implements Listenable {
     try {
       cancellation = _bridge.createCancellation();
     } catch (error) {
-      _emit(_model.copyWith(selectionError: error.toString()));
+      _emit(_model.copyWith(selectionActionError: error.toString()));
       return;
     }
     _annotationCancellations.add(cancellation);
+    _selectionCancellations[cancellation] = selectionRevision;
     _activeBridgeOperations += 1;
     _emit(
       _model.copyWith(
         selectionPhase: ReaderSelectionPhase.committing,
         annotationOperations: {operationId},
+        selectionActionError: null,
       ),
     );
     unawaited(() async {
@@ -1342,6 +1418,9 @@ final class ReaderController implements Listenable {
     final ownsSelection =
         operation.startsWith('create:') &&
         message.selectionRevision == _selectionRevision;
+    final wasCancelled = _cancelledSelectionCreates.contains(
+      message.selectionRevision,
+    );
     _emit(
       _model.copyWith(
         selectionPhase: ownsSelection
@@ -1351,10 +1430,13 @@ final class ReaderController implements Listenable {
             : null,
         anchor: ownsSelection && message.error == null ? null : _unchanged,
         focus: ownsSelection && message.error == null ? null : _unchanged,
-        selectionError: ownsSelection && message.error != null
+        selectionActionError: ownsSelection && message.error != null
             ? message.error
+            : ownsSelection
+            ? null
             : _unchanged,
-        annotationError: !ownsSelection && message.error != null
+        annotationError:
+            !ownsSelection && !wasCancelled && message.error != null
             ? 'An earlier highlight could not be saved: ${message.error}'
             : _unchanged,
       ),
@@ -1375,10 +1457,12 @@ final class ReaderController implements Listenable {
           selectionPreferredX: null,
         ),
       );
+      _focusAdapter(ReaderFocusTarget.surface);
     }
   }
 
   void _selectionCancelled() {
+    _cancelSelectionCreates();
     _selectionRevision += 1;
     _emit(
       _model.copyWith(
@@ -1388,9 +1472,20 @@ final class ReaderController implements Listenable {
         selectionPointer: null,
         selectionVisualLine: null,
         selectionPreferredX: null,
+        selectionActionError: null,
+        keyboardActionInvocation: false,
       ),
     );
     _focusAdapter(ReaderFocusTarget.surface);
+  }
+
+  void _cancelSelectionCreates() {
+    for (final entry in _selectionCancellations.entries) {
+      if (entry.value == _selectionRevision) {
+        _cancelledSelectionCreates.add(entry.value);
+        _bridge.cancel(id: entry.key);
+      }
+    }
   }
 
   void _openFailed(_ReaderOpenFailed message) {
@@ -1549,6 +1644,21 @@ int? _adjacentOffset(List<int> offsets, int? current, bool forward) {
   );
 }
 
+({int offset, int line, double preferredX})? _currentLineEdge(
+  List<FlutterSelectionVisualLine> lines,
+  int? current,
+  int? currentLine,
+  bool forward,
+) {
+  if (lines.isEmpty) return null;
+  if (current == null) {
+    return _lineEdge(lines, forward ? 0 : lines.length - 1, forward);
+  }
+  final origin = _caretForOffset(lines, current, currentLine);
+  if (origin == null) return null;
+  return _lineEdge(lines, origin.line, forward);
+}
+
 ({int offset, int line, double preferredX})? _caretForOffset(
   List<FlutterSelectionVisualLine> lines,
   int offset,
@@ -1608,29 +1718,33 @@ int? _adjacentOffset(List<int> offsets, int? current, bool forward) {
   return (offset: caret.offset.toInt(), line: line, preferredX: caret.x);
 }
 
-FlutterSelectionSurface _freezeSurface(FlutterSelectionSurface surface) =>
-    FlutterSelectionSurface(
-      handle: surface.handle,
-      width: surface.width,
-      height: surface.height,
-      text: surface.text,
-      resourcePath: surface.resourcePath,
-      raster: surface.raster,
-      endpoints: List.unmodifiable(surface.endpoints),
-      graphemeBoundaries: Uint32List.fromList(
-        surface.graphemeBoundaries.toList(growable: false),
+FlutterSelectionSurface _freezeSurface(FlutterSelectionSurface surface) {
+  if (_frozenSurfaces[surface] ?? false) return surface;
+  final frozen = FlutterSelectionSurface(
+    handle: surface.handle,
+    width: surface.width,
+    height: surface.height,
+    text: surface.text,
+    copyEligible: surface.copyEligible,
+    resourcePath: surface.resourcePath,
+    raster: surface.raster,
+    endpoints: List.unmodifiable(surface.endpoints),
+    graphemeBoundaries: Uint32List.fromList(
+      surface.graphemeBoundaries.toList(growable: false),
+    ).asUnmodifiableView(),
+    wordBoundaries: Uint32List.fromList(
+      surface.wordBoundaries.toList(growable: false),
+    ).asUnmodifiableView(),
+    visualLines: List.unmodifiable(
+      surface.visualLines.map(
+        (line) =>
+            FlutterSelectionVisualLine(carets: List.unmodifiable(line.carets)),
       ),
-      wordBoundaries: Uint32List.fromList(
-        surface.wordBoundaries.toList(growable: false),
-      ),
-      visualLines: List.unmodifiable(
-        surface.visualLines.map(
-          (line) => FlutterSelectionVisualLine(
-            carets: List.unmodifiable(line.carets),
-          ),
-        ),
-      ),
-    );
+    ),
+  );
+  _frozenSurfaces[frozen] = true;
+  return frozen;
+}
 
 Uint8List premultiplyRgba(Uint8List pixels) {
   for (var offset = 0; offset < pixels.length; offset += 4) {

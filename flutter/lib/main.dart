@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -17,6 +18,7 @@ export 'package:shosai_flutter/reader_controller.dart'
         ReaderAnnotationNavigated,
         ReaderAnnotationNoteRequested,
         ReaderAnnotationUpdated,
+        ReaderFocusTarget,
         ReaderMessage,
         ReaderModel,
         ReaderOpenRequested,
@@ -34,6 +36,7 @@ export 'package:shosai_flutter/reader_controller.dart'
         ReaderSelectionPointerCancelled,
         ReaderSelectionPointerEnded,
         ReaderSelectionPointerMoved,
+        ReaderSelectionPointerPressedOutside,
         ReaderSelectionPointerStarted,
         ReaderContentState,
         ReaderSelectionStarted,
@@ -183,9 +186,26 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 ),
               ],
               if (model.selectionError != null && model.document != null)
-                Text('Selection unavailable: ${model.selectionError}'),
+                Semantics(
+                  liveRegion: true,
+                  child: Text('Selection unavailable: ${model.selectionError}'),
+                ),
+              if (model.selectionActionError != null && model.document != null)
+                Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    'Selection action failed: ${model.selectionActionError}',
+                  ),
+                ),
               if (model.annotationError != null && model.document != null)
-                Text('Highlights unavailable: ${model.annotationError}'),
+                Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    model.annotationsReady
+                        ? 'Highlight action failed: ${model.annotationError}'
+                        : 'Highlights unavailable: ${model.annotationError}',
+                  ),
+                ),
               const SizedBox(height: 20),
               Expanded(
                 child: document == null
@@ -266,6 +286,10 @@ class _DocumentView extends StatelessWidget {
         bindings: {
           const SingleActivator(LogicalKeyboardKey.escape): () =>
               dispatch(const ReaderSelectionCancelled()),
+          const SingleActivator(LogicalKeyboardKey.keyC, control: true): () =>
+              dispatch(const ReaderSelectionCopyRequested()),
+          const SingleActivator(LogicalKeyboardKey.keyC, meta: true): () =>
+              dispatch(const ReaderSelectionCopyRequested()),
         },
         child: Column(
           children: [
@@ -355,6 +379,40 @@ class _DocumentView extends StatelessWidget {
                               ),
                             ),
                             const SingleActivator(
+                              LogicalKeyboardKey.home,
+                              shift: true,
+                            ): () => dispatch(
+                              const ReaderSelectionKeyboardExtended(
+                                ReaderSelectionMovement.lineStart,
+                              ),
+                            ),
+                            const SingleActivator(
+                              LogicalKeyboardKey.end,
+                              shift: true,
+                            ): () => dispatch(
+                              const ReaderSelectionKeyboardExtended(
+                                ReaderSelectionMovement.lineEnd,
+                              ),
+                            ),
+                            const SingleActivator(
+                              LogicalKeyboardKey.arrowLeft,
+                              shift: true,
+                              meta: true,
+                            ): () => dispatch(
+                              const ReaderSelectionKeyboardExtended(
+                                ReaderSelectionMovement.lineStart,
+                              ),
+                            ),
+                            const SingleActivator(
+                              LogicalKeyboardKey.arrowRight,
+                              shift: true,
+                              meta: true,
+                            ): () => dispatch(
+                              const ReaderSelectionKeyboardExtended(
+                                ReaderSelectionMovement.lineEnd,
+                              ),
+                            ),
+                            const SingleActivator(
                               LogicalKeyboardKey.contextMenu,
                             ): () => dispatch(
                               const ReaderSelectionActionsRequested(),
@@ -380,18 +438,20 @@ class _DocumentView extends StatelessWidget {
                         ),
                       ),
                       if (model.selectionPhase == ReaderSelectionPhase.selected)
-                        Positioned(
-                          left: 8,
-                          right: 8,
-                          top: _selectionActionTop(
-                            surface,
-                            model,
-                            constraints.biggest,
-                          ),
-                          child: _SelectionActions(
-                            model: model,
-                            dispatch: dispatch,
-                            focusNode: actionFocus,
+                        Positioned.fill(
+                          child: CustomSingleChildLayout(
+                            delegate: _SelectionActionsLayout(
+                              target: _selectionActionTarget(
+                                surface,
+                                model,
+                                constraints.biggest,
+                              ),
+                            ),
+                            child: _SelectionActions(
+                              model: model,
+                              dispatch: dispatch,
+                              focusNode: actionFocus,
+                            ),
                           ),
                         ),
                     ],
@@ -478,6 +538,7 @@ class _SelectionActions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Semantics(
+    key: const ValueKey('selection-actions'),
     label: 'Selection actions',
     container: true,
     child: Material(
@@ -485,15 +546,14 @@ class _SelectionActions extends StatelessWidget {
       borderRadius: BorderRadius.circular(12),
       child: Padding(
         padding: const EdgeInsets.all(8),
-        child: Focus(
-          key: const ValueKey('selection-actions-focus'),
-          focusNode: focusNode,
+        child: SingleChildScrollView(
           child: Wrap(
             alignment: WrapAlignment.center,
             spacing: 8,
             runSpacing: 8,
             children: [
               TextButton(
+                focusNode: model.selectedText == null ? null : focusNode,
                 onPressed: model.selectedText == null
                     ? null
                     : () => dispatch(const ReaderSelectionCopyRequested()),
@@ -501,6 +561,11 @@ class _SelectionActions extends StatelessWidget {
               ),
               for (final color in FlutterHighlightColor.values)
                 FilledButton(
+                  focusNode:
+                      model.selectedText == null &&
+                          color == FlutterHighlightColor.yellow
+                      ? focusNode
+                      : null,
                   onPressed:
                       model.busy ||
                           !model.annotationsReady ||
@@ -530,28 +595,31 @@ class _SelectionActions extends StatelessWidget {
   );
 }
 
-double _selectionActionTop(
+Rect _selectionActionTarget(
   FlutterSelectionSurface surface,
   ReaderModel model,
   Size viewport,
 ) {
-  const actionHeight = 112.0;
-  const gap = 8.0;
   final first = model.anchor!;
   final second = model.focus!;
   final start = first < second ? first : second;
   final end = first < second ? second : first;
   Rect? selected;
   for (final endpoint in surface.endpoints) {
-    if (endpoint.rangeStart.toInt() >= end ||
-        start >= endpoint.rangeEnd.toInt()) {
+    final rangeStart = endpoint.rangeStart.toInt();
+    final rangeEnd = endpoint.rangeEnd.toInt();
+    final focusedOffset = second == end ? end - 1 : start;
+    final include = model.keyboardActionInvocation
+        ? rangeStart <= focusedOffset && focusedOffset < rangeEnd
+        : rangeStart < end && start < rangeEnd;
+    if (!include) {
       continue;
     }
     final rect = endpoint.rect;
     final area = Rect.fromLTRB(rect.left, rect.top, rect.right, rect.bottom);
     selected = selected?.expandToInclude(area) ?? area;
   }
-  if (selected == null) return gap;
+  if (selected == null) return Offset.zero & Size.zero;
   final fitted = applyBoxFit(
     BoxFit.contain,
     Size(surface.width, surface.height),
@@ -559,15 +627,41 @@ double _selectionActionTop(
   ).destination;
   final destination = Alignment.center.inscribe(fitted, Offset.zero & viewport);
   final scale = fitted.width / surface.width;
-  final top = destination.top + selected.top * scale;
-  final bottom = destination.top + selected.bottom * scale;
-  final candidate = top >= actionHeight + gap
-      ? top - actionHeight - gap
-      : bottom + gap;
-  final maxTop = viewport.height > actionHeight + gap * 2
-      ? viewport.height - actionHeight - gap
-      : gap;
-  return candidate.clamp(gap, maxTop);
+  return Rect.fromLTRB(
+    destination.left + selected.left * scale,
+    destination.top + selected.top * scale,
+    destination.left + selected.right * scale,
+    destination.top + selected.bottom * scale,
+  );
+}
+
+class _SelectionActionsLayout extends SingleChildLayoutDelegate {
+  const _SelectionActionsLayout({required this.target});
+
+  static const _gap = 8.0;
+  final Rect target;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
+      BoxConstraints(
+        maxWidth: math.max(0, constraints.maxWidth - _gap * 2),
+        maxHeight: math.max(0, constraints.maxHeight - _gap * 2),
+      );
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    final maxLeft = math.max(_gap, size.width - childSize.width - _gap);
+    final left = (target.center.dx - childSize.width / 2).clamp(_gap, maxLeft);
+    final above = target.top - childSize.height - _gap;
+    final below = target.bottom + _gap;
+    final maxTop = math.max(_gap, size.height - childSize.height - _gap);
+    final top = above >= _gap ? above : below.clamp(_gap, maxTop);
+    return Offset(left, top);
+  }
+
+  @override
+  bool shouldRelayout(_SelectionActionsLayout oldDelegate) =>
+      target != oldDelegate.target;
 }
 
 class _NoteDialog extends StatefulWidget {
@@ -655,7 +749,10 @@ class _SelectableSurface extends StatelessWidget {
                   destination.height)
               .clamp(0, surface.height),
         );
-        int? endpoint(Offset position, {bool nearest = false}) {
+        FlutterSelectionEndpoint? endpoint(
+          Offset position, {
+          bool nearest = false,
+        }) {
           if (!nearest && !destination.contains(position)) return null;
           final source = sourcePosition(position);
           for (final endpoint in surface.endpoints) {
@@ -666,7 +763,7 @@ class _SelectableSurface extends StatelessWidget {
               rect.right,
               rect.bottom,
             ).contains(source)) {
-              return endpoint.offset.toInt();
+              return endpoint;
             }
           }
           if (!nearest || surface.endpoints.isEmpty) return null;
@@ -682,7 +779,7 @@ class _SelectableSurface extends StatelessWidget {
               distance = candidate;
             }
           }
-          return closest?.offset.toInt();
+          return closest;
         }
 
         return Listener(
@@ -695,13 +792,15 @@ class _SelectableSurface extends StatelessWidget {
             if (!primary) return;
             final value = endpoint(event.localPosition);
             if (value == null) {
-              dispatch(const ReaderSelectionCancelled());
+              dispatch(ReaderSelectionPointerPressedOutside(event.pointer));
             } else {
               final source = sourcePosition(event.localPosition);
               dispatch(
                 ReaderSelectionPointerStarted(
                   event.pointer,
-                  value,
+                  value.offset.toInt(),
+                  rangeStart: value.rangeStart.toInt(),
+                  rangeEnd: value.rangeEnd.toInt(),
                   x: source.dx,
                   y: source.dy,
                 ),
@@ -715,7 +814,7 @@ class _SelectableSurface extends StatelessWidget {
               dispatch(
                 ReaderSelectionPointerMoved(
                   event.pointer,
-                  value,
+                  value.offset.toInt(),
                   x: source.dx,
                   y: source.dy,
                 ),
