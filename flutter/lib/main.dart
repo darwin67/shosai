@@ -15,6 +15,7 @@ export 'package:shosai_flutter/reader_controller.dart'
         ReaderController,
         ReaderAnnotationDeleted,
         ReaderAnnotationNavigated,
+        ReaderAnnotationNoteRequested,
         ReaderAnnotationUpdated,
         ReaderMessage,
         ReaderModel,
@@ -25,6 +26,7 @@ export 'package:shosai_flutter/reader_controller.dart'
         ReaderSelectionEnded,
         ReaderSelectionExtended,
         ReaderSelectionPhase,
+        ReaderContentState,
         ReaderSelectionStarted,
         premultiplyRgba;
 
@@ -96,6 +98,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
       bridge: widget.bridge ?? FlutterBridge(),
       decoder: (pixels, {required width, required height}) =>
           widget.decoder(pixels, width: width, height: height),
+      noteEditor: (initialValue) => showDialog<String>(
+        context: context,
+        builder: (context) => _NoteDialog(initialValue: initialValue),
+      ),
     )..addListener(_modelChanged);
   }
 
@@ -158,6 +164,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   ),
                 ),
               ],
+              if (model.selectionError != null && model.document != null)
+                Text('Selection unavailable: ${model.selectionError}'),
+              if (model.annotationError != null && model.document != null)
+                Text('Highlights unavailable: ${model.annotationError}'),
               const SizedBox(height: 20),
               Expanded(
                 child: document == null
@@ -209,9 +219,20 @@ class _DocumentView extends StatelessWidget {
     final title = document.title ?? 'Untitled document';
     final surface = model.selectionSurface;
     final page = image;
-    if (surface == null ||
+    if (model.contentState == ReaderContentState.failed) {
+      return Center(child: Text(model.error ?? 'Document content unavailable'));
+    }
+    if ((document.format == FlutterBookFormat.epub && surface == null) ||
         (document.format != FlutterBookFormat.epub && page == null)) {
       return const Center(child: CircularProgressIndicator());
+    }
+    if (surface == null) {
+      return Semantics(
+        label: '$title, page 1 of ${document.logicalUnitCount}.',
+        child: Center(
+          child: RawImage(image: page, fit: BoxFit.contain),
+        ),
+      );
     }
     return Semantics(
       label: document.format == FlutterBookFormat.epub
@@ -247,8 +268,12 @@ class _DocumentView extends StatelessWidget {
                   spacing: 8,
                   children: [
                     FilledButton.icon(
-                      onPressed: () =>
-                          dispatch(const ReaderSelectionCommitted()),
+                      onPressed:
+                          model.busy ||
+                              !model.annotationsReady ||
+                              model.annotationOperations.isNotEmpty
+                          ? null
+                          : () => dispatch(const ReaderSelectionCommitted()),
                       icon: const Icon(Icons.highlight),
                       label: const Text('Save highlight'),
                     ),
@@ -282,62 +307,35 @@ class _DocumentView extends StatelessWidget {
                             ),
                             IconButton(
                               tooltip: 'Change color',
-                              onPressed: () => dispatch(
-                                ReaderAnnotationUpdated(
-                                  annotation.id,
-                                  _nextColor(annotation.color),
-                                  annotation.body,
-                                ),
-                              ),
+                              onPressed: model.annotationOperations.isNotEmpty
+                                  ? null
+                                  : () => dispatch(
+                                      ReaderAnnotationUpdated(
+                                        annotation.id,
+                                        _nextColor(annotation.color),
+                                        annotation.body,
+                                      ),
+                                    ),
                               icon: const Icon(Icons.palette_outlined),
                             ),
                             IconButton(
                               tooltip: 'Edit note',
-                              onPressed: () async {
-                                final controller = TextEditingController(
-                                  text: annotation.body,
-                                );
-                                final note = await showDialog<String>(
-                                  context: context,
-                                  builder: (context) => AlertDialog(
-                                    title: const Text('Highlight note'),
-                                    content: TextField(
-                                      controller: controller,
-                                      autofocus: true,
-                                    ),
-                                    actions: [
-                                      TextButton(
-                                        onPressed: () => Navigator.pop(context),
-                                        child: const Text('Cancel'),
+                              onPressed: model.annotationOperations.isNotEmpty
+                                  ? null
+                                  : () => dispatch(
+                                      ReaderAnnotationNoteRequested(
+                                        annotation.id,
                                       ),
-                                      FilledButton(
-                                        onPressed: () => Navigator.pop(
-                                          context,
-                                          controller.text,
-                                        ),
-                                        child: const Text('Save'),
-                                      ),
-                                    ],
-                                  ),
-                                );
-                                controller.dispose();
-                                if (note != null) {
-                                  dispatch(
-                                    ReaderAnnotationUpdated(
-                                      annotation.id,
-                                      annotation.color,
-                                      note.isEmpty ? null : note,
                                     ),
-                                  );
-                                }
-                              },
                               icon: const Icon(Icons.note_alt_outlined),
                             ),
                             IconButton(
                               tooltip: 'Delete highlight',
-                              onPressed: () => dispatch(
-                                ReaderAnnotationDeleted(annotation.id),
-                              ),
+                              onPressed: model.annotationOperations.isNotEmpty
+                                  ? null
+                                  : () => dispatch(
+                                      ReaderAnnotationDeleted(annotation.id),
+                                    ),
                               icon: const Icon(Icons.delete_outline),
                             ),
                           ],
@@ -351,6 +349,40 @@ class _DocumentView extends StatelessWidget {
       ),
     );
   }
+}
+
+class _NoteDialog extends StatefulWidget {
+  const _NoteDialog({required this.initialValue});
+  final String? initialValue;
+  @override
+  State<_NoteDialog> createState() => _NoteDialogState();
+}
+
+class _NoteDialogState extends State<_NoteDialog> {
+  late final TextEditingController controller = TextEditingController(
+    text: widget.initialValue,
+  );
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Highlight note'),
+    content: TextField(controller: controller, autofocus: true),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () => Navigator.pop(context, controller.text),
+        child: const Text('Save'),
+      ),
+    ],
+  );
 }
 
 FlutterHighlightColor _nextColor(FlutterHighlightColor color) =>
@@ -413,6 +445,7 @@ class _SelectableSurface extends StatelessWidget {
         }
 
         return GestureDetector(
+          key: const ValueKey('reader-selection-surface'),
           behavior: HitTestBehavior.opaque,
           onPanStart: (details) {
             final value = endpoint(details.localPosition);
@@ -423,15 +456,25 @@ class _SelectableSurface extends StatelessWidget {
             if (value != null) dispatch(ReaderSelectionExtended(value));
           },
           onPanEnd: (_) => dispatch(const ReaderSelectionEnded()),
-          child: CustomPaint(
-            painter: _PagePainter(
-              image: image,
-              surface: surface,
-              anchor: model.anchor,
-              focus: model.focus,
-              savedSelections: model.savedSelections,
+          child: RepaintBoundary(
+            key: const ValueKey('reader-page-paint'),
+            child: CustomPaint(
+              painter: PagePainter(
+                image: image,
+                surface: surface,
+                backgroundColor: pageColors(
+                  Theme.of(context).colorScheme,
+                ).background,
+                foregroundColor: pageColors(
+                  Theme.of(context).colorScheme,
+                ).foreground,
+                recolorImage: model.document?.format == FlutterBookFormat.epub,
+                anchor: model.anchor,
+                focus: model.focus,
+                savedSelections: model.savedSelections,
+              ),
+              child: const SizedBox.expand(),
             ),
-            child: const SizedBox.expand(),
           ),
         );
       },
@@ -439,10 +482,13 @@ class _SelectableSurface extends StatelessWidget {
   }
 }
 
-class _PagePainter extends CustomPainter {
-  const _PagePainter({
+class PagePainter extends CustomPainter {
+  const PagePainter({
     required this.image,
     required this.surface,
+    required this.backgroundColor,
+    required this.foregroundColor,
+    required this.recolorImage,
     required this.anchor,
     required this.focus,
     required this.savedSelections,
@@ -450,6 +496,9 @@ class _PagePainter extends CustomPainter {
 
   final ui.Image? image;
   final FlutterSelectionSurface surface;
+  final Color backgroundColor;
+  final Color foregroundColor;
+  final bool recolorImage;
   final int? anchor;
   final int? focus;
   final List<ReaderSelection> savedSelections;
@@ -469,23 +518,18 @@ class _PagePainter extends CustomPainter {
     canvas.save();
     canvas.translate(destination.left, destination.top);
     canvas.scale(scale);
+    canvas.drawRect(source, Paint()..color = backgroundColor);
     if (image case final page?) {
-      canvas.drawImageRect(page, source, source, Paint());
-    } else {
-      canvas.drawRect(source, Paint()..color = const Color(0xfffaf8f3));
-      TextPainter(
-          text: TextSpan(
-            text: surface.text,
-            style: const TextStyle(
-              color: Color(0xff28231e),
-              fontSize: 18,
-              height: 1.5,
-            ),
-          ),
-          textDirection: TextDirection.ltr,
-        )
-        ..layout(maxWidth: surface.width)
-        ..paint(canvas, Offset.zero);
+      final pixelSource = pageImageSource(page);
+      canvas.drawImageRect(
+        page,
+        pixelSource,
+        source,
+        Paint()
+          ..colorFilter = recolorImage
+              ? ColorFilter.mode(foregroundColor, BlendMode.srcIn)
+              : null,
+      );
     }
     for (final saved in savedSelections) {
       _paintRange(
@@ -528,12 +572,21 @@ class _PagePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_PagePainter oldDelegate) =>
+  bool shouldRepaint(PagePainter oldDelegate) =>
       oldDelegate.image != image ||
+      oldDelegate.backgroundColor != backgroundColor ||
+      oldDelegate.foregroundColor != foregroundColor ||
+      oldDelegate.recolorImage != recolorImage ||
       oldDelegate.anchor != anchor ||
       oldDelegate.focus != focus ||
       oldDelegate.savedSelections != savedSelections;
 }
+
+({Color background, Color foreground}) pageColors(ColorScheme scheme) =>
+    (background: scheme.surface, foreground: scheme.onSurface);
+
+Rect pageImageSource(ui.Image image) =>
+    Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble());
 
 Color _highlightColor(FlutterHighlightColor? color) => switch (color) {
   FlutterHighlightColor.green => const Color(0x6670b77e),
@@ -549,21 +602,24 @@ Future<ui.Image> _decodeRgba(
   required int height,
 }) async {
   final buffer = await ui.ImmutableBuffer.fromUint8List(pixels);
-  final descriptor = ui.ImageDescriptor.raw(
-    buffer,
-    width: width,
-    height: height,
-    pixelFormat: ui.PixelFormat.rgba8888,
-  );
   try {
-    final codec = await descriptor.instantiateCodec();
+    final descriptor = ui.ImageDescriptor.raw(
+      buffer,
+      width: width,
+      height: height,
+      pixelFormat: ui.PixelFormat.rgba8888,
+    );
     try {
-      return (await codec.getNextFrame()).image;
+      final codec = await descriptor.instantiateCodec();
+      try {
+        return (await codec.getNextFrame()).image;
+      } finally {
+        codec.dispose();
+      }
     } finally {
-      codec.dispose();
+      descriptor.dispose();
     }
   } finally {
-    descriptor.dispose();
     buffer.dispose();
   }
 }
