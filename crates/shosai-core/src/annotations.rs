@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use sqlx::Row;
-use sqlx::sqlite::{SqlitePool, SqliteRow};
+use sqlx::sqlite::{SqliteConnection, SqlitePool, SqliteRow};
 use thiserror::Error;
 #[cfg(test)]
 use tokio::sync::Semaphore;
@@ -25,6 +25,8 @@ pub const MAX_CONTEXT_SCALARS: usize = 32;
 pub const MAX_PDF_RECTANGLES: usize = 16_384;
 pub const MAX_ANNOTATIONS_PER_SNAPSHOT: usize = 1_024;
 pub const MAX_PDF_RECTANGLES_PER_SNAPSHOT: usize = 65_536;
+pub const MAX_ANNOTATION_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
+pub const ANNOTATION_SNAPSHOT_BASE_BYTES: usize = 256;
 pub const MAX_ANNOTATION_BODY_SCALARS: usize = 65_536;
 pub const MAX_FINGERPRINT_BYTES: usize = 1_024;
 pub const MAX_FINGERPRINT_ALGORITHM_BYTES: usize = 64;
@@ -537,6 +539,7 @@ impl AnnotationStore {
                 .context("failed to insert PDF annotation rectangle")?;
             }
         }
+        ensure_annotation_snapshot_within_limits(&mut transaction, &annotation.id).await?;
         transaction
             .commit()
             .await
@@ -605,6 +608,14 @@ impl AnnotationStore {
 
     /// List live annotations associated with an untracked device-local path.
     pub async fn list_for_local_path_async(&self, local_path: &str) -> Result<Vec<Annotation>> {
+        self.list_for_local_document_async(local_path, None).await
+    }
+
+    pub(crate) async fn list_for_local_document_async(
+        &self,
+        local_path: &str,
+        fingerprint: Option<&DocumentFingerprint>,
+    ) -> Result<Vec<Annotation>> {
         let mut transaction = self
             .pool
             .begin()
@@ -616,9 +627,18 @@ impl AnnotationStore {
             gate.release.acquire().await.unwrap().forget();
         }
         let rows = sqlx::query(
-            "SELECT * FROM annotations WHERE book_id IS NULL AND local_path = ? AND deleted_at IS NULL ORDER BY created_at, id LIMIT ?",
+            "SELECT * FROM annotations
+             WHERE book_id IS NULL AND local_path = ? AND deleted_at IS NULL
+               AND (? IS NULL OR (
+                 fingerprint_algorithm = ? AND fingerprint_version = ? AND fingerprint = ?
+               ))
+             ORDER BY created_at, id LIMIT ?",
         )
         .bind(local_path)
+        .bind(fingerprint.map(|value| value.algorithm.as_str()))
+        .bind(fingerprint.map(|value| value.algorithm.as_str()))
+        .bind(fingerprint.map(|value| i64::from(value.version)))
+        .bind(fingerprint.map(|value| value.bytes.as_slice()))
         .bind(
             i64::try_from(MAX_ANNOTATIONS_PER_SNAPSHOT + 1)
                 .expect("annotation snapshot limit fits in i64"),
@@ -665,6 +685,11 @@ impl AnnotationStore {
         if let Some(body) = body {
             ensure_scalar_limit(body, MAX_ANNOTATION_BODY_SCALARS, "annotation body")?;
         }
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .context("failed to begin annotation update")?;
         let result = sqlx::query(
             "UPDATE annotations
              SET color = ?, body = ?, modified_at =
@@ -678,9 +703,16 @@ impl AnnotationStore {
         .bind(color.as_str())
         .bind(body)
         .bind(id.to_string())
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .context("failed to update annotation")?;
+        if result.rows_affected() == 1 {
+            ensure_annotation_snapshot_within_limits(&mut transaction, id).await?;
+        }
+        transaction
+            .commit()
+            .await
+            .context("failed to commit annotation update")?;
         Ok(result.rows_affected() == 1)
     }
 
@@ -715,6 +747,94 @@ impl AnnotationStore {
         .context("failed to load PDF annotation rectangles")?;
         rows_to_rectangles(rows)
     }
+}
+
+async fn ensure_annotation_snapshot_within_limits(
+    connection: &mut SqliteConnection,
+    annotation_id: &AnnotationId,
+) -> Result<()> {
+    let usage = sqlx::query(
+        "WITH target AS (
+           SELECT book_id, local_path, fingerprint_algorithm, fingerprint_version, fingerprint
+           FROM annotations WHERE id = ?
+         )
+         SELECT COUNT(*) AS annotation_count,
+                COALESCE(SUM(
+                  LENGTH(CAST(a.id AS BLOB)) +
+                  LENGTH(CAST(COALESCE(a.body, '') AS BLOB)) +
+                  LENGTH(CAST(COALESCE(a.original_quote, '') AS BLOB)) +
+                  LENGTH(CAST(COALESCE(a.normalized_exact, '') AS BLOB)) +
+                  LENGTH(CAST(COALESCE(a.normalized_prefix, '') AS BLOB)) +
+                  LENGTH(CAST(COALESCE(a.normalized_suffix, '') AS BLOB))
+                ), 0) AS string_bytes
+         FROM annotations a, target t
+         WHERE a.deleted_at IS NULL AND (
+           (t.book_id IS NOT NULL AND a.book_id = t.book_id) OR
+           (t.book_id IS NULL AND a.book_id IS NULL AND
+            a.local_path = t.local_path AND
+            a.fingerprint_algorithm = t.fingerprint_algorithm AND
+            a.fingerprint_version = t.fingerprint_version AND
+            a.fingerprint = t.fingerprint)
+         )",
+    )
+    .bind(annotation_id.to_string())
+    .fetch_one(&mut *connection)
+    .await
+    .context("failed to measure annotation snapshot")?;
+    let annotation_count = usize::try_from(usage.try_get::<i64, _>("annotation_count")?)
+        .map_err(|_| AnnotationSnapshotLimit)?;
+    let string_bytes = usize::try_from(usage.try_get::<i64, _>("string_bytes")?)
+        .map_err(|_| AnnotationSnapshotLimit)?;
+    let rectangle_count = usize::try_from(
+        sqlx::query_scalar::<_, i64>(
+            "WITH target AS (
+               SELECT book_id, local_path, fingerprint_algorithm, fingerprint_version, fingerprint
+               FROM annotations WHERE id = ?
+             )
+             SELECT COUNT(*)
+             FROM annotation_pdf_rectangles r
+             JOIN annotations a ON a.id = r.annotation_id
+             JOIN target t
+             WHERE a.deleted_at IS NULL AND (
+               (t.book_id IS NOT NULL AND a.book_id = t.book_id) OR
+               (t.book_id IS NULL AND a.book_id IS NULL AND
+                a.local_path = t.local_path AND
+                a.fingerprint_algorithm = t.fingerprint_algorithm AND
+                a.fingerprint_version = t.fingerprint_version AND
+                a.fingerprint = t.fingerprint)
+             )",
+        )
+        .bind(annotation_id.to_string())
+        .fetch_one(&mut *connection)
+        .await
+        .context("failed to measure annotation rectangles")?,
+    )
+    .map_err(|_| AnnotationSnapshotLimit)?;
+    let retained_bytes = annotation_count
+        .checked_mul(ANNOTATION_SNAPSHOT_BASE_BYTES)
+        .and_then(|base| base.checked_add(string_bytes))
+        .and_then(|bytes| {
+            rectangle_count
+                .checked_mul(std::mem::size_of::<PageRect>())
+                .and_then(|rectangles| bytes.checked_add(rectangles))
+        })
+        .ok_or(AnnotationSnapshotLimit)?;
+
+    ensure_annotation_snapshot_usage(annotation_count, retained_bytes, rectangle_count)
+}
+
+fn ensure_annotation_snapshot_usage(
+    annotation_count: usize,
+    retained_bytes: usize,
+    rectangle_count: usize,
+) -> Result<()> {
+    if annotation_count > MAX_ANNOTATIONS_PER_SNAPSHOT
+        || retained_bytes > MAX_ANNOTATION_SNAPSHOT_BYTES
+        || rectangle_count > MAX_PDF_RECTANGLES_PER_SNAPSHOT
+    {
+        return Err(AnnotationSnapshotLimit.into());
+    }
+    Ok(())
 }
 
 fn row_to_annotation(row: SqliteRow, rectangles: Vec<PageRect>) -> Result<Annotation> {
@@ -964,4 +1084,41 @@ fn ensure_scalar_limit(value: &str, limit: usize, field: &str) -> Result<()> {
         bail!("{field} exceeds {limit} Unicode scalars");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aggregate_snapshot_usage_enforces_each_limit() {
+        assert!(
+            ensure_annotation_snapshot_usage(
+                MAX_ANNOTATIONS_PER_SNAPSHOT,
+                MAX_ANNOTATION_SNAPSHOT_BYTES,
+                MAX_PDF_RECTANGLES_PER_SNAPSHOT,
+            )
+            .is_ok()
+        );
+        for usage in [
+            (
+                MAX_ANNOTATIONS_PER_SNAPSHOT + 1,
+                MAX_ANNOTATION_SNAPSHOT_BYTES,
+                MAX_PDF_RECTANGLES_PER_SNAPSHOT,
+            ),
+            (
+                MAX_ANNOTATIONS_PER_SNAPSHOT,
+                MAX_ANNOTATION_SNAPSHOT_BYTES + 1,
+                MAX_PDF_RECTANGLES_PER_SNAPSHOT,
+            ),
+            (
+                MAX_ANNOTATIONS_PER_SNAPSHOT,
+                MAX_ANNOTATION_SNAPSHOT_BYTES,
+                MAX_PDF_RECTANGLES_PER_SNAPSHOT + 1,
+            ),
+        ] {
+            let error = ensure_annotation_snapshot_usage(usage.0, usage.1, usage.2).unwrap_err();
+            assert!(error.is::<AnnotationSnapshotLimit>());
+        }
+    }
 }

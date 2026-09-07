@@ -1233,7 +1233,12 @@ void main() {
       final bridge = _ControlledBridge(
         selectionVisualLines: [
           FlutterSelectionVisualLine(
-            carets: [caret(1, 10, 10), caret(2, 10, 50), caret(3, 10, 90)],
+            carets: [
+              caret(1, 10, 10),
+              caret(2, 10, 50),
+              caret(2, 10, 70),
+              caret(3, 10, 90),
+            ],
           ),
           FlutterSelectionVisualLine(
             carets: [caret(4, 40, 5), caret(5, 40, 52), caret(8, 40, 95)],
@@ -1250,6 +1255,30 @@ void main() {
 
       expect(controller.model.anchor, 2);
       expect(controller.model.focus, 5);
+
+      controller.dispatch(const ReaderSelectionCancelled());
+      controller.dispatch(const ReaderSelectionStarted(1));
+      controller.dispatch(const ReaderSelectionEnded());
+      for (var step = 0; step < 3; step += 1) {
+        controller.dispatch(
+          const ReaderSelectionKeyboardExtended(
+            ReaderSelectionMovement.visualRight,
+          ),
+        );
+      }
+      expect(controller.model.focus, 3);
+
+      controller.dispatch(const ReaderSelectionCancelled());
+      controller.dispatch(
+        const ReaderSelectionPointerStarted(1, 2, x: 10, y: 69),
+      );
+      controller.dispatch(const ReaderSelectionPointerEnded(1));
+      controller.dispatch(
+        const ReaderSelectionKeyboardExtended(
+          ReaderSelectionMovement.visualRight,
+        ),
+      );
+      expect(controller.model.focus, 3);
       controller.dispose();
       await bridge.disposed.future;
     },

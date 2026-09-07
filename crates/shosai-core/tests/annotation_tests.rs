@@ -1,8 +1,8 @@
 use shosai_core::annotations::{
-    AnnotationId, AnnotationStore, AnnotationTarget, DocumentFingerprint, EpubAnchor,
-    HighlightColor, ImportProvenance, MAX_ANNOTATION_BODY_SCALARS, MAX_EPUB_RESOURCE_PATH_BYTES,
-    MAX_FINGERPRINT_ALGORITHM_BYTES, MAX_FINGERPRINT_BYTES, MAX_LOCAL_PATH_BYTES,
-    MAX_PDF_RECTANGLES, MAX_PROVENANCE_ID_BYTES, MAX_PROVENANCE_SYSTEM_BYTES,
+    AnnotationId, AnnotationSnapshotLimit, AnnotationStore, AnnotationTarget, DocumentFingerprint,
+    EpubAnchor, HighlightColor, ImportProvenance, MAX_ANNOTATION_BODY_SCALARS,
+    MAX_EPUB_RESOURCE_PATH_BYTES, MAX_FINGERPRINT_ALGORITHM_BYTES, MAX_FINGERPRINT_BYTES,
+    MAX_LOCAL_PATH_BYTES, MAX_PDF_RECTANGLES, MAX_PROVENANCE_ID_BYTES, MAX_PROVENANCE_SYSTEM_BYTES,
     MAX_QUOTE_CONTEXT_INPUT_SCALARS, MAX_QUOTE_SCALARS, NewAnnotation, PageRect, PdfAnchor,
     QuoteSelector, normalize_quote_v1, scalar_range_to_utf16,
 };
@@ -229,6 +229,58 @@ async fn untracked_annotations_reopen_by_device_local_path() {
         .unwrap();
     assert_eq!(reopened.len(), 1);
     assert_eq!(reopened[0].id, first.id);
+}
+
+#[tokio::test]
+async fn aggregate_limit_rejects_create_and_update_before_commit() {
+    let (store, _pool, _dir) = temp_store().await;
+    let mut editable = epub_annotation(None);
+    editable.body = None;
+    let editable = store.create_async(&editable).await.unwrap();
+    let mut accepted = 1;
+
+    loop {
+        let mut candidate = epub_annotation(None);
+        candidate.body = Some("x".repeat(MAX_ANNOTATION_BODY_SCALARS));
+        match store.create_async(&candidate).await {
+            Ok(_) => accepted += 1,
+            Err(error) => {
+                assert!(error.is::<AnnotationSnapshotLimit>());
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        store
+            .list_for_local_path_async("/books/example.epub")
+            .await
+            .unwrap()
+            .len(),
+        accepted,
+        "the rejected create must roll back"
+    );
+
+    let error = store
+        .update_async(
+            &editable.id,
+            HighlightColor::Purple,
+            Some(&"😀".repeat(MAX_ANNOTATION_BODY_SCALARS)),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.is::<AnnotationSnapshotLimit>());
+    let unchanged = store.get_async(&editable.id, false).await.unwrap().unwrap();
+    assert_eq!(unchanged.color, HighlightColor::Yellow);
+    assert_eq!(unchanged.body, None, "the rejected update must roll back");
+    assert_eq!(
+        store
+            .list_for_local_path_async("/books/example.epub")
+            .await
+            .unwrap()
+            .len(),
+        accepted,
+        "the accepted snapshot remains reopenable"
+    );
 }
 
 #[tokio::test]

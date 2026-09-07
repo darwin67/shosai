@@ -1707,8 +1707,8 @@ int? _adjacentOffset(List<int> offsets, int? current, bool forward) {
         if (carets[candidate].offset.toInt() != current) continue;
         if (index < 0 ||
             (currentX != null &&
-                (carets[candidate].x - currentX).abs() <
-                    (carets[index].x - currentX).abs())) {
+                (carets[candidate].alongLine - currentX).abs() <
+                    (carets[index].alongLine - currentX).abs())) {
           line = candidateLine;
           index = candidate;
         }
@@ -1848,7 +1848,9 @@ int? _navigableLine(List<FlutterSelectionVisualLine> lines, bool forward) {
   for (var line = 0; line < lines.length; line += 1) {
     for (final caret in lines[line].carets) {
       if (caret.offset.toInt() != offset) continue;
-      final dy = y.clamp(caret.top, caret.bottom) - y;
+      final dy = caret.vertical
+          ? caret.alongLine - y
+          : y.clamp(caret.top, caret.bottom) - y;
       final dx = caret.x - x;
       final distance = dx * dx + dy * dy;
       if (bestDistance == null || distance < bestDistance) {

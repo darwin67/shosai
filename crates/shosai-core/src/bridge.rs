@@ -13,9 +13,9 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 #[cfg(test)]
 use crate::annotations::AnnotationPersistenceTestGate;
 use crate::annotations::{
-    Annotation, AnnotationId, AnnotationSnapshotLimit, AnnotationStore, AnnotationTarget,
-    DocumentFingerprint, EpubAnchor, HighlightColor, NewAnnotation, PageRect, PdfAnchor,
-    QuoteSelector,
+    ANNOTATION_SNAPSHOT_BASE_BYTES, Annotation, AnnotationId, AnnotationSnapshotLimit,
+    AnnotationStore, AnnotationTarget, DocumentFingerprint, EpubAnchor, HighlightColor,
+    MAX_ANNOTATION_SNAPSHOT_BYTES, NewAnnotation, PageRect, PdfAnchor, QuoteSelector,
 };
 
 use crate::application::{DeviceFileLocator, OpenDocument, OpenDocumentError, OpenDocumentPlan};
@@ -40,7 +40,6 @@ pub const MAX_BRIDGE_RETAINED_DOCUMENT_BYTES: usize = 3 * 1024 * 1024 * 1024;
 pub const MAX_BRIDGE_PROBE_BYTES: usize = 512 * 1024 * 1024;
 pub const MAX_BRIDGE_LOCAL_ID_BYTES: usize = 4 * 1024;
 pub const MAX_BRIDGE_PATH_KEY_BYTES: usize = 64 * 1024;
-pub const MAX_BRIDGE_ANNOTATION_SNAPSHOT_BYTES: usize = 8 * 1024 * 1024;
 
 static NEXT_REGISTRY_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -824,12 +823,13 @@ impl Bridge {
         let created = store
             .create_async(&annotation)
             .await
-            .map_err(storage_error)?;
+            .map_err(annotation_storage_error)?;
         let ExtractedSelection {
+            surface,
             request_slot,
             transient_bytes,
-            ..
         } = extracted;
+        drop(surface);
         drop(transient_bytes);
         // Persistence is the acceptance boundary. Once committed, finish the
         // response even if the caller cancels, matching accepted-write semantics.
@@ -866,7 +866,10 @@ impl Bridge {
         };
         check_cancelled(&cancellation)?;
         let listed = tokio::select! {
-            result = store.list_for_local_path_async(&retained.local_path) => {
+            result = store.list_for_local_document_async(
+                &retained.local_path,
+                Some(&retained.fingerprint),
+            ) => {
                 check_cancelled(&cancellation)?;
                 result.map_err(annotation_storage_error)?
             },
@@ -931,7 +934,7 @@ impl Bridge {
             .await?
             .update_async(&id, color, body.as_deref())
             .await
-            .map_err(storage_error)
+            .map_err(annotation_storage_error)
     }
 
     pub async fn delete_annotation(
@@ -1952,7 +1955,6 @@ fn bounded_annotation_snapshot(
 ) -> Result<Vec<Annotation>, BridgeError> {
     let retained_bytes = annotations.iter().try_fold(0usize, |total, annotation| {
         let strings = annotation.id.to_string().len()
-            + annotation.local_path.as_ref().map_or(0, String::len)
             + annotation.body.as_ref().map_or(0, String::len)
             + annotation.quote.as_ref().map_or(0, |quote| {
                 quote.original.as_ref().map_or(0, String::len)
@@ -1969,10 +1971,10 @@ fn bounded_annotation_snapshot(
             AnnotationTarget::Pdf(_) | AnnotationTarget::Epub(_) => 0,
         };
         total
-            .checked_add(std::mem::size_of::<Annotation>() + strings + rectangles)
+            .checked_add(ANNOTATION_SNAPSHOT_BASE_BYTES + strings + rectangles)
             .ok_or(BridgeError::AnnotationLimit)
     })?;
-    if retained_bytes > MAX_BRIDGE_ANNOTATION_SNAPSHOT_BYTES {
+    if retained_bytes > MAX_ANNOTATION_SNAPSHOT_BYTES {
         return Err(BridgeError::AnnotationLimit);
     }
     Ok(annotations)
@@ -2350,7 +2352,7 @@ mod tests {
 
     #[test]
     fn annotation_snapshot_rejects_aggregate_retained_bytes() {
-        let annotations = (0..=MAX_BRIDGE_ANNOTATION_SNAPSHOT_BYTES
+        let annotations = (0..=MAX_ANNOTATION_SNAPSHOT_BYTES
             / crate::annotations::MAX_ANNOTATION_BODY_SCALARS)
             .map(|_| Annotation {
                 id: AnnotationId::new(),
