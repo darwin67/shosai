@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.1.0] - 2026-09-06
+## [0.1.0] - 2026-09-07
 
 ### 🚀 Features
 
@@ -33,6 +33,7 @@ All notable changes to this project will be documented in this file.
 - *(core)* Prepare annotation core for Flutter migration (#76)
 - *(core)* Add bounded application bridge and resource admission (#79)
 - *(flutter)* Deliver the desktop feasibility slice (#87)
+- *(flutter)* Add persistent cross-format highlights (#88)
 
 ### 🐛 Bug Fixes
 
