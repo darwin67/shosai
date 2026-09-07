@@ -7,16 +7,34 @@ import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `cancellation`, `invalid_request`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
 // Rust type: RustOpaqueNom<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FlutterBridge>>
 abstract class FlutterBridge implements RustOpaqueInterface {
   bool cancel({required BigInt id});
 
+  Future<FlutterAnnotation> createAnnotation({
+    required FlutterDocumentHandle document,
+    required BigInt unit,
+    required BigInt start,
+    required BigInt end,
+    required FlutterHighlightColor color,
+    String? body,
+  });
+
   BigInt createCancellation();
 
   static Future<FlutterBridge> default_() =>
       RustLib.instance.api.crateApiFlutterBridgeDefault();
+
+  Future<bool> deleteAnnotation({
+    required FlutterDocumentHandle document,
+    required String id,
+  });
+
+  Future<List<FlutterAnnotation>> listAnnotations({
+    required FlutterDocumentHandle document,
+  });
 
   factory FlutterBridge() => RustLib.instance.api.crateApiFlutterBridgeNew();
 
@@ -38,7 +56,62 @@ abstract class FlutterBridge implements RustOpaqueInterface {
     required BigInt cancellationId,
   });
 
+  Future<FlutterSelectionSurface> selectionSurface({
+    required FlutterDocumentHandle document,
+    required BigInt unit,
+    required double scale,
+    required double width,
+    required double fontSize,
+    required BigInt cancellationId,
+  });
+
   Uint8List takeBuffer({required FlutterBufferHandle handle});
+
+  Future<bool> updateAnnotation({
+    required FlutterDocumentHandle document,
+    required String id,
+    required FlutterHighlightColor color,
+    String? body,
+  });
+}
+
+class FlutterAnnotation {
+  final String id;
+  final BigInt unit;
+  final BigInt start;
+  final BigInt end;
+  final FlutterHighlightColor color;
+  final String? body;
+
+  const FlutterAnnotation({
+    required this.id,
+    required this.unit,
+    required this.start,
+    required this.end,
+    required this.color,
+    this.body,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      unit.hashCode ^
+      start.hashCode ^
+      end.hashCode ^
+      color.hashCode ^
+      body.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FlutterAnnotation &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          unit == other.unit &&
+          start == other.start &&
+          end == other.end &&
+          color == other.color &&
+          body == other.body;
 }
 
 enum FlutterBookFormat { pdf, epub, cbz }
@@ -140,6 +213,8 @@ class FlutterDocumentSummary {
           logicalUnitCount == other.logicalUnitCount;
 }
 
+enum FlutterHighlightColor { yellow, green, blue, pink, purple }
+
 class FlutterOpenRequest {
   final String localId;
   final String pathKey;
@@ -190,4 +265,95 @@ class FlutterRenderedBuffer {
           width == other.width &&
           height == other.height &&
           byteLen == other.byteLen;
+}
+
+class FlutterSelectionEndpoint {
+  final BigInt offset;
+  final BigInt rangeStart;
+  final BigInt rangeEnd;
+  final FlutterSelectionRect rect;
+
+  const FlutterSelectionEndpoint({
+    required this.offset,
+    required this.rangeStart,
+    required this.rangeEnd,
+    required this.rect,
+  });
+
+  @override
+  int get hashCode =>
+      offset.hashCode ^ rangeStart.hashCode ^ rangeEnd.hashCode ^ rect.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FlutterSelectionEndpoint &&
+          runtimeType == other.runtimeType &&
+          offset == other.offset &&
+          rangeStart == other.rangeStart &&
+          rangeEnd == other.rangeEnd &&
+          rect == other.rect;
+}
+
+class FlutterSelectionRect {
+  final double left;
+  final double top;
+  final double right;
+  final double bottom;
+
+  const FlutterSelectionRect({
+    required this.left,
+    required this.top,
+    required this.right,
+    required this.bottom,
+  });
+
+  @override
+  int get hashCode =>
+      left.hashCode ^ top.hashCode ^ right.hashCode ^ bottom.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FlutterSelectionRect &&
+          runtimeType == other.runtimeType &&
+          left == other.left &&
+          top == other.top &&
+          right == other.right &&
+          bottom == other.bottom;
+}
+
+class FlutterSelectionSurface {
+  final double width;
+  final double height;
+  final String text;
+  final String? resourcePath;
+  final List<FlutterSelectionEndpoint> endpoints;
+
+  const FlutterSelectionSurface({
+    required this.width,
+    required this.height,
+    required this.text,
+    this.resourcePath,
+    required this.endpoints,
+  });
+
+  @override
+  int get hashCode =>
+      width.hashCode ^
+      height.hashCode ^
+      text.hashCode ^
+      resourcePath.hashCode ^
+      endpoints.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FlutterSelectionSurface &&
+          runtimeType == other.runtimeType &&
+          width == other.width &&
+          height == other.height &&
+          text == other.text &&
+          resourcePath == other.resourcePath &&
+          endpoints == other.endpoints;
 }

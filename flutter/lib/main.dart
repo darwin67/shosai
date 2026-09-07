@@ -1,8 +1,8 @@
 import 'dart:io';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart'
     show ExternalLibrary;
 import 'package:shosai_flutter/reader_controller.dart';
@@ -13,9 +13,19 @@ export 'package:shosai_flutter/reader_controller.dart'
     show
         PageDecoder,
         ReaderController,
+        ReaderAnnotationDeleted,
+        ReaderAnnotationNavigated,
+        ReaderAnnotationUpdated,
         ReaderMessage,
         ReaderModel,
         ReaderOpenRequested,
+        ReaderSelection,
+        ReaderSelectionCancelled,
+        ReaderSelectionCommitted,
+        ReaderSelectionEnded,
+        ReaderSelectionExtended,
+        ReaderSelectionPhase,
+        ReaderSelectionStarted,
         premultiplyRgba;
 
 Future<void> main() async {
@@ -152,7 +162,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
               Expanded(
                 child: document == null
                     ? const WelcomePanel()
-                    : _DocumentView(document: document, image: model.pageImage),
+                    : _DocumentView(
+                        document: document,
+                        image: model.pageImage,
+                        model: model,
+                        dispatch: _controller.dispatch,
+                      ),
               ),
             ],
           ),
@@ -177,54 +192,271 @@ class WelcomePanel extends StatelessWidget {
 }
 
 class _DocumentView extends StatelessWidget {
-  const _DocumentView({required this.document, required this.image});
+  const _DocumentView({
+    required this.document,
+    required this.image,
+    required this.model,
+    required this.dispatch,
+  });
 
   final FlutterDocumentSummary document;
   final ui.Image? image;
+  final ReaderModel model;
+  final void Function(ReaderMessage) dispatch;
 
   @override
   Widget build(BuildContext context) {
     final title = document.title ?? 'Untitled document';
-    if (document.format == FlutterBookFormat.epub) {
-      return Semantics(
-        label: '$title, EPUB, ${document.logicalUnitCount} chapters',
-        child: Center(
-          child: Text(
-            '$title\n${document.logicalUnitCount} chapters\n\n'
-            'EPUB scene transfer is the next M2 slice.',
-            textAlign: TextAlign.center,
-          ),
-        ),
-      );
-    }
+    final surface = model.selectionSurface;
     final page = image;
-    if (page == null) {
+    if (surface == null ||
+        (document.format != FlutterBookFormat.epub && page == null)) {
       return const Center(child: CircularProgressIndicator());
     }
     return Semantics(
-      image: true,
-      label: '$title, page 1 of ${document.logicalUnitCount}',
-      child: CustomPaint(
-        painter: _PagePainter(page),
-        child: const SizedBox.expand(),
+      label: document.format == FlutterBookFormat.epub
+          ? '$title, EPUB chapter 1 of ${document.logicalUnitCount}. Selectable text.'
+          : '$title, page 1 of ${document.logicalUnitCount}. Selectable text.',
+      child: Column(
+        children: [
+          Expanded(
+            child: CallbackShortcuts(
+              bindings: {
+                const SingleActivator(LogicalKeyboardKey.escape): () =>
+                    dispatch(const ReaderSelectionCancelled()),
+                const SingleActivator(LogicalKeyboardKey.enter): () =>
+                    dispatch(const ReaderSelectionCommitted()),
+              },
+              child: Focus(
+                autofocus: true,
+                child: _SelectableSurface(
+                  surface: surface,
+                  image: page,
+                  model: model,
+                  dispatch: dispatch,
+                ),
+              ),
+            ),
+          ),
+          if (model.selectionPhase == ReaderSelectionPhase.selected)
+            Semantics(
+              label: 'Selection actions',
+              child: Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Wrap(
+                  spacing: 8,
+                  children: [
+                    FilledButton.icon(
+                      onPressed: () =>
+                          dispatch(const ReaderSelectionCommitted()),
+                      icon: const Icon(Icons.highlight),
+                      label: const Text('Save highlight'),
+                    ),
+                    TextButton(
+                      onPressed: () =>
+                          dispatch(const ReaderSelectionCancelled()),
+                      child: const Text('Cancel'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          if (model.annotations.isNotEmpty)
+            SizedBox(
+              height: 64,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                children: model.annotations
+                    .map(
+                      (annotation) => Card(
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            TextButton(
+                              onPressed: () => dispatch(
+                                ReaderAnnotationNavigated(annotation.id),
+                              ),
+                              child: Text(
+                                'Highlight ${annotation.unit.toInt() + 1}',
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: 'Change color',
+                              onPressed: () => dispatch(
+                                ReaderAnnotationUpdated(
+                                  annotation.id,
+                                  _nextColor(annotation.color),
+                                  annotation.body,
+                                ),
+                              ),
+                              icon: const Icon(Icons.palette_outlined),
+                            ),
+                            IconButton(
+                              tooltip: 'Edit note',
+                              onPressed: () async {
+                                final controller = TextEditingController(
+                                  text: annotation.body,
+                                );
+                                final note = await showDialog<String>(
+                                  context: context,
+                                  builder: (context) => AlertDialog(
+                                    title: const Text('Highlight note'),
+                                    content: TextField(
+                                      controller: controller,
+                                      autofocus: true,
+                                    ),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () => Navigator.pop(context),
+                                        child: const Text('Cancel'),
+                                      ),
+                                      FilledButton(
+                                        onPressed: () => Navigator.pop(
+                                          context,
+                                          controller.text,
+                                        ),
+                                        child: const Text('Save'),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                                controller.dispose();
+                                if (note != null) {
+                                  dispatch(
+                                    ReaderAnnotationUpdated(
+                                      annotation.id,
+                                      annotation.color,
+                                      note.isEmpty ? null : note,
+                                    ),
+                                  );
+                                }
+                              },
+                              icon: const Icon(Icons.note_alt_outlined),
+                            ),
+                            IconButton(
+                              tooltip: 'Delete highlight',
+                              onPressed: () => dispatch(
+                                ReaderAnnotationDeleted(annotation.id),
+                              ),
+                              icon: const Icon(Icons.delete_outline),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                    .toList(),
+              ),
+            ),
+        ],
       ),
     );
   }
 }
 
-class _PagePainter extends CustomPainter {
-  const _PagePainter(this.image);
+FlutterHighlightColor _nextColor(FlutterHighlightColor color) =>
+    switch (color) {
+      FlutterHighlightColor.yellow => FlutterHighlightColor.green,
+      FlutterHighlightColor.green => FlutterHighlightColor.blue,
+      FlutterHighlightColor.blue => FlutterHighlightColor.pink,
+      FlutterHighlightColor.pink => FlutterHighlightColor.purple,
+      FlutterHighlightColor.purple => FlutterHighlightColor.yellow,
+    };
 
-  final ui.Image image;
+class _SelectableSurface extends StatelessWidget {
+  const _SelectableSurface({
+    required this.surface,
+    required this.image,
+    required this.model,
+    required this.dispatch,
+  });
+
+  final FlutterSelectionSurface surface;
+  final ui.Image? image;
+  final ReaderModel model;
+  final void Function(ReaderMessage) dispatch;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final fitted = applyBoxFit(
+          BoxFit.contain,
+          Size(surface.width, surface.height),
+          constraints.biggest,
+        ).destination;
+        final destination = Alignment.center.inscribe(
+          fitted,
+          Offset.zero & constraints.biggest,
+        );
+        int? endpoint(Offset position) {
+          if (!destination.contains(position)) return null;
+          final source = Offset(
+            (position.dx - destination.left) *
+                surface.width /
+                destination.width,
+            (position.dy - destination.top) *
+                surface.height /
+                destination.height,
+          );
+          for (final endpoint in surface.endpoints) {
+            final rect = endpoint.rect;
+            if (Rect.fromLTRB(
+              rect.left,
+              rect.top,
+              rect.right,
+              rect.bottom,
+            ).contains(source)) {
+              return endpoint.offset.toInt();
+            }
+          }
+          return null;
+        }
+
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onPanStart: (details) {
+            final value = endpoint(details.localPosition);
+            if (value != null) dispatch(ReaderSelectionStarted(value));
+          },
+          onPanUpdate: (details) {
+            final value = endpoint(details.localPosition);
+            if (value != null) dispatch(ReaderSelectionExtended(value));
+          },
+          onPanEnd: (_) => dispatch(const ReaderSelectionEnded()),
+          child: CustomPaint(
+            painter: _PagePainter(
+              image: image,
+              surface: surface,
+              anchor: model.anchor,
+              focus: model.focus,
+              savedSelections: model.savedSelections,
+            ),
+            child: const SizedBox.expand(),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _PagePainter extends CustomPainter {
+  const _PagePainter({
+    required this.image,
+    required this.surface,
+    required this.anchor,
+    required this.focus,
+    required this.savedSelections,
+  });
+
+  final ui.Image? image;
+  final FlutterSelectionSurface surface;
+  final int? anchor;
+  final int? focus;
+  final List<ReaderSelection> savedSelections;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final source = Rect.fromLTWH(
-      0,
-      0,
-      image.width.toDouble(),
-      image.height.toDouble(),
-    );
+    final source = Rect.fromLTWH(0, 0, surface.width, surface.height);
     final scale = (size.width / source.width).clamp(
       0.0,
       size.height / source.height,
@@ -234,12 +466,82 @@ class _PagePainter extends CustomPainter {
       destinationSize,
       Offset.zero & size,
     );
-    canvas.drawImageRect(image, source, destination, Paint());
+    canvas.save();
+    canvas.translate(destination.left, destination.top);
+    canvas.scale(scale);
+    if (image case final page?) {
+      canvas.drawImageRect(page, source, source, Paint());
+    } else {
+      canvas.drawRect(source, Paint()..color = const Color(0xfffaf8f3));
+      TextPainter(
+          text: TextSpan(
+            text: surface.text,
+            style: const TextStyle(
+              color: Color(0xff28231e),
+              fontSize: 18,
+              height: 1.5,
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        )
+        ..layout(maxWidth: surface.width)
+        ..paint(canvas, Offset.zero);
+    }
+    for (final saved in savedSelections) {
+      _paintRange(
+        canvas,
+        saved.start,
+        saved.end,
+        _highlightColor(saved.color),
+        true,
+      );
+    }
+    if (anchor != null && focus != null) {
+      _paintRange(
+        canvas,
+        anchor! < focus! ? anchor! : focus!,
+        anchor! < focus! ? focus! : anchor!,
+        const Color(0x6690caf9),
+        false,
+      );
+    }
+    canvas.restore();
+  }
+
+  void _paintRange(Canvas canvas, int start, int end, Color color, bool saved) {
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+    final border = Paint()
+      ..color = color.withAlpha(220)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = saved ? 1.5 : 1;
+    for (final endpoint in surface.endpoints) {
+      final rangeStart = endpoint.rangeStart.toInt();
+      final rangeEnd = endpoint.rangeEnd.toInt();
+      if (rangeStart >= end || start >= rangeEnd) continue;
+      final rect = endpoint.rect;
+      final area = Rect.fromLTRB(rect.left, rect.top, rect.right, rect.bottom);
+      canvas.drawRect(area, paint);
+      if (saved) canvas.drawLine(area.bottomLeft, area.bottomRight, border);
+    }
   }
 
   @override
-  bool shouldRepaint(_PagePainter oldDelegate) => oldDelegate.image != image;
+  bool shouldRepaint(_PagePainter oldDelegate) =>
+      oldDelegate.image != image ||
+      oldDelegate.anchor != anchor ||
+      oldDelegate.focus != focus ||
+      oldDelegate.savedSelections != savedSelections;
 }
+
+Color _highlightColor(FlutterHighlightColor? color) => switch (color) {
+  FlutterHighlightColor.green => const Color(0x6670b77e),
+  FlutterHighlightColor.blue => const Color(0x666aa9e9),
+  FlutterHighlightColor.pink => const Color(0x66dc7ca5),
+  FlutterHighlightColor.purple => const Color(0x668876c5),
+  FlutterHighlightColor.yellow || null => const Color(0x66e2bd54),
+};
 
 Future<ui.Image> _decodeRgba(
   Uint8List pixels, {

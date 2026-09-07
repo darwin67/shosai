@@ -40,6 +40,27 @@ void main() {
         document = summary.handle;
         expect(summary.format, FlutterBookFormat.pdf);
 
+        final surface = await bridge.selectionSurface(
+          document: summary.handle,
+          unit: BigInt.zero,
+          scale: 1,
+          width: 680,
+          fontSize: 18,
+          cancellationId: cancellation,
+        );
+        expect(surface.width, greaterThan(0));
+        expect(surface.height, greaterThan(0));
+        expect(surface.endpoints, isNotEmpty);
+        expect(
+          surface.endpoints.every(
+            (endpoint) =>
+                endpoint.rangeStart < endpoint.rangeEnd &&
+                endpoint.offset >= endpoint.rangeStart &&
+                endpoint.offset <= endpoint.rangeEnd,
+          ),
+          isTrue,
+        );
+
         final rendered = await bridge.renderPage(
           document: summary.handle,
           page: BigInt.zero,
@@ -60,6 +81,51 @@ void main() {
         fail('${error.kind}: ${error.message}');
       } finally {
         if (buffer != null) bridge.releaseBuffer(handle: buffer);
+        if (document != null) bridge.releaseDocument(handle: document);
+        bridge.releaseCancellation(id: cancellation);
+        bridge.dispose();
+      }
+    },
+    skip: supported ? false : 'native bridge smoke test supports desktop hosts',
+  );
+
+  test(
+    'opens and lays out an EPUB selection surface through the native bridge',
+    () async {
+      final bridge = FlutterBridge();
+      final cancellation = bridge.createCancellation();
+      FlutterDocumentHandle? document;
+      try {
+        final summary = await bridge.openDocument(
+          request: const FlutterOpenRequest(
+            localId: 'native-epub-test',
+            pathKey: '../crates/shosai-core/tests/fixtures/sample.epub',
+          ),
+          cancellationId: cancellation,
+        );
+        document = summary.handle;
+        expect(summary.format, FlutterBookFormat.epub);
+        final surface = await bridge.selectionSurface(
+          document: summary.handle,
+          unit: BigInt.zero,
+          scale: 1,
+          width: 680,
+          fontSize: 18,
+          cancellationId: cancellation,
+        );
+        expect(surface.text, isNotEmpty);
+        expect(surface.resourcePath, isNotEmpty);
+        expect(surface.endpoints, isNotEmpty);
+        expect(
+          surface.endpoints.every(
+            (endpoint) =>
+                endpoint.rangeStart < endpoint.rangeEnd &&
+                endpoint.offset >= endpoint.rangeStart &&
+                endpoint.offset <= endpoint.rangeEnd,
+          ),
+          isTrue,
+        );
+      } finally {
         if (document != null) bridge.releaseDocument(handle: document);
         bridge.releaseCancellation(id: cancellation);
         bridge.dispose();

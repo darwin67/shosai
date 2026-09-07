@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use shosai_core::annotations::HighlightColor;
 use shosai_core::bridge::{
-    Bridge, BridgeError, BufferHandle, Cancellation, DocumentHandle, OpenRequest, RenderRequest,
+    Bridge, BridgeAnnotation, BridgeError, BufferHandle, Cancellation, DocumentHandle, OpenRequest,
+    RenderRequest, SelectionSurface,
 };
 use shosai_core::library::BookFormat;
 use thiserror::Error;
@@ -15,6 +17,60 @@ pub enum FlutterBookFormat {
     Pdf,
     Epub,
     Cbz,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlutterHighlightColor {
+    Yellow,
+    Green,
+    Blue,
+    Pink,
+    Purple,
+}
+
+impl From<FlutterHighlightColor> for HighlightColor {
+    fn from(value: FlutterHighlightColor) -> Self {
+        match value {
+            FlutterHighlightColor::Yellow => Self::Yellow,
+            FlutterHighlightColor::Green => Self::Green,
+            FlutterHighlightColor::Blue => Self::Blue,
+            FlutterHighlightColor::Pink => Self::Pink,
+            FlutterHighlightColor::Purple => Self::Purple,
+        }
+    }
+}
+impl From<HighlightColor> for FlutterHighlightColor {
+    fn from(value: HighlightColor) -> Self {
+        match value {
+            HighlightColor::Yellow => Self::Yellow,
+            HighlightColor::Green => Self::Green,
+            HighlightColor::Blue => Self::Blue,
+            HighlightColor::Pink => Self::Pink,
+            HighlightColor::Purple => Self::Purple,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlutterAnnotation {
+    pub id: String,
+    pub unit: usize,
+    pub start: usize,
+    pub end: usize,
+    pub color: FlutterHighlightColor,
+    pub body: Option<String>,
+}
+impl From<BridgeAnnotation> for FlutterAnnotation {
+    fn from(value: BridgeAnnotation) -> Self {
+        Self {
+            id: value.id,
+            unit: value.unit,
+            start: value.start,
+            end: value.end,
+            color: value.color.into(),
+            body: value.body,
+        }
+    }
 }
 
 impl From<FlutterBookFormat> for BookFormat {
@@ -106,6 +162,57 @@ pub struct FlutterRenderedBuffer {
     pub width: u32,
     pub height: u32,
     pub byte_len: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlutterSelectionRect {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlutterSelectionEndpoint {
+    pub offset: usize,
+    pub range_start: usize,
+    pub range_end: usize,
+    pub rect: FlutterSelectionRect,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlutterSelectionSurface {
+    pub width: f32,
+    pub height: f32,
+    pub text: String,
+    pub resource_path: Option<String>,
+    pub endpoints: Vec<FlutterSelectionEndpoint>,
+}
+
+impl From<SelectionSurface> for FlutterSelectionSurface {
+    fn from(value: SelectionSurface) -> Self {
+        Self {
+            width: value.width,
+            height: value.height,
+            text: value.text,
+            resource_path: value.resource_path,
+            endpoints: value
+                .endpoints
+                .into_iter()
+                .map(|endpoint| FlutterSelectionEndpoint {
+                    offset: endpoint.offset,
+                    range_start: endpoint.range_start,
+                    range_end: endpoint.range_end,
+                    rect: FlutterSelectionRect {
+                        left: endpoint.rect.left,
+                        top: endpoint.rect.top,
+                        right: endpoint.rect.right,
+                        bottom: endpoint.rect.bottom,
+                    },
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,6 +381,74 @@ impl FlutterBridge {
             height: rendered.height,
             byte_len: rendered.byte_len,
         })
+    }
+
+    pub async fn selection_surface(
+        &self,
+        document: FlutterDocumentHandle,
+        unit: usize,
+        scale: f32,
+        width: f32,
+        font_size: f32,
+        cancellation_id: u64,
+    ) -> Result<FlutterSelectionSurface, FlutterBridgeError> {
+        let cancellation = self.cancellation(cancellation_id)?;
+        self.bridge
+            .selection_surface(document.into(), unit, scale, width, font_size, cancellation)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    pub async fn create_annotation(
+        &self,
+        document: FlutterDocumentHandle,
+        unit: usize,
+        start: usize,
+        end: usize,
+        color: FlutterHighlightColor,
+        body: Option<String>,
+    ) -> Result<FlutterAnnotation, FlutterBridgeError> {
+        self.bridge
+            .create_annotation(document.into(), unit, start, end, color.into(), body)
+            .await
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    pub async fn list_annotations(
+        &self,
+        document: FlutterDocumentHandle,
+    ) -> Result<Vec<FlutterAnnotation>, FlutterBridgeError> {
+        self.bridge
+            .list_annotations(document.into())
+            .await
+            .map(|items| items.into_iter().map(Into::into).collect())
+            .map_err(Into::into)
+    }
+
+    pub async fn update_annotation(
+        &self,
+        document: FlutterDocumentHandle,
+        id: String,
+        color: FlutterHighlightColor,
+        body: Option<String>,
+    ) -> Result<bool, FlutterBridgeError> {
+        self.bridge
+            .update_annotation(document.into(), &id, color.into(), body)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn delete_annotation(
+        &self,
+        document: FlutterDocumentHandle,
+        id: String,
+    ) -> Result<bool, FlutterBridgeError> {
+        self.bridge
+            .delete_annotation(document.into(), &id)
+            .await
+            .map_err(Into::into)
     }
 
     #[flutter_rust_bridge::frb(sync)]

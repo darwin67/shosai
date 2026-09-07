@@ -233,10 +233,11 @@ void main() {
     expect(controller.model.busy, isFalse);
     expect(controller.model.document?.handle, _documentHandle);
     expect(controller.model.error, isNull);
-    expect(transitions, hasLength(3));
+    expect(transitions, hasLength(4));
     expect(transitions[0].busy, isTrue);
     expect(transitions[1].document?.handle, _documentHandle);
-    expect(transitions[2].busy, isFalse);
+    expect(transitions[2].selectionSurface?.text, 'Selectable fixture text');
+    expect(transitions[3].busy, isFalse);
 
     controller.dispose();
     await bridge.disposed.future;
@@ -264,7 +265,7 @@ void main() {
 
       expect(controller.model.busy, isFalse);
       expect(controller.model.document?.handle, _documentHandle);
-      expect(reported, hasLength(3));
+      expect(reported, hasLength(4));
 
       controller.dispose();
       await bridge.disposed.future;
@@ -299,7 +300,7 @@ void main() {
     }, (error, stackTrace) => reported.add(error));
     FlutterError.onError = previousErrorHandler;
 
-    expect(reported, hasLength(3));
+    expect(reported, hasLength(4));
     expect(bridge.releasedDocuments, [_documentHandle]);
     expect(bridge.releasedCancellations, [BigInt.one]);
     expect(bridge.disposeCount, 1);
@@ -571,6 +572,36 @@ void main() {
     expect(premultiplyRgba(pixels), same(pixels));
     expect(pixels, [128, 32, 0, 128, 10, 20, 30, 255, 0, 0, 0, 0]);
   });
+
+  test(
+    'selection follows the shared interaction phases without bridge calls',
+    () async {
+      final bridge = _FakeBridge();
+      final controller = _epubController(bridge);
+      controller.dispatch(const ReaderOpenRequested('/tmp/book.epub'));
+      bridge.completeOpen(FlutterBookFormat.epub);
+      await bridge.operationFinished.future;
+
+      controller.dispatch(const ReaderSelectionStarted(12));
+      expect(controller.model.selectionPhase, ReaderSelectionPhase.selecting);
+      controller.dispatch(const ReaderSelectionExtended(4));
+      controller.dispatch(const ReaderSelectionEnded());
+      expect(controller.model.selectionPhase, ReaderSelectionPhase.selected);
+      expect(controller.model.anchor, 12);
+      expect(controller.model.focus, 4);
+
+      controller.dispatch(const ReaderSelectionCommitted());
+      expect(controller.model.selectionPhase, ReaderSelectionPhase.committing);
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.model.selectionPhase, ReaderSelectionPhase.idle);
+      expect(controller.model.savedSelections.single.start, 4);
+      expect(controller.model.savedSelections.single.end, 12);
+      expect(bridge.openRequests, hasLength(1));
+
+      controller.dispose();
+      await bridge.disposed.future;
+    },
+  );
 }
 
 class _FakeBridge implements FlutterBridge {
@@ -608,6 +639,39 @@ class _FakeBridge implements FlutterBridge {
 
   @override
   bool get isDisposed => disposeCount != 0;
+
+  @override
+  Future<List<FlutterAnnotation>> listAnnotations({
+    required FlutterDocumentHandle document,
+  }) async => const [];
+  @override
+  Future<FlutterAnnotation> createAnnotation({
+    required FlutterDocumentHandle document,
+    required BigInt unit,
+    required BigInt start,
+    required BigInt end,
+    required FlutterHighlightColor color,
+    String? body,
+  }) async => FlutterAnnotation(
+    id: 'annotation',
+    unit: unit,
+    start: start,
+    end: end,
+    color: color,
+    body: body,
+  );
+  @override
+  Future<bool> updateAnnotation({
+    required FlutterDocumentHandle document,
+    required String id,
+    required FlutterHighlightColor color,
+    String? body,
+  }) async => true;
+  @override
+  Future<bool> deleteAnnotation({
+    required FlutterDocumentHandle document,
+    required String id,
+  }) async => true;
 
   @override
   void dispose() {
@@ -683,6 +747,23 @@ class _FakeBridge implements FlutterBridge {
   }
 
   @override
+  Future<FlutterSelectionSurface> selectionSurface({
+    required FlutterDocumentHandle document,
+    required BigInt unit,
+    required double scale,
+    required double width,
+    required double fontSize,
+    required BigInt cancellationId,
+  }) async {
+    return const FlutterSelectionSurface(
+      width: 100,
+      height: 100,
+      text: 'Selectable fixture text',
+      endpoints: [],
+    );
+  }
+
+  @override
   Uint8List takeBuffer({required FlutterBufferHandle handle}) {
     _ensureAlive();
     if (failBufferTransfer) throw StateError('transfer failed');
@@ -714,6 +795,39 @@ final class _SequentialBridge implements FlutterBridge {
 
   @override
   bool get isDisposed => disposeCount != 0;
+
+  @override
+  Future<List<FlutterAnnotation>> listAnnotations({
+    required FlutterDocumentHandle document,
+  }) async => const [];
+  @override
+  Future<FlutterAnnotation> createAnnotation({
+    required FlutterDocumentHandle document,
+    required BigInt unit,
+    required BigInt start,
+    required BigInt end,
+    required FlutterHighlightColor color,
+    String? body,
+  }) async => FlutterAnnotation(
+    id: 'annotation',
+    unit: unit,
+    start: start,
+    end: end,
+    color: color,
+    body: body,
+  );
+  @override
+  Future<bool> updateAnnotation({
+    required FlutterDocumentHandle document,
+    required String id,
+    required FlutterHighlightColor color,
+    String? body,
+  }) async => true;
+  @override
+  Future<bool> deleteAnnotation({
+    required FlutterDocumentHandle document,
+    required String id,
+  }) async => true;
 
   @override
   void dispose() => disposeCount += 1;
@@ -779,6 +893,23 @@ final class _SequentialBridge implements FlutterBridge {
       width: 1,
       height: 1,
       byteLen: BigInt.from(4),
+    );
+  }
+
+  @override
+  Future<FlutterSelectionSurface> selectionSurface({
+    required FlutterDocumentHandle document,
+    required BigInt unit,
+    required double scale,
+    required double width,
+    required double fontSize,
+    required BigInt cancellationId,
+  }) async {
+    return const FlutterSelectionSurface(
+      width: 100,
+      height: 100,
+      text: 'Selectable fixture text',
+      endpoints: [],
     );
   }
 

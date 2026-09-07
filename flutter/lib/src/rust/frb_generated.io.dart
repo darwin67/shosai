@@ -64,6 +64,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double dco_decode_f_32(dynamic raw);
 
   @protected
+  FlutterAnnotation dco_decode_flutter_annotation(dynamic raw);
+
+  @protected
   FlutterBookFormat dco_decode_flutter_book_format(dynamic raw);
 
   @protected
@@ -82,13 +85,33 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   FlutterDocumentSummary dco_decode_flutter_document_summary(dynamic raw);
 
   @protected
+  FlutterHighlightColor dco_decode_flutter_highlight_color(dynamic raw);
+
+  @protected
   FlutterOpenRequest dco_decode_flutter_open_request(dynamic raw);
 
   @protected
   FlutterRenderedBuffer dco_decode_flutter_rendered_buffer(dynamic raw);
 
   @protected
+  FlutterSelectionEndpoint dco_decode_flutter_selection_endpoint(dynamic raw);
+
+  @protected
+  FlutterSelectionRect dco_decode_flutter_selection_rect(dynamic raw);
+
+  @protected
+  FlutterSelectionSurface dco_decode_flutter_selection_surface(dynamic raw);
+
+  @protected
   int dco_decode_i_32(dynamic raw);
+
+  @protected
+  List<FlutterAnnotation> dco_decode_list_flutter_annotation(dynamic raw);
+
+  @protected
+  List<FlutterSelectionEndpoint> dco_decode_list_flutter_selection_endpoint(
+    dynamic raw,
+  );
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
@@ -164,6 +187,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double sse_decode_f_32(SseDeserializer deserializer);
 
   @protected
+  FlutterAnnotation sse_decode_flutter_annotation(SseDeserializer deserializer);
+
+  @protected
   FlutterBookFormat sse_decode_flutter_book_format(
     SseDeserializer deserializer,
   );
@@ -194,6 +220,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  FlutterHighlightColor sse_decode_flutter_highlight_color(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   FlutterOpenRequest sse_decode_flutter_open_request(
     SseDeserializer deserializer,
   );
@@ -204,7 +235,32 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  FlutterSelectionEndpoint sse_decode_flutter_selection_endpoint(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  FlutterSelectionRect sse_decode_flutter_selection_rect(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  FlutterSelectionSurface sse_decode_flutter_selection_surface(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   int sse_decode_i_32(SseDeserializer deserializer);
+
+  @protected
+  List<FlutterAnnotation> sse_decode_list_flutter_annotation(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<FlutterSelectionEndpoint> sse_decode_list_flutter_selection_endpoint(
+    SseDeserializer deserializer,
+  );
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
@@ -276,6 +332,30 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
+  ffi.Pointer<wire_cst_list_flutter_annotation>
+  cst_encode_list_flutter_annotation(List<FlutterAnnotation> raw) {
+    // Codec=Cst (C-struct based), see doc to use other codecs
+    final ans = wire.cst_new_list_flutter_annotation(raw.length);
+    for (var i = 0; i < raw.length; ++i) {
+      cst_api_fill_to_wire_flutter_annotation(raw[i], ans.ref.ptr[i]);
+    }
+    return ans;
+  }
+
+  @protected
+  ffi.Pointer<wire_cst_list_flutter_selection_endpoint>
+  cst_encode_list_flutter_selection_endpoint(
+    List<FlutterSelectionEndpoint> raw,
+  ) {
+    // Codec=Cst (C-struct based), see doc to use other codecs
+    final ans = wire.cst_new_list_flutter_selection_endpoint(raw.length);
+    for (var i = 0; i < raw.length; ++i) {
+      cst_api_fill_to_wire_flutter_selection_endpoint(raw[i], ans.ref.ptr[i]);
+    }
+    return ans;
+  }
+
+  @protected
   ffi.Pointer<wire_cst_list_prim_u_8_strict> cst_encode_list_prim_u_8_strict(
     Uint8List raw,
   ) {
@@ -340,6 +420,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
+  void cst_api_fill_to_wire_flutter_annotation(
+    FlutterAnnotation apiObj,
+    wire_cst_flutter_annotation wireObj,
+  ) {
+    wireObj.id = cst_encode_String(apiObj.id);
+    wireObj.unit = cst_encode_usize(apiObj.unit);
+    wireObj.start = cst_encode_usize(apiObj.start);
+    wireObj.end = cst_encode_usize(apiObj.end);
+    wireObj.color = cst_encode_flutter_highlight_color(apiObj.color);
+    wireObj.body = cst_encode_opt_String(apiObj.body);
+  }
+
+  @protected
   void cst_api_fill_to_wire_flutter_bridge_error(
     FlutterBridgeError apiObj,
     wire_cst_flutter_bridge_error wireObj,
@@ -401,6 +494,42 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
+  void cst_api_fill_to_wire_flutter_selection_endpoint(
+    FlutterSelectionEndpoint apiObj,
+    wire_cst_flutter_selection_endpoint wireObj,
+  ) {
+    wireObj.offset = cst_encode_usize(apiObj.offset);
+    wireObj.range_start = cst_encode_usize(apiObj.rangeStart);
+    wireObj.range_end = cst_encode_usize(apiObj.rangeEnd);
+    cst_api_fill_to_wire_flutter_selection_rect(apiObj.rect, wireObj.rect);
+  }
+
+  @protected
+  void cst_api_fill_to_wire_flutter_selection_rect(
+    FlutterSelectionRect apiObj,
+    wire_cst_flutter_selection_rect wireObj,
+  ) {
+    wireObj.left = cst_encode_f_32(apiObj.left);
+    wireObj.top = cst_encode_f_32(apiObj.top);
+    wireObj.right = cst_encode_f_32(apiObj.right);
+    wireObj.bottom = cst_encode_f_32(apiObj.bottom);
+  }
+
+  @protected
+  void cst_api_fill_to_wire_flutter_selection_surface(
+    FlutterSelectionSurface apiObj,
+    wire_cst_flutter_selection_surface wireObj,
+  ) {
+    wireObj.width = cst_encode_f_32(apiObj.width);
+    wireObj.height = cst_encode_f_32(apiObj.height);
+    wireObj.text = cst_encode_String(apiObj.text);
+    wireObj.resource_path = cst_encode_opt_String(apiObj.resourcePath);
+    wireObj.endpoints = cst_encode_list_flutter_selection_endpoint(
+      apiObj.endpoints,
+    );
+  }
+
+  @protected
   int
   cst_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFlutterBridge(
     FlutterBridge raw,
@@ -429,6 +558,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   int cst_encode_flutter_bridge_error_kind(FlutterBridgeErrorKind raw);
+
+  @protected
+  int cst_encode_flutter_highlight_color(FlutterHighlightColor raw);
 
   @protected
   int cst_encode_i_32(int raw);
@@ -497,6 +629,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_f_32(double self, SseSerializer serializer);
 
   @protected
+  void sse_encode_flutter_annotation(
+    FlutterAnnotation self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_flutter_book_format(
     FlutterBookFormat self,
     SseSerializer serializer,
@@ -533,6 +671,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_flutter_highlight_color(
+    FlutterHighlightColor self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_flutter_open_request(
     FlutterOpenRequest self,
     SseSerializer serializer,
@@ -545,7 +689,37 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_flutter_selection_endpoint(
+    FlutterSelectionEndpoint self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_flutter_selection_rect(
+    FlutterSelectionRect self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_flutter_selection_surface(
+    FlutterSelectionSurface self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_flutter_annotation(
+    List<FlutterAnnotation> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_flutter_selection_endpoint(
+    List<FlutterSelectionEndpoint> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_prim_u_8_strict(
@@ -632,6 +806,60 @@ class RustLibWire implements BaseWire {
       _wire__crate__api__FlutterBridge_cancelPtr
           .asFunction<WireSyncRust2DartDco Function(int, int)>();
 
+  void wire__crate__api__FlutterBridge_create_annotation(
+    int port_,
+    int that,
+    ffi.Pointer<wire_cst_flutter_document_handle> document,
+    int unit,
+    int start,
+    int end,
+    int color,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> body,
+  ) {
+    return _wire__crate__api__FlutterBridge_create_annotation(
+      port_,
+      that,
+      document,
+      unit,
+      start,
+      end,
+      color,
+      body,
+    );
+  }
+
+  late final _wire__crate__api__FlutterBridge_create_annotationPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Void Function(
+            ffi.Int64,
+            ffi.UintPtr,
+            ffi.Pointer<wire_cst_flutter_document_handle>,
+            ffi.UintPtr,
+            ffi.UintPtr,
+            ffi.UintPtr,
+            ffi.Int32,
+            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+          )
+        >
+      >(
+        'frbgen_shosai_flutter_wire__crate__api__FlutterBridge_create_annotation',
+      );
+  late final _wire__crate__api__FlutterBridge_create_annotation =
+      _wire__crate__api__FlutterBridge_create_annotationPtr
+          .asFunction<
+            void Function(
+              int,
+              int,
+              ffi.Pointer<wire_cst_flutter_document_handle>,
+              int,
+              int,
+              int,
+              int,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+            )
+          >();
+
   WireSyncRust2DartDco wire__crate__api__FlutterBridge_create_cancellation(
     int that,
   ) {
@@ -657,6 +885,78 @@ class RustLibWire implements BaseWire {
   late final _wire__crate__api__FlutterBridge_default =
       _wire__crate__api__FlutterBridge_defaultPtr
           .asFunction<void Function(int)>();
+
+  void wire__crate__api__FlutterBridge_delete_annotation(
+    int port_,
+    int that,
+    ffi.Pointer<wire_cst_flutter_document_handle> document,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> id,
+  ) {
+    return _wire__crate__api__FlutterBridge_delete_annotation(
+      port_,
+      that,
+      document,
+      id,
+    );
+  }
+
+  late final _wire__crate__api__FlutterBridge_delete_annotationPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Void Function(
+            ffi.Int64,
+            ffi.UintPtr,
+            ffi.Pointer<wire_cst_flutter_document_handle>,
+            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+          )
+        >
+      >(
+        'frbgen_shosai_flutter_wire__crate__api__FlutterBridge_delete_annotation',
+      );
+  late final _wire__crate__api__FlutterBridge_delete_annotation =
+      _wire__crate__api__FlutterBridge_delete_annotationPtr
+          .asFunction<
+            void Function(
+              int,
+              int,
+              ffi.Pointer<wire_cst_flutter_document_handle>,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+            )
+          >();
+
+  void wire__crate__api__FlutterBridge_list_annotations(
+    int port_,
+    int that,
+    ffi.Pointer<wire_cst_flutter_document_handle> document,
+  ) {
+    return _wire__crate__api__FlutterBridge_list_annotations(
+      port_,
+      that,
+      document,
+    );
+  }
+
+  late final _wire__crate__api__FlutterBridge_list_annotationsPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Void Function(
+            ffi.Int64,
+            ffi.UintPtr,
+            ffi.Pointer<wire_cst_flutter_document_handle>,
+          )
+        >
+      >(
+        'frbgen_shosai_flutter_wire__crate__api__FlutterBridge_list_annotations',
+      );
+  late final _wire__crate__api__FlutterBridge_list_annotations =
+      _wire__crate__api__FlutterBridge_list_annotationsPtr
+          .asFunction<
+            void Function(
+              int,
+              int,
+              ffi.Pointer<wire_cst_flutter_document_handle>,
+            )
+          >();
 
   WireSyncRust2DartDco wire__crate__api__FlutterBridge_new() {
     return _wire__crate__api__FlutterBridge_new();
@@ -821,6 +1121,60 @@ class RustLibWire implements BaseWire {
             )
           >();
 
+  void wire__crate__api__FlutterBridge_selection_surface(
+    int port_,
+    int that,
+    ffi.Pointer<wire_cst_flutter_document_handle> document,
+    int unit,
+    double scale,
+    double width,
+    double font_size,
+    int cancellation_id,
+  ) {
+    return _wire__crate__api__FlutterBridge_selection_surface(
+      port_,
+      that,
+      document,
+      unit,
+      scale,
+      width,
+      font_size,
+      cancellation_id,
+    );
+  }
+
+  late final _wire__crate__api__FlutterBridge_selection_surfacePtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Void Function(
+            ffi.Int64,
+            ffi.UintPtr,
+            ffi.Pointer<wire_cst_flutter_document_handle>,
+            ffi.UintPtr,
+            ffi.Float,
+            ffi.Float,
+            ffi.Float,
+            ffi.Uint64,
+          )
+        >
+      >(
+        'frbgen_shosai_flutter_wire__crate__api__FlutterBridge_selection_surface',
+      );
+  late final _wire__crate__api__FlutterBridge_selection_surface =
+      _wire__crate__api__FlutterBridge_selection_surfacePtr
+          .asFunction<
+            void Function(
+              int,
+              int,
+              ffi.Pointer<wire_cst_flutter_document_handle>,
+              int,
+              double,
+              double,
+              double,
+              int,
+            )
+          >();
+
   WireSyncRust2DartDco wire__crate__api__FlutterBridge_take_buffer(
     int that,
     ffi.Pointer<wire_cst_flutter_buffer_handle> handle,
@@ -843,6 +1197,52 @@ class RustLibWire implements BaseWire {
             WireSyncRust2DartDco Function(
               int,
               ffi.Pointer<wire_cst_flutter_buffer_handle>,
+            )
+          >();
+
+  void wire__crate__api__FlutterBridge_update_annotation(
+    int port_,
+    int that,
+    ffi.Pointer<wire_cst_flutter_document_handle> document,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> id,
+    int color,
+    ffi.Pointer<wire_cst_list_prim_u_8_strict> body,
+  ) {
+    return _wire__crate__api__FlutterBridge_update_annotation(
+      port_,
+      that,
+      document,
+      id,
+      color,
+      body,
+    );
+  }
+
+  late final _wire__crate__api__FlutterBridge_update_annotationPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Void Function(
+            ffi.Int64,
+            ffi.UintPtr,
+            ffi.Pointer<wire_cst_flutter_document_handle>,
+            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+            ffi.Int32,
+            ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+          )
+        >
+      >(
+        'frbgen_shosai_flutter_wire__crate__api__FlutterBridge_update_annotation',
+      );
+  late final _wire__crate__api__FlutterBridge_update_annotation =
+      _wire__crate__api__FlutterBridge_update_annotationPtr
+          .asFunction<
+            void Function(
+              int,
+              int,
+              ffi.Pointer<wire_cst_flutter_document_handle>,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>,
+              int,
+              ffi.Pointer<wire_cst_list_prim_u_8_strict>,
             )
           >();
 
@@ -950,6 +1350,43 @@ class RustLibWire implements BaseWire {
       _cst_new_box_autoadd_flutter_open_requestPtr
           .asFunction<ffi.Pointer<wire_cst_flutter_open_request> Function()>();
 
+  ffi.Pointer<wire_cst_list_flutter_annotation> cst_new_list_flutter_annotation(
+    int len,
+  ) {
+    return _cst_new_list_flutter_annotation(len);
+  }
+
+  late final _cst_new_list_flutter_annotationPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Pointer<wire_cst_list_flutter_annotation> Function(ffi.Int32)
+        >
+      >('frbgen_shosai_flutter_cst_new_list_flutter_annotation');
+  late final _cst_new_list_flutter_annotation =
+      _cst_new_list_flutter_annotationPtr
+          .asFunction<
+            ffi.Pointer<wire_cst_list_flutter_annotation> Function(int)
+          >();
+
+  ffi.Pointer<wire_cst_list_flutter_selection_endpoint>
+  cst_new_list_flutter_selection_endpoint(int len) {
+    return _cst_new_list_flutter_selection_endpoint(len);
+  }
+
+  late final _cst_new_list_flutter_selection_endpointPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Pointer<wire_cst_list_flutter_selection_endpoint> Function(
+            ffi.Int32,
+          )
+        >
+      >('frbgen_shosai_flutter_cst_new_list_flutter_selection_endpoint');
+  late final _cst_new_list_flutter_selection_endpoint =
+      _cst_new_list_flutter_selection_endpointPtr
+          .asFunction<
+            ffi.Pointer<wire_cst_list_flutter_selection_endpoint> Function(int)
+          >();
+
   ffi.Pointer<wire_cst_list_prim_u_8_strict> cst_new_list_prim_u_8_strict(
     int len,
   ) {
@@ -986,6 +1423,14 @@ typedef DartDartPostCObjectFnTypeFunction =
 typedef DartPostCObjectFnType =
     ffi.Pointer<ffi.NativeFunction<DartPostCObjectFnTypeFunction>>;
 
+final class wire_cst_flutter_document_handle extends ffi.Struct {
+  @ffi.Uint64()
+  external int registry;
+
+  @ffi.Uint64()
+  external int id;
+}
+
 final class wire_cst_list_prim_u_8_strict extends ffi.Struct {
   external ffi.Pointer<ffi.Uint8> ptr;
 
@@ -1009,12 +1454,63 @@ final class wire_cst_flutter_buffer_handle extends ffi.Struct {
   external int id;
 }
 
-final class wire_cst_flutter_document_handle extends ffi.Struct {
-  @ffi.Uint64()
-  external int registry;
+final class wire_cst_flutter_annotation extends ffi.Struct {
+  external ffi.Pointer<wire_cst_list_prim_u_8_strict> id;
 
-  @ffi.Uint64()
-  external int id;
+  @ffi.UintPtr()
+  external int unit;
+
+  @ffi.UintPtr()
+  external int start;
+
+  @ffi.UintPtr()
+  external int end;
+
+  @ffi.Int32()
+  external int color;
+
+  external ffi.Pointer<wire_cst_list_prim_u_8_strict> body;
+}
+
+final class wire_cst_list_flutter_annotation extends ffi.Struct {
+  external ffi.Pointer<wire_cst_flutter_annotation> ptr;
+
+  @ffi.Int32()
+  external int len;
+}
+
+final class wire_cst_flutter_selection_rect extends ffi.Struct {
+  @ffi.Float()
+  external double left;
+
+  @ffi.Float()
+  external double top;
+
+  @ffi.Float()
+  external double right;
+
+  @ffi.Float()
+  external double bottom;
+}
+
+final class wire_cst_flutter_selection_endpoint extends ffi.Struct {
+  @ffi.UintPtr()
+  external int offset;
+
+  @ffi.UintPtr()
+  external int range_start;
+
+  @ffi.UintPtr()
+  external int range_end;
+
+  external wire_cst_flutter_selection_rect rect;
+}
+
+final class wire_cst_list_flutter_selection_endpoint extends ffi.Struct {
+  external ffi.Pointer<wire_cst_flutter_selection_endpoint> ptr;
+
+  @ffi.Int32()
+  external int len;
 }
 
 final class wire_cst_flutter_bridge_error extends ffi.Struct {
@@ -1047,4 +1543,18 @@ final class wire_cst_flutter_rendered_buffer extends ffi.Struct {
 
   @ffi.UintPtr()
   external int byte_len;
+}
+
+final class wire_cst_flutter_selection_surface extends ffi.Struct {
+  @ffi.Float()
+  external double width;
+
+  @ffi.Float()
+  external double height;
+
+  external ffi.Pointer<wire_cst_list_prim_u_8_strict> text;
+
+  external ffi.Pointer<wire_cst_list_prim_u_8_strict> resource_path;
+
+  external ffi.Pointer<wire_cst_list_flutter_selection_endpoint> endpoints;
 }
