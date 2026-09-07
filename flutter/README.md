@@ -10,7 +10,8 @@ temporary and saved overlays without rerendering the document.
 Reader state follows the same Elm-style model/message/update flow as the Iced
 frontend. Widgets render the immutable `ReaderModel` and dispatch sealed
 `ReaderMessage` values; `ReaderController` runs bridge effects and dispatches
-their completion messages while retaining ownership of native resources.
+their completion messages while retaining ownership of native resources. See
+the [Flutter architecture contract](../docs/flutter-architecture.md).
 The current slice persists PDF and EPUB highlights through the Rust SQLite
 annotation store and supports reopen, navigation, recoloring, notes, and
 deletion. Anchor recovery, responsive mobile hosts, and physical-device
