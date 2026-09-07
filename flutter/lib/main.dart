@@ -921,7 +921,9 @@ class PagePainter extends CustomPainter {
       );
     }
     for (final annotation in annotations) {
-      if (annotation.textRange != null) continue;
+      if (annotation.unit != BigInt.zero || annotation.textRange != null) {
+        continue;
+      }
       _paintRectangles(
         canvas,
         annotation.rectangles ?? const [],

@@ -62,6 +62,7 @@ struct PdfSelectionZone {
     page_bounds: (f32, f32, f32, f32),
     character: usize,
     caret_x: f32,
+    visual_caret: bool,
     endpoint: PdfSelectionEndpoint,
 }
 
@@ -165,6 +166,7 @@ impl PdfSelectionSnapshot {
                 let mut carets = row
                     .zones
                     .iter()
+                    .filter(|zone| zone.visual_caret)
                     .map(|zone| PdfSelectionCaret {
                         character: zone.endpoint.character,
                         x: zone.caret_x,
@@ -410,6 +412,48 @@ mod tests {
     }
 
     #[test]
+    fn canonical_rectangle_maps_back_to_cropped_rotated_snapshot_pixels() {
+        let document = PdfDoc::from_bytes(selectable_pdf("TARGET")).unwrap();
+        let snapshot = document.selection_snapshot(0, 1.0).unwrap();
+        let (_, canonical) = snapshot.page_rectangles(0, 1)[0];
+        let mapped = document
+            .page_rectangles_to_pixels(0, 1.0, &[canonical])
+            .unwrap()[0];
+        let character_zones = snapshot
+            .endpoints()
+            .into_iter()
+            .filter(|(_, endpoint)| endpoint.underlying_character == 0)
+            .map(|(bounds, _)| bounds)
+            .collect::<Vec<_>>();
+        let expected = PdfSelectionRect {
+            left: character_zones
+                .iter()
+                .map(|bounds| bounds.left)
+                .reduce(f32::min)
+                .unwrap(),
+            top: character_zones
+                .iter()
+                .map(|bounds| bounds.top)
+                .reduce(f32::min)
+                .unwrap(),
+            right: character_zones
+                .iter()
+                .map(|bounds| bounds.right)
+                .reduce(f32::max)
+                .unwrap(),
+            bottom: character_zones
+                .iter()
+                .map(|bounds| bounds.bottom)
+                .reduce(f32::max)
+                .unwrap(),
+        };
+
+        assert_eq!(snapshot.bitmap_size(), (150, 200));
+        assert_eq!(mapped, expected);
+        assert_ne!(mapped.left, mapped.top, "fixture must remain asymmetric");
+    }
+
+    #[test]
     fn selection_snapshot_exposes_both_half_open_caret_boundaries() {
         let document = PdfDoc::from_bytes(selectable_pdf("AB")).unwrap();
         let snapshot = document.selection_snapshot(0, 1.0).unwrap();
@@ -455,6 +499,7 @@ mod tests {
             page_bounds: (0.0, 0.0, 1.0, 1.0),
             character,
             caret_x: character as f32,
+            visual_caret: true,
             endpoint: PdfSelectionEndpoint {
                 underlying_character: character,
                 character,
@@ -754,6 +799,50 @@ mod tests {
         );
         assert_eq!(lines[1].carets[0].top, 30.0);
         assert_eq!(lines[1].carets[0].bottom, 42.0);
+    }
+
+    #[test]
+    fn visual_lines_omit_interior_edges_of_a_multicharacter_grapheme() {
+        let bounds = PdfSelectionRect {
+            left: 0.0,
+            top: 0.0,
+            right: 40.0,
+            bottom: 10.0,
+        };
+        let geometry = |character| super::PdfCharacterGeometry {
+            bounds,
+            page_bounds: (10.0, 20.0, 30.0, 40.0),
+            character,
+            page_x: 20.0,
+            page_y: 30.0,
+            orientation: Some((false, true)),
+            direction: Some(super::PdfTextDirection::LeftToRight),
+        };
+        let mut zones = Vec::new();
+        super::append_pdf_glyph_zones(&mut zones, &[geometry(0), geometry(1)], false, true);
+        super::snap_pdf_zones_to_graphemes(&mut zones, "e\u{301}", &|| false).unwrap();
+        let snapshot = super::PdfSelectionSnapshot {
+            bitmap_width: 40,
+            bitmap_height: 10,
+            text: "e\u{301}".into(),
+            text_mapping_complete: true,
+            rows: super::pdf_selection_rows(zones),
+        };
+
+        assert_eq!(
+            snapshot.endpoint_count(),
+            4,
+            "hit zones remain per character"
+        );
+        assert_eq!(snapshot.page_rectangles(0, 2).len(), 2);
+        assert_eq!(
+            snapshot.visual_lines()[0]
+                .carets
+                .iter()
+                .map(|caret| caret.character)
+                .collect::<Vec<_>>(),
+            vec![0, 2]
+        );
     }
 
     #[test]
@@ -1439,6 +1528,45 @@ impl PdfDoc {
         self.selection_snapshot_cancellable(index, scale, &|| false)
     }
 
+    /// Resolve durable PDF page coordinates into the bitmap coordinates used
+    /// by a render of the same page and scale.
+    pub fn page_rectangles_to_pixels(
+        &self,
+        index: usize,
+        scale: f32,
+        rectangles: &[(f32, f32, f32, f32)],
+    ) -> Result<Vec<PdfSelectionRect>> {
+        if index >= self.page_count {
+            anyhow::bail!(
+                "page index {index} out of range (total: {})",
+                self.page_count
+            );
+        }
+        let (pt_w, pt_h) = self.page_sizes[index];
+        let (pixel_w, pixel_h) = validate_pdf_bitmap_size(pt_w, pt_h, scale)?;
+        let config = PdfRenderConfig::new()
+            .set_target_width(pixel_w)
+            .set_maximum_height(pixel_h)
+            .use_lcd_text_rendering(true);
+        let pdfium = create_pdfium()?;
+        let document = pdfium.load_pdf_from_byte_slice(&self.data, None)?;
+        let page = document.pages().get(index as u16)?;
+        rectangles
+            .iter()
+            .map(|&(left, bottom, right, top)| {
+                let (left, top, right, bottom) =
+                    page_rect_to_pixels(&page, left, bottom, right, top, &config)
+                        .ok_or_else(|| anyhow::anyhow!("failed to transform PDF annotation"))?;
+                Ok(PdfSelectionRect {
+                    left: left.clamp(0, pixel_w as i32) as f32,
+                    top: top.clamp(0, pixel_h as i32) as f32,
+                    right: right.clamp(0, pixel_w as i32) as f32,
+                    bottom: bottom.clamp(0, pixel_h as i32) as f32,
+                })
+            })
+            .collect()
+    }
+
     pub fn selection_snapshot_cancellable(
         &self,
         index: usize,
@@ -1597,19 +1725,7 @@ impl PdfDoc {
                 })?;
         // PDFium indexes remain untouched for annotation ranges, while every
         // interactive half-zone is snapped to an extended grapheme boundary.
-        let grapheme_map = grapheme_boundary_map(&owned_text, is_cancelled)?;
-        for (index, zone) in zones.iter_mut().enumerate() {
-            if index % 1024 == 0 {
-                check_cancelled(Some(is_cancelled))?;
-            }
-            if let Some(&(leading, trailing)) = grapheme_map.get(zone.character) {
-                zone.endpoint.character = if zone.endpoint.character != zone.character {
-                    trailing
-                } else {
-                    leading
-                };
-            }
-        }
+        snap_pdf_zones_to_graphemes(&mut zones, &owned_text, is_cancelled)?;
         let snapshot = PdfSelectionSnapshot {
             bitmap_width,
             bitmap_height,
@@ -1766,6 +1882,33 @@ fn grapheme_boundary_map(
         scalar = end;
     }
     Ok(map)
+}
+
+fn snap_pdf_zones_to_graphemes(
+    zones: &mut [PdfSelectionZone],
+    text: &str,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<()> {
+    let grapheme_map = grapheme_boundary_map(text, is_cancelled)?;
+    for (index, zone) in zones.iter_mut().enumerate() {
+        if index % 1024 == 0 {
+            check_cancelled(Some(is_cancelled))?;
+        }
+        if let Some(&(leading, trailing)) = grapheme_map.get(zone.character) {
+            let original_caret = zone.endpoint.character;
+            let is_trailing = original_caret != zone.character;
+            zone.endpoint.character = if is_trailing { trailing } else { leading };
+            // Keep per-character hit zones and persistence geometry, but expose
+            // only whole-grapheme edges to keyboard traversal. Separate visual
+            // edges that share an offset (notably bidi affinity) remain intact.
+            zone.visual_caret = if is_trailing {
+                original_caret == trailing
+            } else {
+                original_caret == leading
+            };
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1954,6 +2097,7 @@ fn append_pdf_glyph_zones(
                 page_bounds: geometry.page_bounds,
                 character: geometry.character,
                 caret_x,
+                visual_caret: true,
                 endpoint: PdfSelectionEndpoint {
                     underlying_character: geometry.character,
                     character: caret,
@@ -2076,14 +2220,32 @@ fn rect_to_pixels(
     bounds: PdfRect,
     config: &PdfRenderConfig,
 ) -> Option<(i32, i32, i32, i32)> {
+    page_rect_to_pixels(
+        page,
+        bounds.left().value,
+        bounds.bottom().value,
+        bounds.right().value,
+        bounds.top().value,
+        config,
+    )
+}
+
+fn page_rect_to_pixels(
+    page: &PdfPage<'_>,
+    left: f32,
+    bottom: f32,
+    right: f32,
+    top: f32,
+    config: &PdfRenderConfig,
+) -> Option<(i32, i32, i32, i32)> {
     let corners = [
-        page.points_to_pixels(bounds.left(), bounds.bottom(), config)
+        page.points_to_pixels(PdfPoints::new(left), PdfPoints::new(bottom), config)
             .ok()?,
-        page.points_to_pixels(bounds.left(), bounds.top(), config)
+        page.points_to_pixels(PdfPoints::new(left), PdfPoints::new(top), config)
             .ok()?,
-        page.points_to_pixels(bounds.right(), bounds.bottom(), config)
+        page.points_to_pixels(PdfPoints::new(right), PdfPoints::new(bottom), config)
             .ok()?,
-        page.points_to_pixels(bounds.right(), bounds.top(), config)
+        page.points_to_pixels(PdfPoints::new(right), PdfPoints::new(top), config)
             .ok()?,
     ];
     Some((

@@ -96,16 +96,32 @@ void main() {
         anchor: null,
         focus: null,
         savedSelections: const [],
-        annotations: [annotation],
+        annotations: [
+          annotation,
+          FlutterAnnotation(
+            id: 'other-page',
+            unit: BigInt.one,
+            rectangles: const [
+              FlutterSelectionRect(left: 30, top: 30, right: 40, bottom: 40),
+            ],
+            color: FlutterHighlightColor.yellow,
+          ),
+        ],
       ).paint(canvas, const Size(100, 100));
       final image = await recorder.endRecording().toImage(100, 100);
       final bytes = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
       final offset = (15 * 100 + 15) * 4;
       expect(bytes, isNotNull);
+      final pixels = bytes!;
       expect([
         for (var channel = 0; channel < 3; channel += 1)
-          bytes!.getUint8(offset + channel),
+          pixels.getUint8(offset + channel),
       ], isNot(everyElement(255)));
+      final otherPageOffset = (35 * 100 + 35) * 4;
+      expect([
+        for (var channel = 0; channel < 3; channel += 1)
+          pixels.getUint8(otherPageOffset + channel),
+      ], everyElement(255));
       image.dispose();
     },
   );
@@ -119,7 +135,17 @@ void main() {
         rect: const FlutterSelectionRect(left: 0, top: 0, right: 1, bottom: 1),
       ),
     ];
-    final annotations = <FlutterAnnotation>[_annotation('one')];
+    final rectangles = <FlutterSelectionRect>[
+      const FlutterSelectionRect(left: 0, top: 0, right: 1, bottom: 1),
+    ];
+    final annotations = <FlutterAnnotation>[
+      FlutterAnnotation(
+        id: 'one',
+        unit: BigInt.zero,
+        rectangles: rectangles,
+        color: FlutterHighlightColor.yellow,
+      ),
+    ];
     final selections = <ReaderSelection>[const ReaderSelection(0, 1)];
     final operations = <String>{'write'};
     final carets = <FlutterSelectionCaret>[
@@ -147,12 +173,14 @@ void main() {
     endpoints.clear();
     carets.clear();
     lines.clear();
+    rectangles.clear();
     annotations.clear();
     selections.clear();
     operations.clear();
 
     expect(model.selectionSurface!.endpoints, hasLength(1));
     expect(model.annotations, hasLength(1));
+    expect(model.annotations.single.rectangles, hasLength(1));
     expect(model.savedSelections, hasLength(1));
     expect(model.annotationOperations, {'write'});
     expect(
@@ -177,10 +205,15 @@ void main() {
       throwsUnsupportedError,
     );
     expect(() => model.annotations.clear(), throwsUnsupportedError);
+    expect(
+      () => model.annotations.single.rectangles!.clear(),
+      throwsUnsupportedError,
+    );
     expect(() => model.savedSelections.clear(), throwsUnsupportedError);
     expect(() => model.annotationOperations.clear(), throwsUnsupportedError);
     final copy = model.copyWith();
     expect(copy.selectionSurface, same(model.selectionSurface));
+    expect(copy.annotations.single, same(model.annotations.single));
     expect(
       () => copy.selectionSurface!.endpoints.clear(),
       throwsUnsupportedError,
@@ -1137,6 +1170,43 @@ void main() {
     await bridge.disposed.future;
   });
 
+  test('horizontal keyboard movement crosses retained visual lines', () async {
+    final bridge = _ControlledBridge();
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/book.epub');
+    controller.dispatch(
+      const ReaderSelectionPointerStarted(7, 3, x: 40, y: 20),
+    );
+    controller.dispatch(const ReaderSelectionPointerEnded(7));
+    for (var index = 0; index < 3; index += 1) {
+      controller.dispatch(
+        const ReaderSelectionKeyboardExtended(
+          ReaderSelectionMovement.visualRight,
+        ),
+      );
+    }
+    expect(controller.model.anchor, 3);
+    expect(controller.model.focus, 5);
+
+    controller.dispatch(const ReaderSelectionCancelled());
+    controller.dispatch(
+      const ReaderSelectionPointerStarted(8, 5, x: 30, y: 70),
+    );
+    controller.dispatch(const ReaderSelectionPointerEnded(8));
+    for (var index = 0; index < 3; index += 1) {
+      controller.dispatch(
+        const ReaderSelectionKeyboardExtended(
+          ReaderSelectionMovement.visualLeft,
+        ),
+      );
+    }
+    expect(controller.model.anchor, 5);
+    expect(controller.model.focus, 3);
+
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
   test('saved highlight navigation restores reader keyboard focus', () async {
     final bridge = _ControlledBridge(initialAnnotations: [_annotation('one')]);
     final focusTargets = <ReaderFocusTarget>[];
@@ -1988,6 +2058,20 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pump();
     expect(find.text('Yellow'), findsNothing);
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.end);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pump();
+    expect(find.text('Yellow'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.home);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pump();
+    expect(find.text('Yellow'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pump();
 
     await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
     await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);

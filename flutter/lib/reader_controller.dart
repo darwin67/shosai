@@ -19,6 +19,7 @@ typedef SelectionCopier = Future<void> Function(String text);
 
 const _unchanged = Object();
 final _frozenSurfaces = Expando<bool>();
+final _frozenAnnotations = Expando<bool>();
 
 final class ReaderModel {
   ReaderModel({
@@ -47,7 +48,7 @@ final class ReaderModel {
            ? null
            : _freezeSurface(selectionSurface),
        savedSelections = List.unmodifiable(savedSelections),
-       annotations = List.unmodifiable(annotations),
+       annotations = List.unmodifiable(annotations.map(_freezeAnnotation)),
        annotationOperations = Set.unmodifiable(annotationOperations);
 
   final FlutterDocumentSummary? document;
@@ -1687,13 +1688,22 @@ int? _adjacentOffset(List<int> offsets, int? current, bool forward) {
   if (line == null || index < 0) return null;
   final carets = lines[line].carets;
   final destination = index + (right ? 1 : -1);
-  if (destination < 0 || destination >= carets.length) return null;
   final origin = carets[index];
-  final next = carets[destination];
+  FlutterSelectionCaret next;
+  var destinationLine = line;
+  if (destination >= 0 && destination < carets.length) {
+    next = carets[destination];
+  } else {
+    destinationLine = line + (right ? 1 : -1);
+    if (destinationLine < 0 || destinationLine >= lines.length) return null;
+    final destinationCarets = lines[destinationLine].carets;
+    if (destinationCarets.isEmpty) return null;
+    next = right ? destinationCarets.first : destinationCarets.last;
+  }
   return (
     offset: next.offset.toInt(),
     origin: origin.offset.toInt(),
-    line: line,
+    line: destinationLine,
     preferredX: next.x,
   );
 }
@@ -1736,7 +1746,7 @@ int? _adjacentOffset(List<int> offsets, int? current, bool forward) {
 ) {
   if (lines.isEmpty) return null;
   if (current == null) {
-    return _lineEdge(lines, forward ? 0 : lines.length - 1, forward);
+    return _lineEdge(lines, forward ? 0 : lines.length - 1, !forward);
   }
   final origin = _caretForOffset(lines, current, currentLine);
   if (origin == null) return null;
@@ -1827,6 +1837,23 @@ FlutterSelectionSurface _freezeSurface(FlutterSelectionSurface surface) {
     ),
   );
   _frozenSurfaces[frozen] = true;
+  return frozen;
+}
+
+FlutterAnnotation _freezeAnnotation(FlutterAnnotation annotation) {
+  if (_frozenAnnotations[annotation] ?? false) return annotation;
+  final frozen = FlutterAnnotation(
+    id: annotation.id,
+    unit: annotation.unit,
+    textRange: annotation.textRange,
+    quote: annotation.quote,
+    rectangles: annotation.rectangles == null
+        ? null
+        : List.unmodifiable(annotation.rectangles!),
+    color: annotation.color,
+    body: annotation.body,
+  );
+  _frozenAnnotations[frozen] = true;
   return frozen;
 }
 

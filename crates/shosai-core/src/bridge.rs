@@ -815,7 +815,7 @@ impl Bridge {
             .await
             .map_err(storage_error)?;
         drop(extracted);
-        Ok(annotation_dto(created))
+        annotation_dto(created, &retained.document)
     }
 
     pub async fn list_annotations(
@@ -832,9 +832,10 @@ impl Bridge {
                 items
                     .into_iter()
                     .filter(|item| item.fingerprint == retained.fingerprint)
-                    .map(annotation_dto)
-                    .collect()
+                    .map(|item| annotation_dto(item, &retained.document))
+                    .collect::<Result<Vec<_>, _>>()
             })
+            .and_then(|items| items)
     }
 
     pub async fn update_annotation(
@@ -1837,7 +1838,10 @@ fn storage_error(error: impl std::fmt::Display) -> BridgeError {
     BridgeError::Storage(error.to_string())
 }
 
-fn annotation_dto(annotation: Annotation) -> BridgeAnnotation {
+fn annotation_dto(
+    annotation: Annotation,
+    document: &OpenDocument,
+) -> Result<BridgeAnnotation, BridgeError> {
     let quote = annotation
         .quote
         .as_ref()
@@ -1858,20 +1862,35 @@ fn annotation_dto(annotation: Annotation) -> BridgeAnnotation {
                     start: start as usize,
                     end: end as usize,
                 });
-            let rectangles = anchor
+            let page = anchor.page as usize;
+            let canonical = anchor
                 .rectangles
+                .into_iter()
+                .map(|rect| (rect.left, rect.bottom, rect.right, rect.top))
+                .collect::<Vec<_>>();
+            let OpenDocument::Pdf(pdf) = document else {
+                return Err(BridgeError::InvalidRequest(
+                    "PDF annotation does not match open document".into(),
+                ));
+            };
+            // The current reader renders page zero and its selection surface at
+            // scale 1. Keep persistence canonical, resolving only the bridge DTO
+            // through PDFium's crop/rotation-aware render transform.
+            let rectangles = pdf
+                .page_rectangles_to_pixels(page, 1.0, &canonical)
+                .map_err(map_render_error)?
                 .into_iter()
                 .map(|rect| SelectionRect {
                     left: rect.left,
-                    top: rect.bottom,
+                    top: rect.top,
                     right: rect.right,
-                    bottom: rect.top,
+                    bottom: rect.bottom,
                 })
                 .collect();
-            (anchor.page as usize, text_range, rectangles)
+            (page, text_range, rectangles)
         }
     };
-    BridgeAnnotation {
+    Ok(BridgeAnnotation {
         id: annotation.id.to_string(),
         unit,
         text_range,
@@ -1879,7 +1898,7 @@ fn annotation_dto(annotation: Annotation) -> BridgeAnnotation {
         rectangles,
         color: annotation.color,
         body: annotation.body,
-    }
+    })
 }
 
 fn map_preflight_error(error: anyhow::Error) -> BridgeError {
@@ -2099,6 +2118,17 @@ mod tests {
 
     #[test]
     fn geometry_only_pdf_annotation_dto_does_not_invent_text() {
+        let pdf = crate::pdf::PdfDoc::open(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sample.pdf"
+        )))
+        .unwrap();
+        let canonical = pdf
+            .selection_snapshot(0, 1.0)
+            .unwrap()
+            .page_rectangles(0, 1)[0]
+            .1;
+        let expected = pdf.page_rectangles_to_pixels(0, 1.0, &[canonical]).unwrap()[0];
         let annotation = Annotation {
             id: AnnotationId::new(),
             book_id: None,
@@ -2107,9 +2137,11 @@ mod tests {
             quote: None,
             target: AnnotationTarget::Pdf(
                 PdfAnchor::new(
-                    2,
+                    0,
                     None,
-                    vec![PageRect::new(10.0, 20.0, 30.0, 40.0).unwrap()],
+                    vec![
+                        PageRect::new(canonical.0, canonical.1, canonical.2, canonical.3).unwrap(),
+                    ],
                 )
                 .unwrap(),
             ),
@@ -2121,16 +2153,16 @@ mod tests {
             deleted_at: None,
         };
 
-        let dto = annotation_dto(annotation);
+        let dto = annotation_dto(annotation, &OpenDocument::Pdf(Arc::new(pdf))).unwrap();
         assert_eq!(dto.text_range, None);
         assert_eq!(dto.quote, None);
         assert_eq!(
             dto.rectangles,
             vec![SelectionRect {
-                left: 10.0,
-                top: 20.0,
-                right: 30.0,
-                bottom: 40.0,
+                left: expected.left,
+                top: expected.top,
+                right: expected.right,
+                bottom: expected.bottom,
             }]
         );
     }
