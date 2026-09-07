@@ -493,6 +493,7 @@ mod tests {
                 scalars: 1..4,
                 link: "chapter.xhtml#note".into(),
             }],
+            endpoints: Vec::new(),
         };
         assert_eq!(hit(&layout, 10.0, 2.0), Some("chapter.xhtml#note"));
         assert_eq!(hit(&layout, 39.9, 13.9), Some("chapter.xhtml#note"));
@@ -514,6 +515,7 @@ mod tests {
                 rgba: Vec::new(),
             }],
             links: Vec::new(),
+            endpoints: Vec::new(),
         };
 
         assert_eq!(
@@ -530,6 +532,7 @@ mod tests {
             height: 20.0,
             lines: Vec::new(),
             links: Vec::new(),
+            endpoints: Vec::new(),
         };
         assert_eq!(layout_height(Some(&layout), 60.0), 20.0);
         assert_eq!(layout_height(None, 60.0), 60.0);

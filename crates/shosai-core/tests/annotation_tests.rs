@@ -64,6 +64,15 @@ fn quote_v1_golden_vectors_pin_normalization_and_context_direction() {
     .unwrap();
     assert_eq!(selector.prefix, "x".repeat(31));
     assert_eq!(selector.suffix, "x".repeat(31));
+
+    let selector = QuoteSelector::new(
+        "selected",
+        &format!("{} {}", "discarded", "p".repeat(31)),
+        &format!("{} {}", "s".repeat(31), "discarded"),
+    )
+    .unwrap();
+    assert_eq!(selector.prefix, "p".repeat(31));
+    assert_eq!(selector.suffix, "s".repeat(31));
 }
 
 #[test]
@@ -202,6 +211,24 @@ async fn epub_annotation_round_trips_and_updates() {
     assert_ne!(updated.modified_at, created.modified_at);
     assert_eq!(updated.created_at, created.created_at);
     assert_eq!(store.list_for_book_async(book_id).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn untracked_annotations_reopen_by_device_local_path() {
+    let (store, _pool, _dir) = temp_store().await;
+    let mut first = epub_annotation(None);
+    first.local_path = Some("device://book.epub".to_owned());
+    store.create_async(&first).await.unwrap();
+    let mut other = epub_annotation(None);
+    other.local_path = Some("device://other.epub".to_owned());
+    store.create_async(&other).await.unwrap();
+
+    let reopened = store
+        .list_for_local_path_async("device://book.epub")
+        .await
+        .unwrap();
+    assert_eq!(reopened.len(), 1);
+    assert_eq!(reopened[0].id, first.id);
 }
 
 #[tokio::test]

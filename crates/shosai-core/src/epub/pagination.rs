@@ -6726,6 +6726,7 @@ mod tests {
                 height: 1.0,
                 lines: Vec::new(),
                 links: Vec::new(),
+                endpoints: Vec::new(),
             })
         };
         let mut pages = vec![Vec::new()];
@@ -8403,6 +8404,7 @@ mod tests {
                 },
             ],
             links: Vec::new(),
+            endpoints: Vec::new(),
         };
         let measured_lengths = std::cell::RefCell::new(Vec::new());
         let measure = |spans: &[shosai_core::epub::render::TextSpan]| {
@@ -8424,6 +8426,7 @@ mod tests {
                     rgba: Vec::new(),
                 }],
                 links: Vec::new(),
+                endpoints: Vec::new(),
             })
         };
         let mut pages = vec![Vec::new()];
@@ -8509,6 +8512,7 @@ mod tests {
                     })
                     .collect(),
                 links: Vec::new(),
+                endpoints: Vec::new(),
             })
         };
         let mut pages = vec![Vec::new()];

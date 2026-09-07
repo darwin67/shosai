@@ -9,13 +9,17 @@ use cosmic_text::{
     fontdb::{Database, Language, Stretch, Style, Weight},
 };
 use unicode_casefold::UnicodeCaseFold;
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::{EpubFontBook, EpubFontFace, EpubFontStyle};
+use crate::application::ResourceLimitError;
 
 /// Hard ceiling for the sum of returned line bitmap pixels (64 MiB RGBA).
 pub const EPUB_TEXT_MAX_PIXELS: usize = 16 * 1024 * 1024;
 /// Hard ceiling for Unicode scalars shaped by one native request.
 pub const EPUB_TEXT_MAX_SCALARS: usize = 64 * 1024;
+/// Hard ceiling for retained half-grapheme endpoint geometry.
+pub const EPUB_TEXT_MAX_ENDPOINTS: usize = 64 * 1024;
 const EPUB_TEXT_MAX_PARAGRAPHS: usize = 4 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +74,13 @@ pub struct EpubTextHit {
     pub scalars: Range<usize>,
     pub link: String,
 }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EpubTextEndpoint {
+    pub rect: EpubTextRect,
+    pub scalar: usize,
+    pub scalar_start: usize,
+    pub scalar_end: usize,
+}
 #[derive(Clone, Debug)]
 pub struct EpubTextLine {
     pub top: f32,
@@ -86,6 +97,10 @@ pub struct EpubTextLayout {
     pub height: f32,
     pub lines: Vec<EpubTextLine>,
     pub links: Vec<EpubTextHit>,
+    /// Half-grapheme hit zones derived from the exact shaped glyphs that paint
+    /// this layout. Consumers can retain these and hit-test without re-entering
+    /// the renderer.
+    pub endpoints: Vec<EpubTextEndpoint>,
 }
 
 pub(super) struct NativeTextState {
@@ -120,7 +135,12 @@ impl NativeTextState {
         let mut aliases = HashMap::new();
         let mut styles = HashMap::<String, Vec<Style>>::new();
         let mut weights = HashMap::<String, Vec<(Style, f32, f32)>>::new();
-        if !faces.is_empty() {
+        if faces.is_empty() {
+            // Native text is also the bridge renderer for ordinary EPUB text.
+            // Keep its fallback deterministic in headless/mobile packages that
+            // do not expose host fonts to the Rust process.
+            db.load_font_data(super::pagination::math_layout::MATH_FONT_BYTES.to_vec());
+        } else {
             db.load_system_fonts();
         }
         for (id, declared) in ids.iter().zip(faces) {
@@ -193,24 +213,42 @@ impl NativeTextState {
 impl EpubFontBook {
     /// Shapes and rasterizes rich text without registering fonts globally.
     pub fn layout_text(&self, request: &EpubTextRequest) -> Result<EpubTextLayout> {
-        self.layout_text_inner(request, true)
+        self.layout_text_cancellable(request, &|| false)
+    }
+
+    pub(crate) fn layout_text_cancellable(
+        &self,
+        request: &EpubTextRequest,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<EpubTextLayout> {
+        self.layout_text_inner(request, true, is_cancelled)
     }
 
     /// Shapes and measures rich text without allocating line bitmaps.
     pub fn measure_text(&self, request: &EpubTextRequest) -> Result<EpubTextLayout> {
-        self.layout_text_inner(request, false)
+        self.layout_text_inner(request, false, &|| false)
+    }
+
+    pub(crate) fn measure_text_cancellable(
+        &self,
+        request: &EpubTextRequest,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<EpubTextLayout> {
+        self.layout_text_inner(request, false, is_cancelled)
     }
 
     fn layout_text_inner(
         &self,
         request: &EpubTextRequest,
         rasterize: bool,
+        is_cancelled: &dyn Fn() -> bool,
     ) -> Result<EpubTextLayout> {
+        check_cancelled(is_cancelled)?;
         validate(request)?;
         let visible_text: String = request.runs.iter().map(|run| run.text.as_str()).collect();
         let paragraphs = paragraph_ranges(&visible_text);
         if paragraphs.len() <= 1 {
-            return self.layout_text_single(request, rasterize);
+            return self.layout_text_single(request, rasterize, is_cancelled);
         }
 
         let requests = paragraphs
@@ -219,7 +257,8 @@ impl EpubFontBook {
             .collect::<Result<Vec<_>>>()?;
         if rasterize {
             let pixels = requests.iter().try_fold(0_usize, |pixels, paragraph| {
-                self.layout_text_single(paragraph, false)?
+                check_cancelled(is_cancelled)?;
+                self.layout_text_single(paragraph, false, is_cancelled)?
                     .lines
                     .iter()
                     .try_fold(pixels, |pixels, line| {
@@ -238,15 +277,17 @@ impl EpubFontBook {
             height: 0.0,
             lines: Vec::new(),
             links: Vec::new(),
+            endpoints: Vec::new(),
         };
         for (index, paragraph) in requests.iter().enumerate() {
+            check_cancelled(is_cancelled)?;
             let range = &paragraphs[index];
             let scalar_start = visible_text[..range.start].chars().count();
             let separator_end = paragraphs
                 .get(index + 1)
                 .map_or(visible_text.len(), |next| next.start);
             let scalar_end = visible_text[..separator_end].chars().count();
-            let mut layout = self.layout_text_single(paragraph, rasterize)?;
+            let mut layout = self.layout_text_single(paragraph, rasterize, is_cancelled)?;
             for line in &mut layout.lines {
                 line.top += result.height;
                 line.scalars = line.scalars.start + scalar_start..line.scalars.end + scalar_start;
@@ -258,10 +299,17 @@ impl EpubFontBook {
                 hit.rect.y += result.height;
                 hit.scalars = hit.scalars.start + scalar_start..hit.scalars.end + scalar_start;
             }
+            for endpoint in &mut layout.endpoints {
+                endpoint.rect.y += result.height;
+                endpoint.scalar += scalar_start;
+                endpoint.scalar_start += scalar_start;
+                endpoint.scalar_end += scalar_start;
+            }
             result.width = result.width.max(layout.width);
             result.height += layout.height;
             result.lines.extend(layout.lines);
             result.links.extend(layout.links);
+            checked_extend_endpoints(&mut result.endpoints, layout.endpoints)?;
         }
         Ok(result)
     }
@@ -270,10 +318,17 @@ impl EpubFontBook {
         &self,
         request: &EpubTextRequest,
         rasterize: bool,
+        is_cancelled: &dyn Fn() -> bool,
     ) -> Result<EpubTextLayout> {
+        check_cancelled(is_cancelled)?;
         let mut state = self.native.lock().map_err(|_| {
             anyhow::anyhow!("EPUB text renderer lock is poisoned; discard and reopen this book")
         })?;
+        check_cancelled(is_cancelled)?;
+        #[cfg(test)]
+        if let Some(entries) = self.renderer_entries.lock().unwrap().as_ref() {
+            entries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         let NativeTextState {
             fonts,
             cache,
@@ -365,7 +420,9 @@ impl EpubFontBook {
             EpubTextAlign::Justified => Align::Justified,
         };
         buffer.set_rich_text(fonts, attrs, &Attrs::new(), Shaping::Advanced, Some(align));
+        check_cancelled(is_cancelled)?;
         buffer.shape_until_scroll(fonts, false);
+        check_cancelled(is_cancelled)?;
 
         let visible_text: String = request.runs.iter().map(|r| r.text.as_str()).collect();
         let scalar_boundaries = scalar_boundaries(&visible_text);
@@ -442,7 +499,9 @@ impl EpubFontBook {
         }
         let mut lines = Vec::with_capacity(runs.len());
         let mut links = Vec::new();
+        let mut endpoints = Vec::new();
         for (run, line_range) in runs.into_iter().zip(line_ranges) {
+            check_cancelled(is_cancelled)?;
             let ph = (run.line_height * request.scale).ceil() as usize;
             let mut rgba = if rasterize {
                 vec![
@@ -456,6 +515,7 @@ impl EpubFontBook {
             };
             let base = paragraphs[run.line_i].start;
             for glyph in run.glyphs {
+                check_cancelled(is_cancelled)?;
                 let start = (base + glyph.start).max(visible_bytes.start);
                 let end = (base + glyph.end).min(visible_bytes.end);
                 if start >= end || glyph.metadata == usize::MAX {
@@ -475,6 +535,55 @@ impl EpubFontBook {
                     width: glyph.w.max(0.0),
                     height: run.line_height,
                 };
+                let cluster = &visible_text[local_start..local_end];
+                let graphemes = cluster.graphemes(true).collect::<Vec<_>>();
+                let grapheme_width = rect.width / graphemes.len().max(1) as f32;
+                let mut cluster_scalar = scalars.start;
+                let grapheme_count = graphemes.len();
+                for (position, grapheme) in graphemes.into_iter().enumerate() {
+                    check_cancelled(is_cancelled)?;
+                    let after = cluster_scalar + grapheme.chars().count();
+                    let (left, right) = if glyph.level.is_rtl() {
+                        (after, cluster_scalar)
+                    } else {
+                        (cluster_scalar, after)
+                    };
+                    let physical_position = if glyph.level.is_rtl() {
+                        grapheme_count - position - 1
+                    } else {
+                        position
+                    };
+                    let x = rect.x + physical_position as f32 * grapheme_width;
+                    checked_push_endpoint(
+                        &mut endpoints,
+                        EpubTextEndpoint {
+                            rect: EpubTextRect {
+                                x,
+                                y: rect.y,
+                                width: grapheme_width / 2.0,
+                                height: rect.height,
+                            },
+                            scalar: left,
+                            scalar_start: cluster_scalar,
+                            scalar_end: after,
+                        },
+                    )?;
+                    checked_push_endpoint(
+                        &mut endpoints,
+                        EpubTextEndpoint {
+                            rect: EpubTextRect {
+                                x: x + grapheme_width / 2.0,
+                                y: rect.y,
+                                width: grapheme_width / 2.0,
+                                height: rect.height,
+                            },
+                            scalar: right,
+                            scalar_start: cluster_scalar,
+                            scalar_end: after,
+                        },
+                    )?;
+                    cluster_scalar = after;
+                }
                 if rasterize {
                     for h in &request.highlights {
                         if h.scalars.start < scalars.end && scalars.start < h.scalars.end {
@@ -558,6 +667,7 @@ impl EpubFontBook {
             height,
             lines,
             links,
+            endpoints,
         })
     }
 }
@@ -713,6 +823,21 @@ fn validate(r: &EpubTextRequest) -> Result<()> {
     if scalars > EPUB_TEXT_MAX_SCALARS {
         bail!("EPUB text exceeds the {EPUB_TEXT_MAX_SCALARS}-scalar per-request ceiling");
     }
+    let endpoints = r
+        .runs
+        .iter()
+        .flat_map(|run| run.text.graphemes(true))
+        .try_fold(0_usize, |total, _| {
+            total
+                .checked_add(2)
+                .context("EPUB text endpoint count overflow")
+        })?;
+    if endpoints > EPUB_TEXT_MAX_ENDPOINTS {
+        return Err(ResourceLimitError(format!(
+            "EPUB text exceeds the {EPUB_TEXT_MAX_ENDPOINTS}-endpoint retained geometry ceiling"
+        ))
+        .into());
+    }
     let paragraphs = r
         .runs
         .iter()
@@ -722,6 +847,45 @@ fn validate(r: &EpubTextRequest) -> Result<()> {
         .saturating_add(1);
     if paragraphs > EPUB_TEXT_MAX_PARAGRAPHS {
         bail!("EPUB text exceeds the {EPUB_TEXT_MAX_PARAGRAPHS}-paragraph per-request ceiling");
+    }
+    Ok(())
+}
+
+fn checked_push_endpoint(
+    endpoints: &mut Vec<EpubTextEndpoint>,
+    endpoint: EpubTextEndpoint,
+) -> Result<()> {
+    if endpoints.len() >= EPUB_TEXT_MAX_ENDPOINTS {
+        return Err(ResourceLimitError(format!(
+            "EPUB text exceeds the {EPUB_TEXT_MAX_ENDPOINTS}-endpoint retained geometry ceiling"
+        ))
+        .into());
+    }
+    endpoints.push(endpoint);
+    Ok(())
+}
+
+fn checked_extend_endpoints(
+    endpoints: &mut Vec<EpubTextEndpoint>,
+    additional: Vec<EpubTextEndpoint>,
+) -> Result<()> {
+    if endpoints
+        .len()
+        .checked_add(additional.len())
+        .is_none_or(|count| count > EPUB_TEXT_MAX_ENDPOINTS)
+    {
+        return Err(ResourceLimitError(format!(
+            "EPUB text exceeds the {EPUB_TEXT_MAX_ENDPOINTS}-endpoint retained geometry ceiling"
+        ))
+        .into());
+    }
+    endpoints.extend(additional);
+    Ok(())
+}
+
+fn check_cancelled(is_cancelled: &dyn Fn() -> bool) -> Result<()> {
+    if is_cancelled() {
+        anyhow::bail!("EPUB text operation cancelled");
     }
     Ok(())
 }
@@ -792,5 +956,33 @@ mod tests {
             select_style(&[Style::Normal, Style::Oblique], true),
             (Style::Oblique, CacheKeyFlags::empty())
         );
+    }
+
+    #[test]
+    fn emitted_endpoint_limit_is_typed_at_push_and_combine_boundaries() {
+        let endpoint = EpubTextEndpoint {
+            rect: EpubTextRect {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            scalar: 0,
+            scalar_start: 0,
+            scalar_end: 1,
+        };
+        let mut endpoints = vec![endpoint; EPUB_TEXT_MAX_ENDPOINTS];
+        let error = checked_push_endpoint(&mut endpoints, endpoint).unwrap_err();
+        assert!(error.is::<ResourceLimitError>());
+
+        let mut endpoints = vec![endpoint; EPUB_TEXT_MAX_ENDPOINTS];
+        let error = checked_extend_endpoints(&mut endpoints, vec![endpoint]).unwrap_err();
+        assert!(error.is::<ResourceLimitError>());
+    }
+
+    #[test]
+    fn raster_loop_cancellation_is_observable() {
+        let error = check_cancelled(&|| true).unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
     }
 }
