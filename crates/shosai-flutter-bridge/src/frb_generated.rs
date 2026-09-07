@@ -1129,6 +1129,7 @@ impl SseDecode for crate::api::FlutterSelectionSurface {
         let mut var_width = <f32>::sse_decode(deserializer);
         let mut var_height = <f32>::sse_decode(deserializer);
         let mut var_text = <String>::sse_decode(deserializer);
+        let mut var_copyEligible = <bool>::sse_decode(deserializer);
         let mut var_resourcePath = <Option<String>>::sse_decode(deserializer);
         let mut var_raster = <Option<crate::api::FlutterRenderedBuffer>>::sse_decode(deserializer);
         let mut var_endpoints =
@@ -1142,6 +1143,7 @@ impl SseDecode for crate::api::FlutterSelectionSurface {
             width: var_width,
             height: var_height,
             text: var_text,
+            copy_eligible: var_copyEligible,
             resource_path: var_resourcePath,
             raster: var_raster,
             endpoints: var_endpoints,
@@ -1677,6 +1679,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::FlutterSelectionSurface {
             self.width.into_into_dart().into_dart(),
             self.height.into_into_dart().into_dart(),
             self.text.into_into_dart().into_dart(),
+            self.copy_eligible.into_into_dart().into_dart(),
             self.resource_path.into_into_dart().into_dart(),
             self.raster.into_into_dart().into_dart(),
             self.endpoints.into_into_dart().into_dart(),
@@ -1924,6 +1927,7 @@ impl SseEncode for crate::api::FlutterSelectionSurface {
         <f32>::sse_encode(self.width, serializer);
         <f32>::sse_encode(self.height, serializer);
         <String>::sse_encode(self.text, serializer);
+        <bool>::sse_encode(self.copy_eligible, serializer);
         <Option<String>>::sse_encode(self.resource_path, serializer);
         <Option<crate::api::FlutterRenderedBuffer>>::sse_encode(self.raster, serializer);
         <Vec<crate::api::FlutterSelectionEndpoint>>::sse_encode(self.endpoints, serializer);
@@ -2290,6 +2294,7 @@ mod io {
                 width: self.width.cst_decode(),
                 height: self.height.cst_decode(),
                 text: self.text.cst_decode(),
+                copy_eligible: self.copy_eligible.cst_decode(),
                 resource_path: self.resource_path.cst_decode(),
                 raster: self.raster.cst_decode(),
                 endpoints: self.endpoints.cst_decode(),
@@ -2536,6 +2541,7 @@ mod io {
                 width: Default::default(),
                 height: Default::default(),
                 text: core::ptr::null_mut(),
+                copy_eligible: Default::default(),
                 resource_path: core::ptr::null_mut(),
                 raster: core::ptr::null_mut(),
                 endpoints: core::ptr::null_mut(),
@@ -2982,6 +2988,7 @@ mod io {
         width: f32,
         height: f32,
         text: *mut wire_cst_list_prim_u_8_strict,
+        copy_eligible: bool,
         resource_path: *mut wire_cst_list_prim_u_8_strict,
         raster: *mut wire_cst_flutter_rendered_buffer,
         endpoints: *mut wire_cst_list_flutter_selection_endpoint,

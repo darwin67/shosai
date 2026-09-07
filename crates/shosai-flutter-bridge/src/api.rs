@@ -223,6 +223,7 @@ pub struct FlutterSelectionSurface {
     pub width: f32,
     pub height: f32,
     pub text: String,
+    pub copy_eligible: bool,
     pub resource_path: Option<String>,
     pub raster: Option<FlutterRenderedBuffer>,
     pub endpoints: Vec<FlutterSelectionEndpoint>,
@@ -238,6 +239,7 @@ impl From<SelectionSurface> for FlutterSelectionSurface {
             width: value.width,
             height: value.height,
             text: value.text,
+            copy_eligible: value.copy_eligible,
             resource_path: value.resource_path,
             raster: value.raster.map(|raster| FlutterRenderedBuffer {
                 handle: raster.handle.into(),

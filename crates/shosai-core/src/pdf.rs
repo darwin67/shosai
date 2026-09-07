@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -92,6 +93,7 @@ pub struct PdfSelectionSnapshot {
     bitmap_width: u32,
     bitmap_height: u32,
     text: String,
+    text_mapping_complete: bool,
     rows: Vec<PdfSelectionRow>,
 }
 
@@ -102,6 +104,13 @@ impl PdfSelectionSnapshot {
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Whether every PDFium character was mapped to genuine Unicode text.
+    /// U+FFFD returned by PDFium is genuine text; only extractor substitution
+    /// makes this false.
+    pub fn text_mapping_complete(&self) -> bool {
+        self.text_mapping_complete
     }
 
     pub fn hit_test(&self, bitmap_x: f32, bitmap_y: f32) -> Option<PdfSelectionEndpoint> {
@@ -171,17 +180,15 @@ impl PdfSelectionSnapshot {
 
     /// Return PDF page-coordinate rectangles for a durable character range.
     pub fn page_rectangles(&self, start: usize, end: usize) -> Vec<(usize, (f32, f32, f32, f32))> {
-        let mut rectangles = self
-            .rows
+        let mut seen = HashSet::new();
+        self.rows
             .iter()
             .flat_map(|row| &row.zones)
-            .filter(|zone| start <= zone.character && zone.character < end)
+            .filter(|zone| {
+                start <= zone.character && zone.character < end && seen.insert(zone.character)
+            })
             .map(|zone| (zone.character, zone.page_bounds))
-            .collect::<Vec<_>>();
-        // Each PDFium character owns two hit zones. Keep one durable rectangle
-        // per original character regardless of grapheme-snapped caret offsets.
-        rectangles.dedup_by_key(|(character, _)| *character);
-        rectangles
+            .collect()
     }
 
     pub fn retained_bytes(&self) -> usize {
@@ -686,6 +693,7 @@ mod tests {
             bitmap_width: 40,
             bitmap_height: 10,
             text: "fi".into(),
+            text_mapping_complete: true,
             rows: super::pdf_selection_rows(zones),
         };
 
@@ -1352,6 +1360,7 @@ impl PdfDoc {
         }
 
         searchable_page_text_bounded(&page, &text, max_bytes, is_cancelled)
+            .map(|(text, _complete)| text)
     }
 
     /// Extracts a bounded owned hit-test snapshot for a page rendered at `scale`.
@@ -1509,7 +1518,7 @@ impl PdfDoc {
             );
         }
         validate_pdf_selection_endpoint_count(zones.len())?;
-        let owned_text =
+        let (owned_text, text_mapping_complete) =
             searchable_page_text_bounded(&page, &text, MAX_PDF_PAGE_TEXT_BYTES, is_cancelled)
                 .map_err(|error| match error {
                     BoundedPageTextError::Cancelled => anyhow::anyhow!("PDF selection cancelled"),
@@ -1520,20 +1529,24 @@ impl PdfDoc {
                 })?;
         // PDFium indexes remain untouched for annotation ranges, while every
         // interactive half-zone is snapped to an extended grapheme boundary.
-        let graphemes = grapheme_ranges(&owned_text);
-        for zone in &mut zones {
-            if let Some(boundary) = grapheme_boundary_for_character(
-                &graphemes,
-                zone.character,
-                zone.endpoint.character != zone.character,
-            ) {
-                zone.endpoint.character = boundary;
+        let grapheme_map = grapheme_boundary_map(&owned_text, is_cancelled)?;
+        for (index, zone) in zones.iter_mut().enumerate() {
+            if index % 1024 == 0 {
+                check_cancelled(Some(is_cancelled))?;
+            }
+            if let Some(&(leading, trailing)) = grapheme_map.get(zone.character) {
+                zone.endpoint.character = if zone.endpoint.character != zone.character {
+                    trailing
+                } else {
+                    leading
+                };
             }
         }
         let snapshot = PdfSelectionSnapshot {
             bitmap_width,
             bitmap_height,
             text: owned_text,
+            text_mapping_complete,
             rows: pdf_selection_rows(zones),
         };
         if snapshot.retained_bytes() > PDF_SELECTION_MAX_RETAINED_BYTES {
@@ -1657,6 +1670,7 @@ impl PdfDoc {
     }
 }
 
+#[cfg(test)]
 fn grapheme_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
     let mut scalar = 0;
     text.graphemes(true)
@@ -1668,6 +1682,25 @@ fn grapheme_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
         .collect()
 }
 
+fn grapheme_boundary_map(
+    text: &str,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<(usize, usize)>> {
+    let mut map = Vec::with_capacity(text.chars().count());
+    let mut scalar = 0;
+    for (index, grapheme) in text.graphemes(true).enumerate() {
+        if index % 1024 == 0 {
+            check_cancelled(Some(is_cancelled))?;
+        }
+        let count = grapheme.chars().count();
+        let end = scalar + count;
+        map.extend(std::iter::repeat_n((scalar, end), count));
+        scalar = end;
+    }
+    Ok(map)
+}
+
+#[cfg(test)]
 fn grapheme_boundary_for_character(
     graphemes: &[std::ops::Range<usize>],
     character: usize,
@@ -1915,7 +1948,7 @@ fn searchable_page_text_bounded(
     text: &PdfPageText<'_>,
     max_bytes: usize,
     is_cancelled: impl Fn() -> bool,
-) -> std::result::Result<String, BoundedPageTextError> {
+) -> std::result::Result<(String, bool), BoundedPageTextError> {
     let page_bounds = page
         .boundaries()
         .bounding()
@@ -1923,6 +1956,7 @@ fn searchable_page_text_bounded(
         .map(|boundary| boundary.bounds);
     let chars = text.chars();
     let mut result = String::with_capacity(chars.len().min(max_bytes));
+    let mut complete = true;
 
     for character in chars.iter() {
         if is_cancelled() {
@@ -1935,11 +1969,18 @@ fn searchable_page_text_bounded(
                 page_bounds.is_some_and(|page_bounds| bounds.does_overlap(&page_bounds))
             });
         let character = if visible {
-            character
+            match character
                 .unicode_char()
                 .filter(|character| *character != '\0')
-                .unwrap_or('\u{FFFD}')
+            {
+                Some(character) => character,
+                None => {
+                    complete = false;
+                    '\u{FFFD}'
+                }
+            }
         } else {
+            complete = false;
             '\u{FFFD}'
         };
         let actual = result.len().saturating_add(character.len_utf8());
@@ -1949,7 +1990,7 @@ fn searchable_page_text_bounded(
         result.push(character);
     }
 
-    Ok(result)
+    Ok((result, complete))
 }
 
 fn rect_to_pixels(

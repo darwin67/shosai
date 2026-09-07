@@ -1127,19 +1127,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   FlutterSelectionSurface dco_decode_flutter_selection_surface(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 10)
-      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
+    if (arr.length != 11)
+      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
     return FlutterSelectionSurface(
       handle: dco_decode_flutter_selection_handle(arr[0]),
       width: dco_decode_f_32(arr[1]),
       height: dco_decode_f_32(arr[2]),
       text: dco_decode_String(arr[3]),
-      resourcePath: dco_decode_opt_String(arr[4]),
-      raster: dco_decode_opt_box_autoadd_flutter_rendered_buffer(arr[5]),
-      endpoints: dco_decode_list_flutter_selection_endpoint(arr[6]),
-      graphemeBoundaries: dco_decode_list_prim_u_32_strict(arr[7]),
-      wordBoundaries: dco_decode_list_prim_u_32_strict(arr[8]),
-      visualLines: dco_decode_list_flutter_selection_visual_line(arr[9]),
+      copyEligible: dco_decode_bool(arr[4]),
+      resourcePath: dco_decode_opt_String(arr[5]),
+      raster: dco_decode_opt_box_autoadd_flutter_rendered_buffer(arr[6]),
+      endpoints: dco_decode_list_flutter_selection_endpoint(arr[7]),
+      graphemeBoundaries: dco_decode_list_prim_u_32_strict(arr[8]),
+      wordBoundaries: dco_decode_list_prim_u_32_strict(arr[9]),
+      visualLines: dco_decode_list_flutter_selection_visual_line(arr[10]),
     );
   }
 
@@ -1565,6 +1566,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_width = sse_decode_f_32(deserializer);
     var var_height = sse_decode_f_32(deserializer);
     var var_text = sse_decode_String(deserializer);
+    var var_copyEligible = sse_decode_bool(deserializer);
     var var_resourcePath = sse_decode_opt_String(deserializer);
     var var_raster = sse_decode_opt_box_autoadd_flutter_rendered_buffer(
       deserializer,
@@ -1582,6 +1584,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       width: var_width,
       height: var_height,
       text: var_text,
+      copyEligible: var_copyEligible,
       resourcePath: var_resourcePath,
       raster: var_raster,
       endpoints: var_endpoints,
@@ -2098,6 +2101,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_f_32(self.width, serializer);
     sse_encode_f_32(self.height, serializer);
     sse_encode_String(self.text, serializer);
+    sse_encode_bool(self.copyEligible, serializer);
     sse_encode_opt_String(self.resourcePath, serializer);
     sse_encode_opt_box_autoadd_flutter_rendered_buffer(self.raster, serializer);
     sse_encode_list_flutter_selection_endpoint(self.endpoints, serializer);

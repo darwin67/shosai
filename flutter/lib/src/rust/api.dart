@@ -383,6 +383,7 @@ class FlutterSelectionSurface {
   final double width;
   final double height;
   final String text;
+  final bool copyEligible;
   final String? resourcePath;
   final FlutterRenderedBuffer? raster;
   final List<FlutterSelectionEndpoint> endpoints;
@@ -395,6 +396,7 @@ class FlutterSelectionSurface {
     required this.width,
     required this.height,
     required this.text,
+    required this.copyEligible,
     this.resourcePath,
     this.raster,
     required this.endpoints,
@@ -409,6 +411,7 @@ class FlutterSelectionSurface {
       width.hashCode ^
       height.hashCode ^
       text.hashCode ^
+      copyEligible.hashCode ^
       resourcePath.hashCode ^
       raster.hashCode ^
       endpoints.hashCode ^
@@ -425,6 +428,7 @@ class FlutterSelectionSurface {
           width == other.width &&
           height == other.height &&
           text == other.text &&
+          copyEligible == other.copyEligible &&
           resourcePath == other.resourcePath &&
           raster == other.raster &&
           endpoints == other.endpoints &&

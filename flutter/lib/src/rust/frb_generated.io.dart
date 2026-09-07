@@ -709,6 +709,7 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     wireObj.width = cst_encode_f_32(apiObj.width);
     wireObj.height = cst_encode_f_32(apiObj.height);
     wireObj.text = cst_encode_String(apiObj.text);
+    wireObj.copy_eligible = cst_encode_bool(apiObj.copyEligible);
     wireObj.resource_path = cst_encode_opt_String(apiObj.resourcePath);
     wireObj.raster = cst_encode_opt_box_autoadd_flutter_rendered_buffer(
       apiObj.raster,
@@ -2004,6 +2005,9 @@ final class wire_cst_flutter_selection_surface extends ffi.Struct {
   external double height;
 
   external ffi.Pointer<wire_cst_list_prim_u_8_strict> text;
+
+  @ffi.Bool()
+  external bool copy_eligible;
 
   external ffi.Pointer<wire_cst_list_prim_u_8_strict> resource_path;
 

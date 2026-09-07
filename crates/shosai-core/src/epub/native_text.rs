@@ -77,6 +77,9 @@ pub struct EpubTextHit {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EpubTextEndpoint {
     pub rect: EpubTextRect,
+    /// Shaper-derived caret coordinate; unlike the hit-zone center this is an
+    /// actual cluster edge and preserves proportional widths and bidi.
+    pub caret_x: f32,
     pub scalar: usize,
     pub scalar_start: usize,
     pub scalar_end: usize,
@@ -566,6 +569,7 @@ impl EpubFontBook {
                                 width: grapheme_width / 2.0,
                                 height: rect.height,
                             },
+                            caret_x: x,
                             scalar: left,
                             scalar_start: cluster_scalar,
                             scalar_end: after,
@@ -581,6 +585,7 @@ impl EpubFontBook {
                                 width: grapheme_width / 2.0,
                                 height: rect.height,
                             },
+                            caret_x: x + grapheme_width,
                             scalar: right,
                             scalar_start: cluster_scalar,
                             scalar_end: after,
@@ -972,6 +977,7 @@ mod tests {
                 width: 1.0,
                 height: 1.0,
             },
+            caret_x: 0.0,
             scalar: 0,
             scalar_start: 0,
             scalar_end: 1,

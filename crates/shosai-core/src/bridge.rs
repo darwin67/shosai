@@ -147,6 +147,9 @@ pub struct SelectionSurface {
     pub width: f32,
     pub height: f32,
     pub text: String,
+    /// Rust-owned completeness decision. False disables copying and makes PDF
+    /// persistence omit its text range and quote selector.
+    pub copy_eligible: bool,
     pub resource_path: Option<String>,
     /// Retained straight-alpha RGBA raster produced by the same EPUB layout.
     /// The caller owns this handle and must release it after decoding.
@@ -708,20 +711,26 @@ impl Bridge {
             &chars[end..].iter().collect::<String>(),
         )
         .map_err(storage_error)?;
-        let target = match &retained.document {
-            OpenDocument::Epub(_) => AnnotationTarget::Epub(
-                EpubAnchor::new(
-                    u32::try_from(unit)
-                        .map_err(|_| BridgeError::InvalidRequest("unit exceeds range".into()))?,
-                    surface.resource_path.as_deref().ok_or_else(|| {
-                        BridgeError::InvalidRequest("EPUB resource path missing".into())
-                    })?,
-                    u32::try_from(start)
-                        .map_err(|_| BridgeError::InvalidRequest("range exceeds range".into()))?,
-                    u32::try_from(end)
-                        .map_err(|_| BridgeError::InvalidRequest("range exceeds range".into()))?,
-                )
-                .map_err(storage_error)?,
+        let (target, quote) = match &retained.document {
+            OpenDocument::Epub(_) => (
+                AnnotationTarget::Epub(
+                    EpubAnchor::new(
+                        u32::try_from(unit).map_err(|_| {
+                            BridgeError::InvalidRequest("unit exceeds range".into())
+                        })?,
+                        surface.resource_path.as_deref().ok_or_else(|| {
+                            BridgeError::InvalidRequest("EPUB resource path missing".into())
+                        })?,
+                        u32::try_from(start).map_err(|_| {
+                            BridgeError::InvalidRequest("range exceeds range".into())
+                        })?,
+                        u32::try_from(end).map_err(|_| {
+                            BridgeError::InvalidRequest("range exceeds range".into())
+                        })?,
+                    )
+                    .map_err(storage_error)?,
+                ),
+                Some(quote),
             ),
             OpenDocument::Pdf(_) => {
                 let rectangles = surface
@@ -739,15 +748,24 @@ impl Bridge {
                         .map_err(storage_error)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                AnnotationTarget::Pdf(
-                    PdfAnchor::new(
-                        u32::try_from(unit).map_err(|_| {
-                            BridgeError::InvalidRequest("unit exceeds range".into())
-                        })?,
-                        Some((u32::try_from(start).unwrap(), u32::try_from(end).unwrap())),
-                        rectangles,
-                    )
-                    .map_err(storage_error)?,
+                let complete = surface.copy_eligible;
+                (
+                    AnnotationTarget::Pdf(
+                        PdfAnchor::new(
+                            u32::try_from(unit).map_err(|_| {
+                                BridgeError::InvalidRequest("unit exceeds range".into())
+                            })?,
+                            complete.then(|| {
+                                (
+                                    u32::try_from(start).expect("bounded PDF start"),
+                                    u32::try_from(end).expect("bounded PDF end"),
+                                )
+                            }),
+                            rectangles,
+                        )
+                        .map_err(storage_error)?,
+                    ),
+                    complete.then_some(quote),
                 )
             }
             OpenDocument::Cbz(_) => return Err(BridgeError::UnsupportedOperation(BookFormat::Cbz)),
@@ -757,7 +775,7 @@ impl Bridge {
             book_id: None,
             local_path: Some(retained.local_path.clone()),
             fingerprint: retained.fingerprint.clone(),
-            quote: Some(quote),
+            quote,
             target,
             color,
             body,
@@ -1496,6 +1514,7 @@ fn selection_surface(
                 .map_err(map_render_error)?;
             let (bitmap_width, bitmap_height) = snapshot.bitmap_size();
             let text = snapshot.text().to_owned();
+            let copy_eligible = snapshot.text_mapping_complete();
             let (grapheme_boundaries, word_boundaries) = navigation_boundaries(&text);
             let page_rectangles = snapshot
                 .page_rectangles(0, text.chars().count())
@@ -1518,6 +1537,7 @@ fn selection_surface(
                     width: bitmap_width as f32,
                     height: bitmap_height as f32,
                     text,
+                    copy_eligible,
                     resource_path: None,
                     raster: None,
                     endpoints: snapshot
@@ -1639,22 +1659,20 @@ fn selection_surface(
             }
             let path = document.chapter(unit).map(|chapter| chapter.path.clone());
             let (grapheme_boundaries, word_boundaries) = navigation_boundaries(&text);
-            let visual_lines = layout
-                .lines
-                .iter()
-                .enumerate()
-                .map(|(visual_line, line)| {
-                    let mut carets = layout
-                        .endpoints
-                        .iter()
-                        .filter(|endpoint| endpoint.visual_line == visual_line)
-                        .map(|endpoint| SelectionCaret {
-                            offset: endpoint.scalar,
-                            x: endpoint.rect.x + endpoint.rect.width / 2.0,
-                            top: line.top,
-                            bottom: line.top + endpoint.rect.height,
-                        })
-                        .collect::<Vec<_>>();
+            let mut line_carets = vec![Vec::new(); layout.lines.len()];
+            for endpoint in &layout.endpoints {
+                if let Some(carets) = line_carets.get_mut(endpoint.visual_line) {
+                    carets.push(SelectionCaret {
+                        offset: endpoint.scalar,
+                        x: endpoint.caret_x,
+                        top: endpoint.rect.y,
+                        bottom: endpoint.rect.y + endpoint.rect.height,
+                    });
+                }
+            }
+            let visual_lines = line_carets
+                .into_iter()
+                .map(|mut carets| {
                     carets.sort_by(|left, right| left.x.total_cmp(&right.x));
                     carets.dedup_by(|left, right| left.offset == right.offset);
                     SelectionVisualLine { carets }
@@ -1666,6 +1684,7 @@ fn selection_surface(
                     width: surface_width,
                     height: surface_height,
                     text,
+                    copy_eligible: true,
                     resource_path: path,
                     raster: None,
                     endpoints: layout
@@ -1704,12 +1723,17 @@ fn navigation_boundaries(text: &str) -> (Vec<usize>, Vec<usize>) {
         scalar += grapheme.chars().count();
         graphemes.push(scalar);
     }
-    let mut words = vec![0];
+    let mut words = Vec::new();
     scalar = 0;
     for segment in text.split_word_bounds() {
-        scalar += segment.chars().count();
-        words.push(scalar);
+        let end = scalar + segment.chars().count();
+        if segment.unicode_words().next().is_some() {
+            words.extend([scalar, end]);
+        }
+        scalar = end;
     }
+    words.extend([0, scalar]);
+    words.sort_unstable();
     words.dedup();
     (graphemes, words)
 }
@@ -2031,7 +2055,13 @@ mod tests {
 
         assert!(graphemes.contains(&5));
         assert!(!graphemes.contains(&4), "decomposed accent is one grapheme");
-        assert_eq!(words, vec![0, 5, 6, 11, 12, 13, 14, 15]);
+        assert_eq!(words, vec![0, 5, 6, 11, 13, 14, 15]);
+    }
+
+    #[test]
+    fn word_stops_skip_standalone_whitespace_and_punctuation() {
+        let (_, words) = navigation_boundaries("one,  two?! 三");
+        assert_eq!(words, vec![0, 3, 6, 9, 12, 13]);
     }
 
     #[test]
