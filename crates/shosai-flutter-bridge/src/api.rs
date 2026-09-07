@@ -549,9 +549,11 @@ impl FlutterBridge {
     pub async fn list_annotations(
         &self,
         document: FlutterDocumentHandle,
+        cancellation_id: u64,
     ) -> Result<Vec<FlutterAnnotation>, FlutterBridgeError> {
+        let cancellation = self.cancellation(cancellation_id)?;
         self.bridge
-            .list_annotations(document.into())
+            .list_annotations(document.into(), cancellation)
             .await
             .map(|items| items.into_iter().map(Into::into).collect())
             .map_err(Into::into)

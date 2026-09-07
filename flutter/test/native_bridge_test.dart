@@ -240,7 +240,10 @@ void main() {
 
       release();
       await open();
-      var listed = await bridge!.listAnnotations(document: document!);
+      var listed = await bridge!.listAnnotations(
+        document: document!,
+        cancellationId: cancellation!,
+      );
       expect(listed, hasLength(1));
       expect(listed.single.id, created.id);
       expect(listed.single.color, FlutterHighlightColor.yellow);
@@ -260,7 +263,10 @@ void main() {
         ),
         isTrue,
       );
-      listed = await bridge!.listAnnotations(document: document!);
+      listed = await bridge!.listAnnotations(
+        document: document!,
+        cancellationId: cancellation!,
+      );
       expect(listed, hasLength(1));
       expect(listed.single.color, FlutterHighlightColor.purple);
       expect(listed.single.body, 'native bridge note');
@@ -269,7 +275,13 @@ void main() {
         await bridge!.deleteAnnotation(document: document!, id: created.id),
         isTrue,
       );
-      expect(await bridge!.listAnnotations(document: document!), isEmpty);
+      expect(
+        await bridge!.listAnnotations(
+          document: document!,
+          cancellationId: cancellation!,
+        ),
+        isEmpty,
+      );
     } finally {
       release();
       await directory.delete(recursive: true);

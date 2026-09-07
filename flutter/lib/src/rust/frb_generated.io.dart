@@ -1338,11 +1338,13 @@ class RustLibWire implements BaseWire {
     int port_,
     int that,
     ffi.Pointer<wire_cst_flutter_document_handle> document,
+    int cancellation_id,
   ) {
     return _wire__crate__api__FlutterBridge_list_annotations(
       port_,
       that,
       document,
+      cancellation_id,
     );
   }
 
@@ -1353,6 +1355,7 @@ class RustLibWire implements BaseWire {
             ffi.Int64,
             ffi.UintPtr,
             ffi.Pointer<wire_cst_flutter_document_handle>,
+            ffi.Uint64,
           )
         >
       >(
@@ -1365,6 +1368,7 @@ class RustLibWire implements BaseWire {
               int,
               int,
               ffi.Pointer<wire_cst_flutter_document_handle>,
+              int,
             )
           >();
 

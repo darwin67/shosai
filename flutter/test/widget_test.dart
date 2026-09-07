@@ -1207,6 +1207,48 @@ void main() {
     await bridge.disposed.future;
   });
 
+  test('keyboard movement safely skips non-navigable metadata lines', () async {
+    FlutterSelectionVisualLine line(int offset, double top) =>
+        FlutterSelectionVisualLine(
+          carets: [
+            FlutterSelectionCaret(
+              offset: BigInt.from(offset),
+              x: 10,
+              top: top,
+              bottom: top + 10,
+            ),
+          ],
+        );
+    final bridge = _ControlledBridge(
+      selectionVisualLines: [
+        const FlutterSelectionVisualLine(carets: []),
+        line(1, 10),
+        const FlutterSelectionVisualLine(carets: []),
+        line(4, 40),
+        const FlutterSelectionVisualLine(carets: []),
+      ],
+    );
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/book.epub');
+
+    controller.dispatch(
+      const ReaderSelectionKeyboardExtended(
+        ReaderSelectionMovement.visualRight,
+      ),
+    );
+    expect(controller.model.anchor, 1);
+    expect(controller.model.focus, 4);
+    controller.dispatch(const ReaderSelectionCancelled());
+    controller.dispatch(
+      const ReaderSelectionKeyboardExtended(ReaderSelectionMovement.visualLeft),
+    );
+    expect(controller.model.anchor, 4);
+    expect(controller.model.focus, 1);
+
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
   test('saved highlight navigation restores reader keyboard focus', () async {
     final bridge = _ControlledBridge(initialAnnotations: [_annotation('one')]);
     final focusTargets = <ReaderFocusTarget>[];
@@ -1699,6 +1741,58 @@ void main() {
         await bridge.disposed.future;
       },
     );
+  }
+
+  for (final operation in ['update', 'delete']) {
+    test('$operation retry clears its earlier annotation error', () async {
+      final bridge = _ControlledBridge(
+        initialAnnotations: [_annotation('one')],
+        immediateLists: true,
+      );
+      final controller = _epubController(bridge);
+      await _openControlled(controller, bridge, '/tmp/a.epub');
+      if (operation == 'update') {
+        bridge.updateCompleter = Completer<bool>();
+        controller.dispatch(
+          const ReaderAnnotationUpdated(
+            'one',
+            FlutterHighlightColor.green,
+            null,
+          ),
+        );
+        bridge.updateCompleter!.completeError(StateError('update failed'));
+      } else {
+        bridge.deleteCompleter = Completer<bool>();
+        controller.dispatch(const ReaderAnnotationDeleted('one'));
+        bridge.deleteCompleter!.completeError(StateError('delete failed'));
+      }
+      while (controller.model.annotationOperations.isNotEmpty) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(controller.model.annotationError, contains('$operation failed'));
+
+      if (operation == 'update') {
+        bridge.updateCompleter = null;
+        controller.dispatch(
+          const ReaderAnnotationUpdated(
+            'one',
+            FlutterHighlightColor.blue,
+            null,
+          ),
+        );
+      } else {
+        bridge.deleteCompleter = null;
+        controller.dispatch(const ReaderAnnotationDeleted('one'));
+      }
+      expect(controller.model.annotationError, isNull);
+      while (controller.model.annotationOperations.isNotEmpty) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      expect(controller.model.annotationError, isNull);
+
+      controller.dispose();
+      await bridge.disposed.future;
+    });
   }
 
   testWidgets('annotation controls prevent overlapping writes', (tester) async {
@@ -2518,6 +2612,7 @@ final class _ControlledBridge implements FlutterBridge {
   @override
   Future<List<FlutterAnnotation>> listAnnotations({
     required FlutterDocumentHandle document,
+    required BigInt cancellationId,
   }) {
     listCalls += 1;
     if (listFailure) return Future.error(StateError('annotation list failed'));
@@ -2702,6 +2797,7 @@ class _FakeBridge implements FlutterBridge {
   @override
   Future<List<FlutterAnnotation>> listAnnotations({
     required FlutterDocumentHandle document,
+    required BigInt cancellationId,
   }) async {
     listCalls += 1;
     return const [];
@@ -2895,6 +2991,7 @@ final class _SequentialBridge implements FlutterBridge {
   @override
   Future<List<FlutterAnnotation>> listAnnotations({
     required FlutterDocumentHandle document,
+    required BigInt cancellationId,
   }) async => const [];
   @override
   Future<FlutterAnnotation> createAnnotation({

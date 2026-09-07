@@ -814,28 +814,80 @@ impl Bridge {
             .create_async(&annotation)
             .await
             .map_err(storage_error)?;
-        drop(extracted);
-        annotation_dto(created, &retained.document)
+        // Persistence is the acceptance boundary. Once committed, finish the
+        // response even if the caller cancels, matching accepted-write semantics.
+        let accepted_conversion = Cancellation::new();
+        let conversion_slot = acquire_permits(
+            Arc::clone(&self.admission.render_slots),
+            1,
+            &accepted_conversion,
+        )
+        .await?;
+        self.resolve_annotation_dtos(
+            Arc::clone(&retained),
+            vec![created],
+            accepted_conversion,
+            Some(extracted),
+            vec![conversion_slot],
+        )
+        .await
+        .map(|mut items| items.remove(0))
     }
 
     pub async fn list_annotations(
         &self,
         document: DocumentHandle,
+        cancellation: Cancellation,
     ) -> Result<Vec<BridgeAnnotation>, BridgeError> {
+        let request_slot = try_acquire_slot(
+            Arc::clone(&self.admission.request_slots),
+            BridgeError::RequestLimit,
+        )?;
         let retained = self.document(document)?;
-        self.annotation_store()
-            .await?
+        let store = tokio::select! {
+            store = self.annotation_store() => store?,
+            () = cancellation.cancelled() => return Err(BridgeError::Cancelled),
+        };
+        let items = store
             .list_for_local_path_async(&retained.local_path)
             .await
-            .map_err(storage_error)
-            .map(|items| {
-                items
-                    .into_iter()
-                    .filter(|item| item.fingerprint == retained.fingerprint)
-                    .map(|item| annotation_dto(item, &retained.document))
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .and_then(|items| items)
+            .map_err(storage_error)?
+            .into_iter()
+            .filter(|item| item.fingerprint == retained.fingerprint)
+            .collect();
+        let render_slot =
+            acquire_permits(Arc::clone(&self.admission.render_slots), 1, &cancellation).await?;
+        self.resolve_annotation_dtos(
+            retained,
+            items,
+            cancellation,
+            None,
+            vec![request_slot, render_slot],
+        )
+        .await
+    }
+
+    async fn resolve_annotation_dtos(
+        &self,
+        retained: Arc<RetainedDocument>,
+        annotations: Vec<Annotation>,
+        cancellation: Cancellation,
+        extraction: Option<ExtractedSelection>,
+        guards: Vec<OwnedSemaphorePermit>,
+    ) -> Result<Vec<BridgeAnnotation>, BridgeError> {
+        let worker_cancellation = cancellation.clone();
+        let (result, _extraction, _guards) = tokio::task::spawn_blocking(move || {
+            let result = guarded(|| {
+                annotation_dtos(annotations, &retained.document, &|| {
+                    worker_cancellation.is_cancelled()
+                })
+            });
+            (result, extraction, guards)
+        })
+        .await
+        .map_err(|_| BridgeError::Worker)?;
+        check_cancelled(&cancellation)?;
+        result
     }
 
     pub async fn update_annotation(
@@ -1670,25 +1722,7 @@ fn selection_surface(
             }
             let path = document.chapter(unit).map(|chapter| chapter.path.clone());
             let (grapheme_boundaries, word_boundaries) = navigation_boundaries(&text);
-            let mut line_carets = vec![Vec::new(); layout.lines.len()];
-            for endpoint in &layout.endpoints {
-                if let Some(carets) = line_carets.get_mut(endpoint.visual_line) {
-                    carets.push(SelectionCaret {
-                        offset: endpoint.scalar,
-                        x: endpoint.caret_x,
-                        top: endpoint.rect.y,
-                        bottom: endpoint.rect.y + endpoint.rect.height,
-                    });
-                }
-            }
-            let visual_lines = line_carets
-                .into_iter()
-                .map(|mut carets| {
-                    carets.sort_by(|left, right| left.x.total_cmp(&right.x));
-                    carets.dedup_by(|left, right| left.offset == right.offset);
-                    SelectionVisualLine { carets }
-                })
-                .collect();
+            let visual_lines = epub_visual_lines(&text, &layout, scale);
             Ok(SelectionExtraction {
                 surface: SelectionSurface {
                     handle: SelectionHandle { registry: 0, id: 0 },
@@ -1725,6 +1759,45 @@ fn selection_surface(
         }
         OpenDocument::Cbz(_) => Err(BridgeError::UnsupportedOperation(BookFormat::Cbz)),
     }
+}
+
+fn epub_visual_lines(
+    text: &str,
+    layout: &crate::epub::EpubTextLayout,
+    scale: f32,
+) -> Vec<SelectionVisualLine> {
+    let mut line_carets = vec![Vec::new(); layout.lines.len()];
+    for endpoint in &layout.endpoints {
+        if let Some(carets) = line_carets.get_mut(endpoint.visual_line) {
+            carets.push(SelectionCaret {
+                offset: endpoint.scalar,
+                x: endpoint.caret_x,
+                top: endpoint.rect.y,
+                bottom: endpoint.rect.y + endpoint.rect.height,
+            });
+        }
+    }
+    if !text.is_empty() {
+        let scalar_count = text.chars().count();
+        for (line, carets) in layout.lines.iter().zip(&mut line_carets) {
+            if carets.is_empty() && line.scalars.start < scalar_count {
+                carets.push(SelectionCaret {
+                    offset: line.scalars.start,
+                    x: if line.rtl { line.width } else { 0.0 },
+                    top: line.top,
+                    bottom: line.top + line.pixel_height as f32 / scale,
+                });
+            }
+        }
+    }
+    line_carets
+        .into_iter()
+        .map(|mut carets| {
+            carets.sort_by(|left, right| left.x.total_cmp(&right.x));
+            carets.dedup_by(|left, right| left.offset == right.offset);
+            SelectionVisualLine { carets }
+        })
+        .collect()
 }
 
 fn navigation_boundaries(text: &str) -> (Vec<usize>, Vec<usize>) {
@@ -1838,9 +1911,51 @@ fn storage_error(error: impl std::fmt::Display) -> BridgeError {
     BridgeError::Storage(error.to_string())
 }
 
+fn annotation_dtos(
+    annotations: Vec<Annotation>,
+    document: &OpenDocument,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<BridgeAnnotation>, BridgeError> {
+    let batches = annotations
+        .iter()
+        .filter_map(|annotation| match &annotation.target {
+            AnnotationTarget::Pdf(anchor) => Some((
+                anchor.page as usize,
+                anchor
+                    .rectangles
+                    .iter()
+                    .map(|rect| (rect.left, rect.bottom, rect.right, rect.top))
+                    .collect(),
+            )),
+            AnnotationTarget::Epub(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let mut resolved = if batches.is_empty() {
+        Vec::new().into_iter()
+    } else {
+        let OpenDocument::Pdf(pdf) = document else {
+            return Err(BridgeError::InvalidRequest(
+                "PDF annotation does not match open document".into(),
+            ));
+        };
+        pdf.page_rectangle_batches_to_pixels(&batches, 1.0, is_cancelled)
+            .map_err(map_render_error)?
+            .into_iter()
+    };
+    annotations
+        .into_iter()
+        .map(|annotation| {
+            let rectangles = matches!(&annotation.target, AnnotationTarget::Pdf(_))
+                .then(|| resolved.next())
+                .flatten();
+            annotation_dto(annotation, rectangles)
+        })
+        .collect()
+}
+
 fn annotation_dto(
     annotation: Annotation,
-    document: &OpenDocument,
+    resolved_pdf_rectangles: Option<Vec<crate::pdf::PdfSelectionRect>>,
 ) -> Result<BridgeAnnotation, BridgeError> {
     let quote = annotation
         .quote
@@ -1863,22 +1978,8 @@ fn annotation_dto(
                     end: end as usize,
                 });
             let page = anchor.page as usize;
-            let canonical = anchor
-                .rectangles
-                .into_iter()
-                .map(|rect| (rect.left, rect.bottom, rect.right, rect.top))
-                .collect::<Vec<_>>();
-            let OpenDocument::Pdf(pdf) = document else {
-                return Err(BridgeError::InvalidRequest(
-                    "PDF annotation does not match open document".into(),
-                ));
-            };
-            // The current reader renders page zero and its selection surface at
-            // scale 1. Keep persistence canonical, resolving only the bridge DTO
-            // through PDFium's crop/rotation-aware render transform.
-            let rectangles = pdf
-                .page_rectangles_to_pixels(page, 1.0, &canonical)
-                .map_err(map_render_error)?
+            let rectangles = resolved_pdf_rectangles
+                .ok_or_else(|| BridgeError::Render("PDF rectangles were not resolved".into()))?
                 .into_iter()
                 .map(|rect| SelectionRect {
                     left: rect.left,
@@ -1993,8 +2094,14 @@ mod tests {
     }
 
     fn empty_epub() -> Vec<u8> {
+        epub_with_body("")
+    }
+
+    fn epub_with_body(body: &str) -> Vec<u8> {
         let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
-        let entries: &[(&str, &[u8])] = &[
+        let chapter =
+            format!("<html xmlns=\"http://www.w3.org/1999/xhtml\"><body>{body}</body></html>");
+        let entries: Vec<(&str, &[u8])> = vec![
             ("mimetype", b"application/epub+zip"),
             (
                 "META-INF/container.xml",
@@ -2005,11 +2112,10 @@ mod tests {
                 br#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="id">empty</dc:identifier><dc:title>Empty</dc:title><dc:language>en</dc:language></metadata><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>"#,
             ),
             (
-                "OPS/chapter.xhtml",
-                br#"<html xmlns="http://www.w3.org/1999/xhtml"><body/></html>"#,
+                "OPS/chapter.xhtml", chapter.as_bytes(),
             ),
         ];
-        for (path, contents) in entries {
+        for (path, contents) in &entries {
             archive
                 .start_file(*path, SimpleFileOptions::default())
                 .unwrap();
@@ -2153,7 +2259,8 @@ mod tests {
             deleted_at: None,
         };
 
-        let dto = annotation_dto(annotation, &OpenDocument::Pdf(Arc::new(pdf))).unwrap();
+        let resolved = pdf.page_rectangles_to_pixels(0, 1.0, &[canonical]).unwrap();
+        let dto = annotation_dto(annotation, Some(resolved)).unwrap();
         assert_eq!(dto.text_range, None);
         assert_eq!(dto.quote, None);
         assert_eq!(
@@ -2623,7 +2730,7 @@ mod tests {
         gate.release();
         assert!(
             bridge
-                .list_annotations(document.handle)
+                .list_annotations(document.handle, Cancellation::new())
                 .await
                 .unwrap()
                 .is_empty()
@@ -2681,7 +2788,7 @@ mod tests {
         );
         assert!(
             bridge
-                .list_annotations(document.handle)
+                .list_annotations(document.handle, Cancellation::new())
                 .await
                 .unwrap()
                 .is_empty()
@@ -2719,7 +2826,7 @@ mod tests {
         operation.await.unwrap().unwrap();
         assert_eq!(
             bridge
-                .list_annotations(document.handle)
+                .list_annotations(document.handle, Cancellation::new())
                 .await
                 .unwrap()
                 .len(),
@@ -2816,6 +2923,67 @@ mod tests {
         assert!(extraction.surface.height > 0.0);
         assert!(extraction.surface.text.is_empty());
         assert!(extraction.surface.endpoints.is_empty());
+        assert!(
+            extraction
+                .surface
+                .visual_lines
+                .iter()
+                .all(|line| line.carets.is_empty())
+        );
+    }
+
+    #[test]
+    fn epub_blank_paragraphs_export_real_newline_carets() {
+        let document = OpenDocument::Epub(Arc::new(
+            crate::epub::EpubDoc::from_bytes(empty_epub()).unwrap(),
+        ));
+        let OpenDocument::Epub(document) = document else {
+            unreachable!()
+        };
+        let text = "\nAlpha\n\nOmega";
+        let layout = document
+            .fonts()
+            .measure_text(&EpubTextRequest {
+                runs: vec![EpubTextRun {
+                    text: text.into(),
+                    family: None,
+                    monospace: false,
+                    font_size: 18.0,
+                    bold: false,
+                    italic: false,
+                    foreground: [0, 0, 0, 255],
+                    link: None,
+                }],
+                max_width: 680.0,
+                line_height: 27.0,
+                scale: 1.0,
+                align: EpubTextAlign::Left,
+                direction: EpubTextDirection::LeftToRight,
+                highlights: Vec::new(),
+            })
+            .unwrap();
+        let visual_lines = epub_visual_lines(text, &layout, 1.0);
+        let newline_offsets = text
+            .chars()
+            .enumerate()
+            .filter_map(|(offset, character)| (character == '\n').then_some(offset))
+            .collect::<Vec<_>>();
+        let blank_lines = visual_lines
+            .iter()
+            .filter(|line| line.carets.len() == 1)
+            .collect::<Vec<_>>();
+
+        assert!(
+            blank_lines.len() >= 2,
+            "leading and interior blank lines survive: text={text:?}, lines={:?}",
+            visual_lines
+        );
+        assert!(blank_lines.iter().all(|line| {
+            newline_offsets.contains(&line.carets[0].offset)
+                && line.carets[0].top < line.carets[0].bottom
+                && line.carets[0].x.is_finite()
+        }));
+        assert!(visual_lines.iter().all(|line| !line.carets.is_empty()));
     }
 
     #[test]

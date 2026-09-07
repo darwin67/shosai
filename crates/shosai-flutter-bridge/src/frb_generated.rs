@@ -263,6 +263,7 @@ fn wire__crate__api__FlutterBridge_list_annotations_impl(
         RustOpaqueNom<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FlutterBridge>>,
     >,
     document: impl CstDecode<crate::api::FlutterDocumentHandle>,
+    cancellation_id: impl CstDecode<u64>,
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::DcoCodec, _, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
@@ -273,6 +274,7 @@ fn wire__crate__api__FlutterBridge_list_annotations_impl(
         move || {
             let api_that = that.cst_decode();
             let api_document = document.cst_decode();
+            let api_cancellation_id = cancellation_id.cst_decode();
             move |context| async move {
                 transform_result_dco::<_, _, crate::api::FlutterBridgeError>(
                     (move || async move {
@@ -296,6 +298,7 @@ fn wire__crate__api__FlutterBridge_list_annotations_impl(
                         let output_ok = crate::api::FlutterBridge::list_annotations(
                             &*api_that_guard,
                             api_document,
+                            api_cancellation_id,
                         )
                         .await?;
                         Ok(output_ok)
@@ -2789,8 +2792,14 @@ mod io {
         port_: i64,
         that: usize,
         document: *mut wire_cst_flutter_document_handle,
+        cancellation_id: u64,
     ) {
-        wire__crate__api__FlutterBridge_list_annotations_impl(port_, that, document)
+        wire__crate__api__FlutterBridge_list_annotations_impl(
+            port_,
+            that,
+            document,
+            cancellation_id,
+        )
     }
 
     #[unsafe(no_mangle)]

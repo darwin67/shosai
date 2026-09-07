@@ -792,6 +792,7 @@ final class ReaderController implements Listenable {
         try {
           final annotations = await _bridge.listAnnotations(
             document: document.handle,
+            cancellationId: cancellation,
           );
           if (!_isCurrent(generation)) return;
           dispatch(
@@ -1295,8 +1296,15 @@ final class ReaderController implements Listenable {
     final generation = _model.generation;
     final revision = ++_annotationRevision;
     final operationId = 'update:${message.id}:${++_nextOperationId}';
+    final cancellation = _bridge.createCancellation();
+    _annotationCancellations.add(cancellation);
     _activeBridgeOperations += 1;
-    _emit(_model.copyWith(annotationOperations: {operationId}));
+    _emit(
+      _model.copyWith(
+        annotationOperations: {operationId},
+        annotationError: null,
+      ),
+    );
     try {
       final changed = await _bridge.updateAnnotation(
         document: document.handle,
@@ -1306,7 +1314,10 @@ final class ReaderController implements Listenable {
       );
       if (!_isCurrent(generation)) return;
       final items = changed
-          ? await _bridge.listAnnotations(document: document.handle)
+          ? await _bridge.listAnnotations(
+              document: document.handle,
+              cancellationId: cancellation,
+            )
           : _model.annotations;
       if (!_isCurrent(generation)) return;
       dispatch(
@@ -1330,6 +1341,8 @@ final class ReaderController implements Listenable {
         ),
       );
     } finally {
+      _annotationCancellations.remove(cancellation);
+      _bridge.releaseCancellation(id: cancellation);
       dispatch(const _ReaderAnnotationOperationFinished());
     }
   }
@@ -1346,7 +1359,12 @@ final class ReaderController implements Listenable {
     final revision = ++_annotationRevision;
     final operationId = 'delete:$id:${++_nextOperationId}';
     _activeBridgeOperations += 1;
-    _emit(_model.copyWith(annotationOperations: {operationId}));
+    _emit(
+      _model.copyWith(
+        annotationOperations: {operationId},
+        annotationError: null,
+      ),
+    );
     try {
       final changed = await _bridge.deleteAnnotation(
         document: document.handle,
@@ -1446,9 +1464,9 @@ final class ReaderController implements Listenable {
       _setAnnotations(items, annotationsReady: operation == null ? true : null);
     }
     if (operation == null) return;
+    final createsSelection = operation.startsWith('create:');
     final ownsSelection =
-        operation.startsWith('create:') &&
-        message.selectionRevision == _selectionRevision;
+        createsSelection && message.selectionRevision == _selectionRevision;
     final wasCancelled = _cancelledSelectionCreates.contains(
       message.selectionRevision,
     );
@@ -1466,9 +1484,12 @@ final class ReaderController implements Listenable {
             : ownsSelection
             ? null
             : _unchanged,
-        annotationError:
-            !ownsSelection && !wasCancelled && message.error != null
-            ? 'An earlier highlight could not be saved: ${message.error}'
+        annotationError: message.error == null
+            ? null
+            : !ownsSelection && !wasCancelled
+            ? createsSelection
+                  ? 'An earlier highlight could not be saved: ${message.error}'
+                  : message.error
             : _unchanged,
       ),
     );
@@ -1682,7 +1703,8 @@ int? _adjacentOffset(List<int> offsets, int? current, bool forward) {
       if (index >= 0) break;
     }
   } else {
-    line = right ? 0 : lines.length - 1;
+    line = _navigableLine(lines, right);
+    if (line == null) return null;
     index = right ? 0 : lines[line].carets.length - 1;
   }
   if (line == null || index < 0) return null;
@@ -1694,10 +1716,11 @@ int? _adjacentOffset(List<int> offsets, int? current, bool forward) {
   if (destination >= 0 && destination < carets.length) {
     next = carets[destination];
   } else {
-    destinationLine = line + (right ? 1 : -1);
-    if (destinationLine < 0 || destinationLine >= lines.length) return null;
+    do {
+      destinationLine += right ? 1 : -1;
+      if (destinationLine < 0 || destinationLine >= lines.length) return null;
+    } while (lines[destinationLine].carets.isEmpty);
     final destinationCarets = lines[destinationLine].carets;
-    if (destinationCarets.isEmpty) return null;
     next = right ? destinationCarets.first : destinationCarets.last;
   }
   return (
@@ -1716,14 +1739,19 @@ int? _adjacentOffset(List<int> offsets, int? current, bool forward) {
   bool forward,
 ) {
   if (lines.isEmpty) return null;
+  final originLine = _navigableLine(lines, forward);
   final origin = current == null
-      ? _lineEdge(lines, forward ? 0 : lines.length - 1, forward)
+      ? originLine == null
+            ? null
+            : _lineEdge(lines, originLine, forward)
       : _caretForOffset(lines, current, currentLine);
   if (origin == null) return null;
-  final destinationLine = origin.line + (forward ? 1 : -1);
-  if (destinationLine < 0 || destinationLine >= lines.length) return null;
+  var destinationLine = origin.line;
+  do {
+    destinationLine += forward ? 1 : -1;
+    if (destinationLine < 0 || destinationLine >= lines.length) return null;
+  } while (lines[destinationLine].carets.isEmpty);
   final carets = lines[destinationLine].carets;
-  if (carets.isEmpty) return null;
   final targetX = preferredX ?? origin.preferredX;
   final caret = carets.reduce(
     (best, candidate) =>
@@ -1746,11 +1774,25 @@ int? _adjacentOffset(List<int> offsets, int? current, bool forward) {
 ) {
   if (lines.isEmpty) return null;
   if (current == null) {
-    return _lineEdge(lines, forward ? 0 : lines.length - 1, !forward);
+    final line = _navigableLine(lines, forward);
+    return line == null ? null : _lineEdge(lines, line, !forward);
   }
   final origin = _caretForOffset(lines, current, currentLine);
   if (origin == null) return null;
   return _lineEdge(lines, origin.line, !forward);
+}
+
+int? _navigableLine(List<FlutterSelectionVisualLine> lines, bool forward) {
+  final indexes = forward
+      ? Iterable<int>.generate(lines.length)
+      : Iterable<int>.generate(
+          lines.length,
+          (index) => lines.length - index - 1,
+        );
+  for (final index in indexes) {
+    if (lines[index].carets.isNotEmpty) return index;
+  }
+  return null;
 }
 
 ({int offset, int line, double preferredX})? _caretForOffset(

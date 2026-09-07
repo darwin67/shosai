@@ -27,6 +27,8 @@ pub struct PdfSelectionRect {
     pub bottom: f32,
 }
 
+type PdfPageRectangleBatch = (usize, Vec<(f32, f32, f32, f32)>);
+
 impl PdfSelectionRect {
     fn contains(self, x: f32, y: f32) -> bool {
         x >= self.left && x < self.right && y >= self.top && y < self.bottom
@@ -59,9 +61,14 @@ pub struct PdfSelectionLine {
 #[derive(Clone, Debug)]
 struct PdfSelectionZone {
     bounds: PdfSelectionRect,
+    /// Unsplit glyph geometry used for keyboard line classification. Hit-test
+    /// half-zones are deliberately unsuitable for this purpose.
+    line_bounds: PdfSelectionRect,
     page_bounds: (f32, f32, f32, f32),
     character: usize,
     caret_x: f32,
+    caret_y: f32,
+    vertical: bool,
     visual_caret: bool,
     endpoint: PdfSelectionEndpoint,
 }
@@ -97,6 +104,7 @@ pub struct PdfSelectionSnapshot {
     text: String,
     text_mapping_complete: bool,
     rows: Vec<PdfSelectionRow>,
+    lines: Vec<PdfSelectionRow>,
 }
 
 impl PdfSelectionSnapshot {
@@ -160,7 +168,7 @@ impl PdfSelectionSnapshot {
     /// Visual lines and their retained caret positions, as classified by the
     /// PDF extractor. Consumers must not reconstruct lines from glyph bounds.
     pub fn visual_lines(&self) -> Vec<PdfSelectionLine> {
-        self.rows
+        self.lines
             .iter()
             .map(|row| {
                 let mut carets = row
@@ -174,7 +182,23 @@ impl PdfSelectionSnapshot {
                         bottom: row.bounds.bottom,
                     })
                     .collect::<Vec<_>>();
-                carets.sort_by(|left, right| left.x.total_cmp(&right.x));
+                if row.zones.first().is_some_and(|zone| zone.vertical) {
+                    carets.sort_by(|left, right| {
+                        let left_y = row
+                            .zones
+                            .iter()
+                            .find(|zone| zone.endpoint.character == left.character)
+                            .map_or(0.0, |zone| zone.caret_y);
+                        let right_y = row
+                            .zones
+                            .iter()
+                            .find(|zone| zone.endpoint.character == right.character)
+                            .map_or(0.0, |zone| zone.caret_y);
+                        left_y.total_cmp(&right_y)
+                    });
+                } else {
+                    carets.sort_by(|left, right| left.x.total_cmp(&right.x));
+                }
                 carets
                     .dedup_by(|left, right| left.character == right.character && left.x == right.x);
                 PdfSelectionLine { carets }
@@ -202,6 +226,12 @@ impl PdfSelectionSnapshot {
                 .rows
                 .iter()
                 .map(|row| row.zones.capacity() * std::mem::size_of::<PdfSelectionZone>())
+                .sum::<usize>()
+            + self.lines.capacity() * std::mem::size_of::<PdfSelectionRow>()
+            + self
+                .lines
+                .iter()
+                .map(|line| line.zones.capacity() * std::mem::size_of::<PdfSelectionZone>())
                 .sum::<usize>()
     }
 }
@@ -480,6 +510,31 @@ mod tests {
     }
 
     #[test]
+    fn annotation_rectangle_batches_share_transform_and_cancel() {
+        let document = PdfDoc::from_bytes(selectable_pdf("AB")).unwrap();
+        let canonical = vec![(10.0, 20.0, 30.0, 40.0)];
+        let expected = document
+            .page_rectangles_to_pixels(0, 1.0, &canonical)
+            .unwrap();
+        let batches = document
+            .page_rectangle_batches_to_pixels(
+                &[(0, canonical.clone()), (0, canonical)],
+                1.0,
+                &|| false,
+            )
+            .unwrap();
+
+        assert_eq!(batches, vec![expected.clone(), expected]);
+        assert!(
+            document
+                .page_rectangle_batches_to_pixels(&[(0, Vec::new())], 1.0, &|| true)
+                .unwrap_err()
+                .to_string()
+                .contains("cancelled")
+        );
+    }
+
+    #[test]
     fn decomposed_accent_has_no_interior_caret_boundary() {
         let ranges = grapheme_ranges("e\u{301}x");
         assert_eq!(ranges, vec![0..2, 2..3]);
@@ -496,9 +551,17 @@ mod tests {
                 right: character as f32 + 1.0,
                 bottom,
             },
+            line_bounds: PdfSelectionRect {
+                left: character as f32,
+                top,
+                right: character as f32 + 1.0,
+                bottom,
+            },
             page_bounds: (0.0, 0.0, 1.0, 1.0),
             character,
             caret_x: character as f32,
+            caret_y: (top + bottom) / 2.0,
+            vertical: false,
             visual_caret: true,
             endpoint: PdfSelectionEndpoint {
                 underlying_character: character,
@@ -717,6 +780,40 @@ mod tests {
     }
 
     #[test]
+    fn rotated_run_uses_unsplit_glyphs_for_one_keyboard_line() {
+        for (matrix, rotation) in [
+            ("0 1 -1 0", 0),
+            ("0 -1 1 0", 0),
+            ("1 0 0 1", 90),
+            ("1 0 0 1", 270),
+        ] {
+            let document = PdfDoc::from_bytes(selectable_pdf_content_with_rotation(
+                &format!("BT /F1 24 Tf {matrix} 180 80 Tm (AB) Tj ET"),
+                rotation,
+            ))
+            .unwrap();
+            let snapshot = document.selection_snapshot(0, 1.0).unwrap();
+            let indexes = snapshot
+                .text()
+                .chars()
+                .enumerate()
+                .filter_map(|(index, character)| "AB".contains(character).then_some(index))
+                .collect::<Vec<_>>();
+            let lines = snapshot.visual_lines();
+
+            assert_eq!(lines.len(), 1, "matrix={matrix}, rotation={rotation}");
+            let offsets = lines[0]
+                .carets
+                .iter()
+                .map(|caret| caret.character)
+                .collect::<Vec<_>>();
+            assert!(offsets.contains(&indexes[0]));
+            assert!(offsets.contains(&(indexes[1] + 1)));
+            assert_eq!(offsets.len(), 3, "shared run edges are deduplicated");
+        }
+    }
+
+    #[test]
     fn expanded_ligature_subdivisions_reach_the_full_caret_range() {
         let bounds = super::PdfSelectionRect {
             left: 0.0,
@@ -742,6 +839,7 @@ mod tests {
             bitmap_height: 10,
             text: "fi".into(),
             text_mapping_complete: true,
+            lines: super::pdf_keyboard_lines(zones.clone()),
             rows: super::pdf_selection_rows(zones),
         };
 
@@ -778,6 +876,7 @@ mod tests {
             bitmap_height: 50,
             text: "ABC".into(),
             text_mapping_complete: true,
+            lines: super::pdf_keyboard_lines(zones.clone()),
             rows: super::pdf_selection_rows(zones),
         };
 
@@ -826,6 +925,7 @@ mod tests {
             bitmap_height: 10,
             text: "e\u{301}".into(),
             text_mapping_complete: true,
+            lines: super::pdf_keyboard_lines(zones.clone()),
             rows: super::pdf_selection_rows(zones),
         };
 
@@ -1536,33 +1636,54 @@ impl PdfDoc {
         scale: f32,
         rectangles: &[(f32, f32, f32, f32)],
     ) -> Result<Vec<PdfSelectionRect>> {
-        if index >= self.page_count {
-            anyhow::bail!(
-                "page index {index} out of range (total: {})",
-                self.page_count
-            );
-        }
-        let (pt_w, pt_h) = self.page_sizes[index];
-        let (pixel_w, pixel_h) = validate_pdf_bitmap_size(pt_w, pt_h, scale)?;
-        let config = PdfRenderConfig::new()
-            .set_target_width(pixel_w)
-            .set_maximum_height(pixel_h)
-            .use_lcd_text_rendering(true);
+        self.page_rectangle_batches_to_pixels(&[(index, rectangles.to_vec())], scale, &|| false)
+            .map(|mut batches| batches.pop().unwrap_or_default())
+    }
+
+    /// Resolve several annotation rectangle sets with one PDFium document load.
+    pub fn page_rectangle_batches_to_pixels(
+        &self,
+        batches: &[PdfPageRectangleBatch],
+        scale: f32,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<Vec<PdfSelectionRect>>> {
+        check_cancelled(Some(is_cancelled))?;
         let pdfium = create_pdfium()?;
         let document = pdfium.load_pdf_from_byte_slice(&self.data, None)?;
-        let page = document.pages().get(index as u16)?;
-        rectangles
+        batches
             .iter()
-            .map(|&(left, bottom, right, top)| {
-                let (left, top, right, bottom) =
-                    page_rect_to_pixels(&page, left, bottom, right, top, &config)
-                        .ok_or_else(|| anyhow::anyhow!("failed to transform PDF annotation"))?;
-                Ok(PdfSelectionRect {
-                    left: left.clamp(0, pixel_w as i32) as f32,
-                    top: top.clamp(0, pixel_h as i32) as f32,
-                    right: right.clamp(0, pixel_w as i32) as f32,
-                    bottom: bottom.clamp(0, pixel_h as i32) as f32,
-                })
+            .map(|(index, rectangles)| {
+                check_cancelled(Some(is_cancelled))?;
+                let index = *index;
+                if index >= self.page_count {
+                    anyhow::bail!(
+                        "page index {index} out of range (total: {})",
+                        self.page_count
+                    );
+                }
+                let (pt_w, pt_h) = self.page_sizes[index];
+                let (pixel_w, pixel_h) = validate_pdf_bitmap_size(pt_w, pt_h, scale)?;
+                let config = PdfRenderConfig::new()
+                    .set_target_width(pixel_w)
+                    .set_maximum_height(pixel_h)
+                    .use_lcd_text_rendering(true);
+                let page = document.pages().get(index as u16)?;
+                rectangles
+                    .iter()
+                    .map(|&(left, bottom, right, top)| {
+                        let (left, top, right, bottom) =
+                            page_rect_to_pixels(&page, left, bottom, right, top, &config)
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("failed to transform PDF annotation")
+                                })?;
+                        Ok(PdfSelectionRect {
+                            left: left.clamp(0, pixel_w) as f32,
+                            top: top.clamp(0, pixel_h) as f32,
+                            right: right.clamp(0, pixel_w) as f32,
+                            bottom: bottom.clamp(0, pixel_h) as f32,
+                        })
+                    })
+                    .collect()
             })
             .collect()
     }
@@ -1731,6 +1852,7 @@ impl PdfDoc {
             bitmap_height,
             text: owned_text,
             text_mapping_complete,
+            lines: pdf_keyboard_lines(zones.clone()),
             rows: pdf_selection_rows(zones),
         };
         if snapshot.retained_bytes() > PDF_SELECTION_MAX_RETAINED_BYTES {
@@ -2094,9 +2216,18 @@ fn append_pdf_glyph_zones(
             };
             zones.push(PdfSelectionZone {
                 bounds: selection_subdivision(bounds, vertical, physical_half, half_count),
+                line_bounds: bounds,
                 page_bounds: geometry.page_bounds,
                 character: geometry.character,
                 caret_x,
+                caret_y: if vertical {
+                    bounds.top
+                        + (bounds.bottom - bounds.top) * physical_boundary as f32
+                            / glyph.len() as f32
+                } else {
+                    (bounds.top + bounds.bottom) / 2.0
+                },
+                vertical,
                 visual_caret: true,
                 endpoint: PdfSelectionEndpoint {
                     underlying_character: geometry.character,
@@ -2166,6 +2297,55 @@ fn pdf_selection_rows(mut zones: Vec<PdfSelectionZone>) -> Vec<PdfSelectionRow> 
         }
     }
     rows
+}
+
+fn pdf_keyboard_lines(mut zones: Vec<PdfSelectionZone>) -> Vec<PdfSelectionRow> {
+    zones.sort_by(|left, right| {
+        left.vertical
+            .cmp(&right.vertical)
+            .then_with(|| {
+                if left.vertical {
+                    left.line_bounds.left.total_cmp(&right.line_bounds.left)
+                } else {
+                    left.line_bounds.top.total_cmp(&right.line_bounds.top)
+                }
+            })
+            .then_with(|| {
+                if left.vertical {
+                    left.line_bounds.top.total_cmp(&right.line_bounds.top)
+                } else {
+                    left.line_bounds.left.total_cmp(&right.line_bounds.left)
+                }
+            })
+    });
+    let mut lines: Vec<PdfSelectionRow> = Vec::new();
+    for zone in zones {
+        let same_line = |line: &&mut PdfSelectionRow| {
+            line.zones
+                .first()
+                .is_some_and(|first| first.vertical == zone.vertical)
+                && if zone.vertical {
+                    zone.line_bounds.right > line.bounds.left
+                        && zone.line_bounds.left < line.bounds.right
+                } else {
+                    zone.line_bounds.bottom > line.bounds.top
+                        && zone.line_bounds.top < line.bounds.bottom
+                }
+        };
+        if let Some(line) = lines.iter_mut().find(same_line) {
+            line.bounds.left = line.bounds.left.min(zone.line_bounds.left);
+            line.bounds.top = line.bounds.top.min(zone.line_bounds.top);
+            line.bounds.right = line.bounds.right.max(zone.line_bounds.right);
+            line.bounds.bottom = line.bounds.bottom.max(zone.line_bounds.bottom);
+            line.zones.push(zone);
+        } else {
+            lines.push(PdfSelectionRow {
+                bounds: zone.line_bounds,
+                zones: vec![zone],
+            });
+        }
+    }
+    lines
 }
 
 fn searchable_page_text_bounded(

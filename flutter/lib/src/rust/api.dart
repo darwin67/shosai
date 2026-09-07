@@ -35,6 +35,7 @@ abstract class FlutterBridge implements RustOpaqueInterface {
 
   Future<List<FlutterAnnotation>> listAnnotations({
     required FlutterDocumentHandle document,
+    required BigInt cancellationId,
   });
 
   factory FlutterBridge() => RustLib.instance.api.crateApiFlutterBridgeNew();

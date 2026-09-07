@@ -106,6 +106,7 @@ abstract class RustLibApi extends BaseApi {
   Future<List<FlutterAnnotation>> crateApiFlutterBridgeListAnnotations({
     required FlutterBridge that,
     required FlutterDocumentHandle document,
+    required BigInt cancellationId,
   });
 
   FlutterBridge crateApiFlutterBridgeNew();
@@ -390,6 +391,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<List<FlutterAnnotation>> crateApiFlutterBridgeListAnnotations({
     required FlutterBridge that,
     required FlutterDocumentHandle document,
+    required BigInt cancellationId,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -399,10 +401,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
                 that,
               );
           var arg1 = cst_encode_box_autoadd_flutter_document_handle(document);
+          var arg2 = cst_encode_u_64(cancellationId);
           return wire.wire__crate__api__FlutterBridge_list_annotations(
             port_,
             arg0,
             arg1,
+            arg2,
           );
         },
         codec: DcoCodec(
@@ -410,7 +414,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: dco_decode_flutter_bridge_error,
         ),
         constMeta: kCrateApiFlutterBridgeListAnnotationsConstMeta,
-        argValues: [that, document],
+        argValues: [that, document, cancellationId],
         apiImpl: this,
       ),
     );
@@ -419,7 +423,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiFlutterBridgeListAnnotationsConstMeta =>
       const TaskConstMeta(
         debugName: "FlutterBridge_list_annotations",
-        argNames: ["that", "document"],
+        argNames: ["that", "document", "cancellationId"],
       );
 
   @override
@@ -2493,9 +2497,11 @@ class FlutterBridgeImpl extends RustOpaque implements FlutterBridge {
 
   Future<List<FlutterAnnotation>> listAnnotations({
     required FlutterDocumentHandle document,
+    required BigInt cancellationId,
   }) => RustLib.instance.api.crateApiFlutterBridgeListAnnotations(
     that: this,
     document: document,
+    cancellationId: cancellationId,
   );
 
   Future<FlutterDocumentSummary> openDocument({
