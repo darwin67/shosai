@@ -15,6 +15,7 @@ typedef PageDecoder =
 
 typedef NoteEditor = Future<String?> Function(String? initialValue);
 typedef ReaderFocusAdapter = void Function(ReaderFocusTarget target);
+typedef SelectionCopier = Future<void> Function(String text);
 
 const _unchanged = Object();
 
@@ -65,6 +66,21 @@ final class ReaderModel {
   final String? error;
   final bool busy;
   final int generation;
+
+  String? get selectedText {
+    final surface = selectionSurface;
+    final first = anchor;
+    final second = focus;
+    if (surface == null || first == null || second == null || first == second) {
+      return null;
+    }
+    final start = first < second ? first : second;
+    final end = first < second ? second : first;
+    final scalars = surface.text.runes.toList(growable: false);
+    if (start < 0 || end > scalars.length) return null;
+    final text = String.fromCharCodes(scalars.sublist(start, end));
+    return text.contains('\u{fffd}') ? null : text;
+  }
 
   ReaderModel copyWith({
     Object? document = _unchanged,
@@ -177,15 +193,29 @@ final class ReaderSelectionExtended extends ReaderMessage {
 }
 
 final class ReaderSelectionPointerStarted extends ReaderMessage {
-  const ReaderSelectionPointerStarted(this.pointer, this.offset);
+  const ReaderSelectionPointerStarted(
+    this.pointer,
+    this.offset, {
+    this.x,
+    this.y,
+  });
   final int pointer;
   final int offset;
+  final double? x;
+  final double? y;
 }
 
 final class ReaderSelectionPointerMoved extends ReaderMessage {
-  const ReaderSelectionPointerMoved(this.pointer, this.offset);
+  const ReaderSelectionPointerMoved(
+    this.pointer,
+    this.offset, {
+    this.x,
+    this.y,
+  });
   final int pointer;
   final int offset;
+  final double? x;
+  final double? y;
 }
 
 final class ReaderSelectionPointerEnded extends ReaderMessage {
@@ -212,7 +242,46 @@ final class ReaderSelectionActionsRequested extends ReaderMessage {
 }
 
 final class ReaderSelectionCommitted extends ReaderMessage {
-  const ReaderSelectionCommitted();
+  const ReaderSelectionCommitted({
+    this.color = FlutterHighlightColor.yellow,
+    this.body,
+  });
+  final FlutterHighlightColor color;
+  final String? body;
+}
+
+final class ReaderSelectionNoteRequested extends ReaderMessage {
+  const ReaderSelectionNoteRequested();
+}
+
+final class ReaderSelectionCopyRequested extends ReaderMessage {
+  const ReaderSelectionCopyRequested();
+}
+
+final class _ReaderSelectionNoteCompleted extends ReaderMessage {
+  const _ReaderSelectionNoteCompleted(
+    this.generation,
+    this.revision,
+    this.selectionRevision,
+    this.body,
+  );
+  final int generation;
+  final int revision;
+  final int selectionRevision;
+  final String body;
+}
+
+final class _ReaderSelectionEffectFailed extends ReaderMessage {
+  const _ReaderSelectionEffectFailed(
+    this.generation,
+    this.revision,
+    this.selectionRevision,
+    this.error,
+  );
+  final int generation;
+  final int revision;
+  final int selectionRevision;
+  final String error;
 }
 
 final class ReaderAnnotationUpdated extends ReaderMessage {
@@ -370,15 +439,18 @@ final class ReaderController implements Listenable {
     required PageDecoder decoder,
     NoteEditor? noteEditor,
     ReaderFocusAdapter? focusAdapter,
+    SelectionCopier? selectionCopier,
   }) : _bridge = bridge,
        _decoder = decoder,
        _noteEditor = noteEditor ?? ((_) async => null),
-       _focusAdapter = focusAdapter ?? ((_) {});
+       _focusAdapter = focusAdapter ?? ((_) {}),
+       _selectionCopier = selectionCopier ?? ((_) async {});
 
   final FlutterBridge _bridge;
   final PageDecoder _decoder;
   final NoteEditor _noteEditor;
   final ReaderFocusAdapter _focusAdapter;
+  final SelectionCopier _selectionCopier;
 
   ReaderModel _model = ReaderModel();
   BigInt? _activeCancellation;
@@ -413,9 +485,19 @@ final class ReaderController implements Listenable {
       case ReaderSelectionExtended():
         _selectionExtended(message.offset);
       case ReaderSelectionPointerStarted():
-        _selectionPointerStarted(message.pointer, message.offset);
+        _selectionPointerStarted(
+          message.pointer,
+          message.offset,
+          message.x,
+          message.y,
+        );
       case ReaderSelectionPointerMoved():
-        _selectionPointerMoved(message.pointer, message.offset);
+        _selectionPointerMoved(
+          message.pointer,
+          message.offset,
+          message.x,
+          message.y,
+        );
       case ReaderSelectionPointerEnded():
         _selectionPointerEnded(message.pointer);
       case ReaderSelectionPointerCancelled():
@@ -429,7 +511,23 @@ final class ReaderController implements Listenable {
           _focusAdapter(ReaderFocusTarget.actions);
         }
       case ReaderSelectionCommitted():
-        _selectionCommitted();
+        _selectionCommitted(message.color, message.body);
+      case ReaderSelectionNoteRequested():
+        _selectionNoteRequested();
+      case ReaderSelectionCopyRequested():
+        _selectionCopyRequested();
+      case _ReaderSelectionNoteCompleted():
+        if (_isCurrent(message.generation) &&
+            message.revision == _noteRevision &&
+            message.selectionRevision == _selectionRevision) {
+          _selectionCommitted(FlutterHighlightColor.yellow, message.body);
+        }
+      case _ReaderSelectionEffectFailed():
+        if (_isCurrent(message.generation) &&
+            message.revision == _noteRevision &&
+            message.selectionRevision == _selectionRevision) {
+          _emit(_model.copyWith(selectionError: message.error));
+        }
       case ReaderAnnotationUpdated():
         unawaited(_updateAnnotation(message));
       case ReaderAnnotationNoteRequested():
@@ -768,9 +866,20 @@ final class ReaderController implements Listenable {
     _emit(_model.copyWith(focus: offset));
   }
 
-  void _selectionPointerStarted(int pointer, int offset) {
-    if (_model.selectionSurface == null || _closing) return;
+  void _selectionPointerStarted(int pointer, int offset, double? x, double? y) {
+    final surface = _model.selectionSurface;
+    if (surface == null || _closing) return;
     _focusAdapter(ReaderFocusTarget.surface);
+    final anchor = _model.anchor;
+    final focus = _model.focus;
+    if (_model.selectionPhase == ReaderSelectionPhase.selected &&
+        anchor != null &&
+        focus != null &&
+        offset >= (anchor < focus ? anchor : focus) &&
+        offset <= (anchor < focus ? focus : anchor)) {
+      return;
+    }
+    final affinity = _caretNear(surface.visualLines, offset, x, y);
     _selectionRevision += 1;
     _emit(
       _model.copyWith(
@@ -778,18 +887,30 @@ final class ReaderController implements Listenable {
         anchor: offset,
         focus: offset,
         selectionPointer: pointer,
-        selectionVisualLine: null,
-        selectionPreferredX: null,
+        selectionVisualLine: affinity?.line,
+        selectionPreferredX: affinity?.preferredX,
       ),
     );
   }
 
-  void _selectionPointerMoved(int pointer, int offset) {
+  void _selectionPointerMoved(int pointer, int offset, double? x, double? y) {
     if (_model.selectionPhase != ReaderSelectionPhase.selecting ||
         _model.selectionPointer != pointer) {
       return;
     }
-    _emit(_model.copyWith(focus: offset));
+    final affinity = _caretNear(
+      _model.selectionSurface!.visualLines,
+      offset,
+      x,
+      y,
+    );
+    _emit(
+      _model.copyWith(
+        focus: offset,
+        selectionVisualLine: affinity?.line,
+        selectionPreferredX: affinity?.preferredX,
+      ),
+    );
   }
 
   void _selectionPointerEnded(int pointer) {
@@ -903,7 +1024,63 @@ final class ReaderController implements Listenable {
     );
   }
 
-  void _selectionCommitted() {
+  void _selectionNoteRequested() {
+    if (_model.selectionPhase != ReaderSelectionPhase.selected) return;
+    final generation = _model.generation;
+    final revision = ++_noteRevision;
+    final selectionRevision = _selectionRevision;
+    unawaited(() async {
+      try {
+        final body = await _noteEditor(null);
+        if (body != null) {
+          dispatch(
+            _ReaderSelectionNoteCompleted(
+              generation,
+              revision,
+              selectionRevision,
+              body,
+            ),
+          );
+        }
+      } catch (error) {
+        dispatch(
+          _ReaderSelectionEffectFailed(
+            generation,
+            revision,
+            selectionRevision,
+            error.toString(),
+          ),
+        );
+      }
+    }());
+  }
+
+  void _selectionCopyRequested() {
+    final text = _model.selectedText;
+    if (_model.selectionPhase != ReaderSelectionPhase.selected ||
+        text == null) {
+      return;
+    }
+    final generation = _model.generation;
+    final revision = ++_noteRevision;
+    final selectionRevision = _selectionRevision;
+    unawaited(() async {
+      try {
+        await _selectionCopier(text);
+      } catch (error) {
+        dispatch(
+          _ReaderSelectionEffectFailed(
+            generation,
+            revision,
+            selectionRevision,
+            error.toString(),
+          ),
+        );
+      }
+    }());
+  }
+
+  void _selectionCommitted(FlutterHighlightColor color, String? body) {
     final anchor = _model.anchor;
     final focus = _model.focus;
     if (_model.selectionPhase != ReaderSelectionPhase.selected ||
@@ -946,7 +1123,8 @@ final class ReaderController implements Listenable {
           unit: BigInt.zero,
           start: BigInt.from(selection.start),
           end: BigInt.from(selection.end),
-          color: FlutterHighlightColor.yellow,
+          color: color,
+          body: body,
           cancellationId: cancellation,
         );
         if (!_isCurrent(generation)) return;
@@ -1393,6 +1571,30 @@ int? _adjacentOffset(List<int> offsets, int? current, bool forward) {
     }
   }
   return null;
+}
+
+({int offset, int line, double preferredX})? _caretNear(
+  List<FlutterSelectionVisualLine> lines,
+  int offset,
+  double? x,
+  double? y,
+) {
+  if (x == null || y == null) return _caretForOffset(lines, offset, null);
+  ({int offset, int line, double preferredX})? best;
+  double? bestDistance;
+  for (var line = 0; line < lines.length; line += 1) {
+    for (final caret in lines[line].carets) {
+      if (caret.offset.toInt() != offset) continue;
+      final dy = y.clamp(caret.top, caret.bottom) - y;
+      final dx = caret.x - x;
+      final distance = dx * dx + dy * dy;
+      if (bestDistance == null || distance < bestDistance) {
+        best = (offset: offset, line: line, preferredX: caret.x);
+        bestDistance = distance;
+      }
+    }
+  }
+  return best;
 }
 
 ({int offset, int line, double preferredX})? _lineEdge(

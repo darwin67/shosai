@@ -1468,14 +1468,21 @@ void main() {
           await gesture.up();
           await tester.pump();
 
-          expect(find.text('Save highlight'), findsOneWidget);
+          expect(find.text('Yellow'), findsOneWidget);
+          expect(find.text('Copy'), findsOneWidget);
+          expect(find.text('Green'), findsOneWidget);
+          expect(find.text('Blue'), findsOneWidget);
+          expect(find.text('Pink'), findsOneWidget);
+          expect(find.text('Purple'), findsOneWidget);
+          expect(find.text('Add note'), findsOneWidget);
+          expect(find.text('Cancel'), findsOneWidget);
           expect(bridge.selectionCalls, beforeSelectionCalls);
           expect(bridge.renderCalls, beforeRenderCalls);
           expect(bridge.createCalls, 0);
           expect(painter().anchor, 1);
           expect(painter().focus, 8);
 
-          await tester.tap(find.text('Save highlight'));
+          await tester.tap(find.text('Yellow'));
           await tester.pumpAndSettle();
           expect(bridge.createCalls, 1);
           expect(bridge.createdRanges.single, (BigInt.one, BigInt.from(8)));
@@ -1519,18 +1526,16 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
     await tester.pump();
-    expect(find.text('Save highlight'), findsOneWidget);
+    expect(find.text('Yellow'), findsOneWidget);
 
     await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
     await tester.sendKeyEvent(LogicalKeyboardKey.f10);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
     await tester.pump();
-    expect(find.text('Save highlight'), findsOneWidget);
+    expect(find.text('Yellow'), findsOneWidget);
     expect(
       tester
-          .widget<FilledButton>(
-            find.widgetWithText(FilledButton, 'Save highlight'),
-          )
+          .widget<Focus>(find.byKey(const ValueKey('selection-actions-focus')))
           .focusNode!
           .hasFocus,
       isTrue,
@@ -1538,7 +1543,7 @@ void main() {
 
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pump();
-    expect(find.text('Save highlight'), findsNothing);
+    expect(find.text('Yellow'), findsNothing);
 
     await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
     await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
@@ -1618,9 +1623,46 @@ void main() {
                 .painter!
             as PagePainter;
     expect(painter.anchor, isNull);
-    expect(find.text('Save highlight'), findsNothing);
+    expect(find.text('Yellow'), findsNothing);
     expect(bridge.createCalls, 0);
 
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('selection note action saves the entered note', (tester) async {
+    final bridge = _ControlledBridge(format: FlutterBookFormat.epub);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    final surface = find.byKey(const ValueKey('reader-selection-surface'));
+    final rect = tester.getRect(surface);
+    final side = rect.shortestSide;
+    final topLeft = rect.center - Offset(side / 2, side / 2);
+    final gesture = await tester.createGesture(
+      kind: ui.PointerDeviceKind.mouse,
+    );
+    await gesture.down(topLeft + Offset(side * .2, side * .2));
+    await gesture.moveBy(Offset(side * .5, side * .5));
+    await gesture.up();
+    await tester.pump();
+
+    await tester.tap(find.text('Add note'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'Remember this');
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    expect(bridge.storedAnnotations.single.body, 'Remember this');
+    expect(bridge.storedAnnotations.single.color, FlutterHighlightColor.yellow);
     await tester.pumpWidget(const SizedBox());
     await bridge.disposed.future;
   });
