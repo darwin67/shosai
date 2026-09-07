@@ -61,6 +61,7 @@ struct PdfSelectionZone {
     bounds: PdfSelectionRect,
     page_bounds: (f32, f32, f32, f32),
     character: usize,
+    caret_x: f32,
     endpoint: PdfSelectionEndpoint,
 }
 
@@ -166,13 +167,14 @@ impl PdfSelectionSnapshot {
                     .iter()
                     .map(|zone| PdfSelectionCaret {
                         character: zone.endpoint.character,
-                        x: (zone.bounds.left + zone.bounds.right) / 2.0,
+                        x: zone.caret_x,
                         top: row.bounds.top,
                         bottom: row.bounds.bottom,
                     })
                     .collect::<Vec<_>>();
                 carets.sort_by(|left, right| left.x.total_cmp(&right.x));
-                carets.dedup_by(|left, right| left.character == right.character);
+                carets
+                    .dedup_by(|left, right| left.character == right.character && left.x == right.x);
                 PdfSelectionLine { carets }
             })
             .collect()
@@ -452,6 +454,7 @@ mod tests {
             },
             page_bounds: (0.0, 0.0, 1.0, 1.0),
             character,
+            caret_x: character as f32,
             endpoint: PdfSelectionEndpoint {
                 underlying_character: character,
                 character,
@@ -699,6 +702,71 @@ mod tests {
 
         assert_eq!(snapshot.hit_test(5.0, 5.0).unwrap().character, 0);
         assert_eq!(snapshot.hit_test(35.0, 5.0).unwrap().character, 2);
+    }
+
+    #[test]
+    fn visual_lines_export_glyph_edges_and_vertical_targets() {
+        let geometry = |character, left, top, right, bottom| super::PdfCharacterGeometry {
+            bounds: super::PdfSelectionRect {
+                left,
+                top,
+                right,
+                bottom,
+            },
+            page_bounds: (left, top, right, bottom),
+            character,
+            page_x: (left + right) / 2.0,
+            page_y: (top + bottom) / 2.0,
+            orientation: Some((false, true)),
+            direction: Some(super::PdfTextDirection::LeftToRight),
+        };
+        let mut zones = Vec::new();
+        for glyph in [
+            geometry(0, 2.0, 4.0, 12.0, 14.0),
+            geometry(1, 12.0, 4.0, 32.0, 14.0),
+            geometry(2, 5.0, 30.0, 13.0, 42.0),
+        ] {
+            super::append_pdf_glyph_zones(&mut zones, &[glyph], false, true);
+        }
+        let snapshot = super::PdfSelectionSnapshot {
+            bitmap_width: 40,
+            bitmap_height: 50,
+            text: "ABC".into(),
+            text_mapping_complete: true,
+            rows: super::pdf_selection_rows(zones),
+        };
+
+        let lines = snapshot.visual_lines();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            lines[0]
+                .carets
+                .iter()
+                .map(|caret| (caret.character, caret.x))
+                .collect::<Vec<_>>(),
+            vec![(0, 2.0), (1, 12.0), (2, 32.0)]
+        );
+        assert!(
+            lines[0]
+                .carets
+                .iter()
+                .all(|caret| caret.top == 4.0 && caret.bottom == 14.0)
+        );
+        assert_eq!(lines[1].carets[0].top, 30.0);
+        assert_eq!(lines[1].carets[0].bottom, 42.0);
+    }
+
+    #[test]
+    fn genuine_replacement_character_keeps_text_mapping_complete() {
+        assert_eq!(
+            super::pdf_search_character(true, Some('\u{FFFD}')),
+            ('\u{FFFD}', true)
+        );
+        assert_eq!(super::pdf_search_character(true, None), ('\u{FFFD}', false));
+        assert_eq!(
+            super::pdf_search_character(false, Some('\u{FFFD}')),
+            ('\u{FFFD}', false)
+        );
     }
 
     #[test]
@@ -1869,10 +1937,23 @@ fn append_pdf_glyph_zones(
             } else {
                 half_count - logical_half - 1
             };
+            let logical_boundary = glyph_position + usize::from(caret > geometry.character);
+            let physical_boundary = if forward_positive {
+                logical_boundary
+            } else {
+                glyph.len() - logical_boundary
+            };
+            let caret_x = if vertical {
+                (bounds.left + bounds.right) / 2.0
+            } else {
+                bounds.left
+                    + (bounds.right - bounds.left) * physical_boundary as f32 / glyph.len() as f32
+            };
             zones.push(PdfSelectionZone {
                 bounds: selection_subdivision(bounds, vertical, physical_half, half_count),
                 page_bounds: geometry.page_bounds,
                 character: geometry.character,
+                caret_x,
                 endpoint: PdfSelectionEndpoint {
                     underlying_character: geometry.character,
                     character: caret,
@@ -1968,21 +2049,11 @@ fn searchable_page_text_bounded(
             || character.loose_bounds().is_ok_and(|bounds| {
                 page_bounds.is_some_and(|page_bounds| bounds.does_overlap(&page_bounds))
             });
-        let character = if visible {
-            match character
-                .unicode_char()
-                .filter(|character| *character != '\0')
-            {
-                Some(character) => character,
-                None => {
-                    complete = false;
-                    '\u{FFFD}'
-                }
-            }
-        } else {
-            complete = false;
-            '\u{FFFD}'
-        };
+        let (character, mapped) = pdf_search_character(
+            visible,
+            character.unicode_char().filter(|value| *value != '\0'),
+        );
+        complete &= mapped;
         let actual = result.len().saturating_add(character.len_utf8());
         if actual > max_bytes {
             return Err(BoundedPageTextError::Limit { actual });
@@ -1991,6 +2062,13 @@ fn searchable_page_text_bounded(
     }
 
     Ok((result, complete))
+}
+
+fn pdf_search_character(visible: bool, extracted: Option<char>) -> (char, bool) {
+    match (visible, extracted) {
+        (true, Some(character)) => (character, true),
+        _ => ('\u{FFFD}', false),
+    }
 }
 
 fn rect_to_pixels(

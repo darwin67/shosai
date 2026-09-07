@@ -179,6 +179,8 @@ enum ReaderSelectionMovement {
   nextLine,
   lineStart,
   lineEnd,
+  visualLeft,
+  visualRight,
 }
 
 final class ReaderSelection {
@@ -990,10 +992,22 @@ final class ReaderController implements Listenable {
       ReaderSelectionMovement.nextGrapheme ||
       ReaderSelectionMovement.nextWord ||
       ReaderSelectionMovement.nextLine ||
-      ReaderSelectionMovement.lineEnd => true,
+      ReaderSelectionMovement.lineEnd ||
+      ReaderSelectionMovement.visualRight => true,
       _ => false,
     };
     final current = _model.focus;
+    final horizontalMove = switch (movement) {
+      ReaderSelectionMovement.visualLeft ||
+      ReaderSelectionMovement.visualRight => _horizontalCaret(
+        surface.visualLines,
+        current,
+        _model.selectionVisualLine,
+        _model.selectionPreferredX,
+        movement == ReaderSelectionMovement.visualRight,
+      ),
+      _ => null,
+    };
     final lineMove = switch (movement) {
       ReaderSelectionMovement.previousLine ||
       ReaderSelectionMovement.nextLine => _lineOffset(
@@ -1021,6 +1035,7 @@ final class ReaderController implements Listenable {
     };
     final next =
         lineMove?.offset ??
+        horizontalMove?.offset ??
         switch (movement) {
           ReaderSelectionMovement.previousGrapheme ||
           ReaderSelectionMovement.nextGrapheme ||
@@ -1033,13 +1048,24 @@ final class ReaderController implements Listenable {
           ReaderSelectionMovement.previousLine ||
           ReaderSelectionMovement.nextLine ||
           ReaderSelectionMovement.lineStart ||
-          ReaderSelectionMovement.lineEnd => null,
+          ReaderSelectionMovement.lineEnd ||
+          ReaderSelectionMovement.visualLeft ||
+          ReaderSelectionMovement.visualRight => null,
         };
     if (next == null) return;
     final anchor =
-        _model.anchor ?? (forward ? graphemes.first : graphemes.last);
+        _model.anchor ??
+        horizontalMove?.origin ??
+        (forward ? graphemes.first : graphemes.last);
     final affinity =
         lineMove ??
+        (horizontalMove == null
+            ? null
+            : (
+                offset: horizontalMove.offset,
+                line: horizontalMove.line,
+                preferredX: horizontalMove.preferredX,
+              )) ??
         _caretForOffset(surface.visualLines, next, _model.selectionVisualLine);
     final vertical =
         movement == ReaderSelectionMovement.previousLine ||
@@ -1174,6 +1200,7 @@ final class ReaderController implements Listenable {
     final selectionRevision = _selectionRevision;
     if (_model.annotationOperations.isNotEmpty || _closing) return;
     final revision = ++_annotationRevision;
+    _noteRevision += 1;
     final operationId = 'create:${++_nextOperationId}';
     late final BigInt cancellation;
     try {
@@ -1240,14 +1267,17 @@ final class ReaderController implements Listenable {
         annotationsReady: annotationsReady,
         savedSelections: List.unmodifiable(
           annotations
-              .where((item) => item.unit == BigInt.zero)
-              .map(
-                (item) => ReaderSelection(
-                  item.start.toInt(),
-                  item.end.toInt(),
+              .where(
+                (item) => item.unit == BigInt.zero && item.textRange != null,
+              )
+              .map((item) {
+                final range = item.textRange!;
+                return ReaderSelection(
+                  range.start.toInt(),
+                  range.end.toInt(),
                   item.color,
-                ),
-              ),
+                );
+              }),
         ),
       ),
     );
@@ -1446,15 +1476,21 @@ final class ReaderController implements Listenable {
   void _navigateAnnotation(String id) {
     final item = _model.annotations.where((item) => item.id == id).firstOrNull;
     if (item != null && item.unit == BigInt.zero) {
+      _cancelSelectionCreates();
       _selectionRevision += 1;
+      final range = item.textRange;
       _emit(
         _model.copyWith(
-          anchor: item.start.toInt(),
-          focus: item.end.toInt(),
-          selectionPhase: ReaderSelectionPhase.selected,
+          anchor: range?.start.toInt(),
+          focus: range?.end.toInt(),
+          selectionPhase: range == null
+              ? ReaderSelectionPhase.idle
+              : ReaderSelectionPhase.selected,
           selectionPointer: null,
           selectionVisualLine: null,
           selectionPreferredX: null,
+          selectionActionError: null,
+          keyboardActionInvocation: false,
         ),
       );
       _focusAdapter(ReaderFocusTarget.surface);
@@ -1614,6 +1650,54 @@ int? _adjacentOffset(List<int> offsets, int? current, bool forward) {
   return null;
 }
 
+({int offset, int origin, int line, double preferredX})? _horizontalCaret(
+  List<FlutterSelectionVisualLine> lines,
+  int? current,
+  int? currentLine,
+  double? currentX,
+  bool right,
+) {
+  if (lines.isEmpty) return null;
+  var line = currentLine;
+  var index = -1;
+  if (current != null) {
+    final candidateLines = <int>[
+      if (line != null && line >= 0 && line < lines.length) line,
+      for (var candidate = 0; candidate < lines.length; candidate += 1)
+        if (candidate != line) candidate,
+    ];
+    for (final candidateLine in candidateLines) {
+      final carets = lines[candidateLine].carets;
+      for (var candidate = 0; candidate < carets.length; candidate += 1) {
+        if (carets[candidate].offset.toInt() != current) continue;
+        if (index < 0 ||
+            (currentX != null &&
+                (carets[candidate].x - currentX).abs() <
+                    (carets[index].x - currentX).abs())) {
+          line = candidateLine;
+          index = candidate;
+        }
+      }
+      if (index >= 0) break;
+    }
+  } else {
+    line = right ? 0 : lines.length - 1;
+    index = right ? 0 : lines[line].carets.length - 1;
+  }
+  if (line == null || index < 0) return null;
+  final carets = lines[line].carets;
+  final destination = index + (right ? 1 : -1);
+  if (destination < 0 || destination >= carets.length) return null;
+  final origin = carets[index];
+  final next = carets[destination];
+  return (
+    offset: next.offset.toInt(),
+    origin: origin.offset.toInt(),
+    line: line,
+    preferredX: next.x,
+  );
+}
+
 ({int offset, int line, double preferredX})? _lineOffset(
   List<FlutterSelectionVisualLine> lines,
   int? current,
@@ -1656,7 +1740,7 @@ int? _adjacentOffset(List<int> offsets, int? current, bool forward) {
   }
   final origin = _caretForOffset(lines, current, currentLine);
   if (origin == null) return null;
-  return _lineEdge(lines, origin.line, forward);
+  return _lineEdge(lines, origin.line, !forward);
 }
 
 ({int offset, int line, double preferredX})? _caretForOffset(

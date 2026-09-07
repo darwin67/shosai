@@ -217,8 +217,15 @@ void main() {
         color: FlutterHighlightColor.yellow,
         cancellationId: cancellation!,
       );
-      expect(created.start, endpoint.rangeStart);
-      expect(created.end, endpoint.rangeEnd);
+      expect(created.textRange?.start, endpoint.rangeStart);
+      expect(created.textRange?.end, endpoint.rangeEnd);
+      expect(created.quote, isNotEmpty);
+      if (expectedFormat == FlutterBookFormat.pdf) {
+        expect(created.rectangles, isNotNull);
+        expect(created.rectangles, isNotEmpty);
+      } else {
+        expect(created.rectangles, isEmpty);
+      }
       expect(await File(databasePath).exists(), isTrue);
 
       release();
@@ -227,6 +234,12 @@ void main() {
       expect(listed, hasLength(1));
       expect(listed.single.id, created.id);
       expect(listed.single.color, FlutterHighlightColor.yellow);
+      expect(listed.single.textRange, isNotNull);
+      expect(listed.single.quote, created.quote);
+      expect(
+        listed.single.rectangles,
+        orderedEquals(created.rectangles ?? const []),
+      );
 
       expect(
         await bridge!.updateAnnotation(

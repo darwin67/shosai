@@ -7,7 +7,7 @@ import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `cancellation`, `from_bridge`, `invalid_request`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
 // Rust type: RustOpaqueNom<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FlutterBridge>>
 abstract class FlutterBridge implements RustOpaqueInterface {
@@ -87,16 +87,18 @@ abstract class FlutterBridge implements RustOpaqueInterface {
 class FlutterAnnotation {
   final String id;
   final BigInt unit;
-  final BigInt start;
-  final BigInt end;
+  final FlutterAnnotationTextRange? textRange;
+  final String? quote;
+  final List<FlutterSelectionRect>? rectangles;
   final FlutterHighlightColor color;
   final String? body;
 
   const FlutterAnnotation({
     required this.id,
     required this.unit,
-    required this.start,
-    required this.end,
+    this.textRange,
+    this.quote,
+    this.rectangles,
     required this.color,
     this.body,
   });
@@ -105,8 +107,9 @@ class FlutterAnnotation {
   int get hashCode =>
       id.hashCode ^
       unit.hashCode ^
-      start.hashCode ^
-      end.hashCode ^
+      textRange.hashCode ^
+      quote.hashCode ^
+      rectangles.hashCode ^
       color.hashCode ^
       body.hashCode;
 
@@ -117,10 +120,29 @@ class FlutterAnnotation {
           runtimeType == other.runtimeType &&
           id == other.id &&
           unit == other.unit &&
-          start == other.start &&
-          end == other.end &&
+          textRange == other.textRange &&
+          quote == other.quote &&
+          rectangles == other.rectangles &&
           color == other.color &&
           body == other.body;
+}
+
+class FlutterAnnotationTextRange {
+  final BigInt start;
+  final BigInt end;
+
+  const FlutterAnnotationTextRange({required this.start, required this.end});
+
+  @override
+  int get hashCode => start.hashCode ^ end.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FlutterAnnotationTextRange &&
+          runtimeType == other.runtimeType &&
+          start == other.start &&
+          end == other.end;
 }
 
 enum FlutterBookFormat { pdf, epub, cbz }

@@ -4,8 +4,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use shosai_core::annotations::HighlightColor;
 use shosai_core::bridge::{
-    Bridge, BridgeAnnotation, BridgeError, BufferHandle, Cancellation, CreateAnnotationRequest,
-    DocumentHandle, OpenRequest, RenderRequest, SelectionHandle, SelectionSurface,
+    AnnotationTextRange, Bridge, BridgeAnnotation, BridgeError, BufferHandle, Cancellation,
+    CreateAnnotationRequest, DocumentHandle, OpenRequest, RenderRequest, SelectionHandle,
+    SelectionSurface,
 };
 use shosai_core::library::BookFormat;
 use thiserror::Error;
@@ -55,18 +56,47 @@ impl From<HighlightColor> for FlutterHighlightColor {
 pub struct FlutterAnnotation {
     pub id: String,
     pub unit: usize,
-    pub start: usize,
-    pub end: usize,
+    pub text_range: Option<FlutterAnnotationTextRange>,
+    pub quote: Option<String>,
+    pub rectangles: Option<Vec<FlutterSelectionRect>>,
     pub color: FlutterHighlightColor,
     pub body: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlutterAnnotationTextRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl From<AnnotationTextRange> for FlutterAnnotationTextRange {
+    fn from(value: AnnotationTextRange) -> Self {
+        Self {
+            start: value.start,
+            end: value.end,
+        }
+    }
+}
+
 impl From<BridgeAnnotation> for FlutterAnnotation {
     fn from(value: BridgeAnnotation) -> Self {
         Self {
             id: value.id,
             unit: value.unit,
-            start: value.start,
-            end: value.end,
+            text_range: value.text_range.map(Into::into),
+            quote: value.quote,
+            rectangles: Some(
+                value
+                    .rectangles
+                    .into_iter()
+                    .map(|rect| FlutterSelectionRect {
+                        left: rect.left,
+                        top: rect.top,
+                        right: rect.right,
+                        bottom: rect.bottom,
+                    })
+                    .collect(),
+            ),
             color: value.color.into(),
             body: value.body,
         }

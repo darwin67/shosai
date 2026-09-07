@@ -47,6 +47,10 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  FlutterAnnotationTextRange
+  dco_decode_box_autoadd_flutter_annotation_text_range(dynamic raw);
+
+  @protected
   FlutterBookFormat dco_decode_box_autoadd_flutter_book_format(dynamic raw);
 
   @protected
@@ -75,6 +79,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   FlutterAnnotation dco_decode_flutter_annotation(dynamic raw);
+
+  @protected
+  FlutterAnnotationTextRange dco_decode_flutter_annotation_text_range(
+    dynamic raw,
+  );
 
   @protected
   FlutterBookFormat dco_decode_flutter_book_format(dynamic raw);
@@ -140,6 +149,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<FlutterSelectionRect> dco_decode_list_flutter_selection_rect(
+    dynamic raw,
+  );
+
+  @protected
   List<FlutterSelectionVisualLine>
   dco_decode_list_flutter_selection_visual_line(dynamic raw);
 
@@ -153,12 +167,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
+  FlutterAnnotationTextRange?
+  dco_decode_opt_box_autoadd_flutter_annotation_text_range(dynamic raw);
+
+  @protected
   FlutterBookFormat? dco_decode_opt_box_autoadd_flutter_book_format(
     dynamic raw,
   );
 
   @protected
   FlutterRenderedBuffer? dco_decode_opt_box_autoadd_flutter_rendered_buffer(
+    dynamic raw,
+  );
+
+  @protected
+  List<FlutterSelectionRect>? dco_decode_opt_list_flutter_selection_rect(
     dynamic raw,
   );
 
@@ -202,6 +225,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  FlutterAnnotationTextRange
+  sse_decode_box_autoadd_flutter_annotation_text_range(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   FlutterBookFormat sse_decode_box_autoadd_flutter_book_format(
     SseDeserializer deserializer,
   );
@@ -236,6 +265,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   FlutterAnnotation sse_decode_flutter_annotation(SseDeserializer deserializer);
+
+  @protected
+  FlutterAnnotationTextRange sse_decode_flutter_annotation_text_range(
+    SseDeserializer deserializer,
+  );
 
   @protected
   FlutterBookFormat sse_decode_flutter_book_format(
@@ -331,6 +365,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<FlutterSelectionRect> sse_decode_list_flutter_selection_rect(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<FlutterSelectionVisualLine>
   sse_decode_list_flutter_selection_visual_line(SseDeserializer deserializer);
 
@@ -344,12 +383,23 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
+  FlutterAnnotationTextRange?
+  sse_decode_opt_box_autoadd_flutter_annotation_text_range(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   FlutterBookFormat? sse_decode_opt_box_autoadd_flutter_book_format(
     SseDeserializer deserializer,
   );
 
   @protected
   FlutterRenderedBuffer? sse_decode_opt_box_autoadd_flutter_rendered_buffer(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<FlutterSelectionRect>? sse_decode_opt_list_flutter_selection_rect(
     SseDeserializer deserializer,
   );
 
@@ -372,6 +422,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ffi.Pointer<wire_cst_list_prim_u_8_strict> cst_encode_String(String raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return cst_encode_list_prim_u_8_strict(utf8.encoder.convert(raw));
+  }
+
+  @protected
+  ffi.Pointer<wire_cst_flutter_annotation_text_range>
+  cst_encode_box_autoadd_flutter_annotation_text_range(
+    FlutterAnnotationTextRange raw,
+  ) {
+    // Codec=Cst (C-struct based), see doc to use other codecs
+    final ptr = wire.cst_new_box_autoadd_flutter_annotation_text_range();
+    cst_api_fill_to_wire_flutter_annotation_text_range(raw, ptr.ref);
+    return ptr;
   }
 
   @protected
@@ -465,6 +526,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
+  ffi.Pointer<wire_cst_list_flutter_selection_rect>
+  cst_encode_list_flutter_selection_rect(List<FlutterSelectionRect> raw) {
+    // Codec=Cst (C-struct based), see doc to use other codecs
+    final ans = wire.cst_new_list_flutter_selection_rect(raw.length);
+    for (var i = 0; i < raw.length; ++i) {
+      cst_api_fill_to_wire_flutter_selection_rect(raw[i], ans.ref.ptr[i]);
+    }
+    return ans;
+  }
+
+  @protected
   ffi.Pointer<wire_cst_list_flutter_selection_visual_line>
   cst_encode_list_flutter_selection_visual_line(
     List<FlutterSelectionVisualLine> raw,
@@ -509,6 +581,17 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
+  ffi.Pointer<wire_cst_flutter_annotation_text_range>
+  cst_encode_opt_box_autoadd_flutter_annotation_text_range(
+    FlutterAnnotationTextRange? raw,
+  ) {
+    // Codec=Cst (C-struct based), see doc to use other codecs
+    return raw == null
+        ? ffi.nullptr
+        : cst_encode_box_autoadd_flutter_annotation_text_range(raw);
+  }
+
+  @protected
   ffi.Pointer<ffi.Int32> cst_encode_opt_box_autoadd_flutter_book_format(
     FlutterBookFormat? raw,
   ) {
@@ -530,6 +613,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   }
 
   @protected
+  ffi.Pointer<wire_cst_list_flutter_selection_rect>
+  cst_encode_opt_list_flutter_selection_rect(List<FlutterSelectionRect>? raw) {
+    // Codec=Cst (C-struct based), see doc to use other codecs
+    return raw == null
+        ? ffi.nullptr
+        : cst_encode_list_flutter_selection_rect(raw);
+  }
+
+  @protected
   int cst_encode_u_64(BigInt raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return raw.toSigned(64).toInt();
@@ -539,6 +631,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int cst_encode_usize(BigInt raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return raw.toSigned(64).toInt();
+  }
+
+  @protected
+  void cst_api_fill_to_wire_box_autoadd_flutter_annotation_text_range(
+    FlutterAnnotationTextRange apiObj,
+    ffi.Pointer<wire_cst_flutter_annotation_text_range> wireObj,
+  ) {
+    cst_api_fill_to_wire_flutter_annotation_text_range(apiObj, wireObj.ref);
   }
 
   @protected
@@ -588,10 +688,25 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ) {
     wireObj.id = cst_encode_String(apiObj.id);
     wireObj.unit = cst_encode_usize(apiObj.unit);
-    wireObj.start = cst_encode_usize(apiObj.start);
-    wireObj.end = cst_encode_usize(apiObj.end);
+    wireObj.text_range =
+        cst_encode_opt_box_autoadd_flutter_annotation_text_range(
+          apiObj.textRange,
+        );
+    wireObj.quote = cst_encode_opt_String(apiObj.quote);
+    wireObj.rectangles = cst_encode_opt_list_flutter_selection_rect(
+      apiObj.rectangles,
+    );
     wireObj.color = cst_encode_flutter_highlight_color(apiObj.color);
     wireObj.body = cst_encode_opt_String(apiObj.body);
+  }
+
+  @protected
+  void cst_api_fill_to_wire_flutter_annotation_text_range(
+    FlutterAnnotationTextRange apiObj,
+    wire_cst_flutter_annotation_text_range wireObj,
+  ) {
+    wireObj.start = cst_encode_usize(apiObj.start);
+    wireObj.end = cst_encode_usize(apiObj.end);
   }
 
   @protected
@@ -809,6 +924,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_flutter_annotation_text_range(
+    FlutterAnnotationTextRange self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_flutter_book_format(
     FlutterBookFormat self,
     SseSerializer serializer,
@@ -850,6 +971,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_flutter_annotation(
     FlutterAnnotation self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_flutter_annotation_text_range(
+    FlutterAnnotationTextRange self,
     SseSerializer serializer,
   );
 
@@ -965,6 +1092,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_flutter_selection_rect(
+    List<FlutterSelectionRect> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_flutter_selection_visual_line(
     List<FlutterSelectionVisualLine> self,
     SseSerializer serializer,
@@ -986,6 +1119,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_flutter_annotation_text_range(
+    FlutterAnnotationTextRange? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_flutter_book_format(
     FlutterBookFormat? self,
     SseSerializer serializer,
@@ -994,6 +1133,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_flutter_rendered_buffer(
     FlutterRenderedBuffer? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_list_flutter_selection_rect(
+    List<FlutterSelectionRect>? self,
     SseSerializer serializer,
   );
 
@@ -1607,6 +1752,25 @@ class RustLibWire implements BaseWire {
       _rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerFlutterBridgePtr
           .asFunction<void Function(ffi.Pointer<ffi.Void>)>();
 
+  ffi.Pointer<wire_cst_flutter_annotation_text_range>
+  cst_new_box_autoadd_flutter_annotation_text_range() {
+    return _cst_new_box_autoadd_flutter_annotation_text_range();
+  }
+
+  late final _cst_new_box_autoadd_flutter_annotation_text_rangePtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Pointer<wire_cst_flutter_annotation_text_range> Function()
+        >
+      >(
+        'frbgen_shosai_flutter_cst_new_box_autoadd_flutter_annotation_text_range',
+      );
+  late final _cst_new_box_autoadd_flutter_annotation_text_range =
+      _cst_new_box_autoadd_flutter_annotation_text_rangePtr
+          .asFunction<
+            ffi.Pointer<wire_cst_flutter_annotation_text_range> Function()
+          >();
+
   ffi.Pointer<ffi.Int32> cst_new_box_autoadd_flutter_book_format(int value) {
     return _cst_new_box_autoadd_flutter_book_format(value);
   }
@@ -1754,6 +1918,23 @@ class RustLibWire implements BaseWire {
             ffi.Pointer<wire_cst_list_flutter_selection_endpoint> Function(int)
           >();
 
+  ffi.Pointer<wire_cst_list_flutter_selection_rect>
+  cst_new_list_flutter_selection_rect(int len) {
+    return _cst_new_list_flutter_selection_rect(len);
+  }
+
+  late final _cst_new_list_flutter_selection_rectPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Pointer<wire_cst_list_flutter_selection_rect> Function(ffi.Int32)
+        >
+      >('frbgen_shosai_flutter_cst_new_list_flutter_selection_rect');
+  late final _cst_new_list_flutter_selection_rect =
+      _cst_new_list_flutter_selection_rectPtr
+          .asFunction<
+            ffi.Pointer<wire_cst_list_flutter_selection_rect> Function(int)
+          >();
+
   ffi.Pointer<wire_cst_list_flutter_selection_visual_line>
   cst_new_list_flutter_selection_visual_line(int len) {
     return _cst_new_list_flutter_selection_visual_line(len);
@@ -1865,6 +2046,14 @@ final class wire_cst_flutter_selection_handle extends ffi.Struct {
   external int id;
 }
 
+final class wire_cst_flutter_annotation_text_range extends ffi.Struct {
+  @ffi.UintPtr()
+  external int start;
+
+  @ffi.UintPtr()
+  external int end;
+}
+
 final class wire_cst_flutter_rendered_buffer extends ffi.Struct {
   external wire_cst_flutter_buffer_handle handle;
 
@@ -1878,17 +2067,38 @@ final class wire_cst_flutter_rendered_buffer extends ffi.Struct {
   external int byte_len;
 }
 
+final class wire_cst_flutter_selection_rect extends ffi.Struct {
+  @ffi.Float()
+  external double left;
+
+  @ffi.Float()
+  external double top;
+
+  @ffi.Float()
+  external double right;
+
+  @ffi.Float()
+  external double bottom;
+}
+
+final class wire_cst_list_flutter_selection_rect extends ffi.Struct {
+  external ffi.Pointer<wire_cst_flutter_selection_rect> ptr;
+
+  @ffi.Int32()
+  external int len;
+}
+
 final class wire_cst_flutter_annotation extends ffi.Struct {
   external ffi.Pointer<wire_cst_list_prim_u_8_strict> id;
 
   @ffi.UintPtr()
   external int unit;
 
-  @ffi.UintPtr()
-  external int start;
+  external ffi.Pointer<wire_cst_flutter_annotation_text_range> text_range;
 
-  @ffi.UintPtr()
-  external int end;
+  external ffi.Pointer<wire_cst_list_prim_u_8_strict> quote;
+
+  external ffi.Pointer<wire_cst_list_flutter_selection_rect> rectangles;
 
   @ffi.Int32()
   external int color;
@@ -1922,20 +2132,6 @@ final class wire_cst_list_flutter_selection_caret extends ffi.Struct {
 
   @ffi.Int32()
   external int len;
-}
-
-final class wire_cst_flutter_selection_rect extends ffi.Struct {
-  @ffi.Float()
-  external double left;
-
-  @ffi.Float()
-  external double top;
-
-  @ffi.Float()
-  external double right;
-
-  @ffi.Float()
-  external double bottom;
 }
 
 final class wire_cst_flutter_selection_endpoint extends ffi.Struct {

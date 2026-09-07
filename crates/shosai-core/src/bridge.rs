@@ -169,10 +169,20 @@ pub struct SelectionSurface {
 pub struct BridgeAnnotation {
     pub id: String,
     pub unit: usize,
-    pub start: usize,
-    pub end: usize,
+    /// Text-backed half-open range. Geometry-only PDF annotations have no range.
+    pub text_range: Option<AnnotationTextRange>,
+    /// Normalized exact quote when the source text mapping was complete.
+    pub quote: Option<String>,
+    /// Rust-produced PDF display geometry; empty for EPUB annotations.
+    pub rectangles: Vec<SelectionRect>,
     pub color: HighlightColor,
     pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnnotationTextRange {
+    pub start: usize,
+    pub end: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -1828,22 +1838,45 @@ fn storage_error(error: impl std::fmt::Display) -> BridgeError {
 }
 
 fn annotation_dto(annotation: Annotation) -> BridgeAnnotation {
-    let (unit, start, end) = match annotation.target {
+    let quote = annotation
+        .quote
+        .as_ref()
+        .and_then(|quote| quote.original.clone());
+    let (unit, text_range, rectangles) = match annotation.target {
         AnnotationTarget::Epub(anchor) => (
             anchor.spine_occurrence as usize,
-            anchor.scalar_start as usize,
-            anchor.scalar_end as usize,
+            Some(AnnotationTextRange {
+                start: anchor.scalar_start as usize,
+                end: anchor.scalar_end as usize,
+            }),
+            Vec::new(),
         ),
         AnnotationTarget::Pdf(anchor) => {
-            let (start, end) = anchor.character_range.unwrap_or((0, 0));
-            (anchor.page as usize, start as usize, end as usize)
+            let text_range = anchor
+                .character_range
+                .map(|(start, end)| AnnotationTextRange {
+                    start: start as usize,
+                    end: end as usize,
+                });
+            let rectangles = anchor
+                .rectangles
+                .into_iter()
+                .map(|rect| SelectionRect {
+                    left: rect.left,
+                    top: rect.bottom,
+                    right: rect.right,
+                    bottom: rect.top,
+                })
+                .collect();
+            (anchor.page as usize, text_range, rectangles)
         }
     };
     BridgeAnnotation {
         id: annotation.id.to_string(),
         unit,
-        start,
-        end,
+        text_range,
+        quote,
+        rectangles,
         color: annotation.color,
         body: annotation.body,
     }
@@ -2062,6 +2095,44 @@ mod tests {
     fn word_stops_skip_standalone_whitespace_and_punctuation() {
         let (_, words) = navigation_boundaries("one,  two?! 三");
         assert_eq!(words, vec![0, 3, 6, 9, 12, 13]);
+    }
+
+    #[test]
+    fn geometry_only_pdf_annotation_dto_does_not_invent_text() {
+        let annotation = Annotation {
+            id: AnnotationId::new(),
+            book_id: None,
+            local_path: Some("sample.pdf".into()),
+            fingerprint: DocumentFingerprint::new("sha256", 1, vec![7; 32]).unwrap(),
+            quote: None,
+            target: AnnotationTarget::Pdf(
+                PdfAnchor::new(
+                    2,
+                    None,
+                    vec![PageRect::new(10.0, 20.0, 30.0, 40.0).unwrap()],
+                )
+                .unwrap(),
+            ),
+            color: HighlightColor::Yellow,
+            body: None,
+            provenance: None,
+            created_at: "now".into(),
+            modified_at: "now".into(),
+            deleted_at: None,
+        };
+
+        let dto = annotation_dto(annotation);
+        assert_eq!(dto.text_range, None);
+        assert_eq!(dto.quote, None);
+        assert_eq!(
+            dto.rectangles,
+            vec![SelectionRect {
+                left: 10.0,
+                top: 20.0,
+                right: 30.0,
+                bottom: 40.0,
+            }]
+        );
     }
 
     #[test]

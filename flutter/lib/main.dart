@@ -295,7 +295,9 @@ class _DocumentView extends StatelessWidget {
           children: [
             Expanded(
               child: TapRegion(
-                onTapOutside: (_) => dispatch(const ReaderSelectionCancelled()),
+                onTapOutside: (event) => dispatch(
+                  ReaderSelectionPointerPressedOutside(event.pointer),
+                ),
                 child: LayoutBuilder(
                   builder: (context, constraints) => Stack(
                     children: [
@@ -315,7 +317,7 @@ class _DocumentView extends StatelessWidget {
                               shift: true,
                             ): () => dispatch(
                               const ReaderSelectionKeyboardExtended(
-                                ReaderSelectionMovement.previousGrapheme,
+                                ReaderSelectionMovement.visualLeft,
                               ),
                             ),
                             const SingleActivator(
@@ -323,7 +325,7 @@ class _DocumentView extends StatelessWidget {
                               shift: true,
                             ): () => dispatch(
                               const ReaderSelectionKeyboardExtended(
-                                ReaderSelectionMovement.nextGrapheme,
+                                ReaderSelectionMovement.visualRight,
                               ),
                             ),
                             const SingleActivator(
@@ -537,62 +539,68 @@ class _SelectionActions extends StatelessWidget {
   final FocusNode focusNode;
 
   @override
-  Widget build(BuildContext context) => Semantics(
-    key: const ValueKey('selection-actions'),
-    label: 'Selection actions',
-    container: true,
-    child: Material(
-      elevation: 4,
-      borderRadius: BorderRadius.circular(12),
-      child: Padding(
-        padding: const EdgeInsets.all(8),
-        child: SingleChildScrollView(
-          child: Wrap(
-            alignment: WrapAlignment.center,
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              TextButton(
-                focusNode: model.selectedText == null ? null : focusNode,
-                onPressed: model.selectedText == null
-                    ? null
-                    : () => dispatch(const ReaderSelectionCopyRequested()),
-                child: const Text('Copy'),
-              ),
-              for (final color in FlutterHighlightColor.values)
-                FilledButton(
-                  focusNode:
-                      model.selectedText == null &&
-                          color == FlutterHighlightColor.yellow
+  Widget build(BuildContext context) {
+    final copyEnabled = model.selectedText != null;
+    final persistenceEnabled =
+        !model.busy &&
+        model.annotationsReady &&
+        model.annotationOperations.isEmpty;
+    return Semantics(
+      key: const ValueKey('selection-actions'),
+      label: 'Selection actions',
+      container: true,
+      child: Material(
+        elevation: 4,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.all(8),
+          child: SingleChildScrollView(
+            child: Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                TextButton(
+                  focusNode: copyEnabled ? focusNode : null,
+                  onPressed: !copyEnabled
+                      ? null
+                      : () => dispatch(const ReaderSelectionCopyRequested()),
+                  child: const Text('Copy'),
+                ),
+                for (final color in FlutterHighlightColor.values)
+                  FilledButton(
+                    focusNode:
+                        !copyEnabled &&
+                            persistenceEnabled &&
+                            color == FlutterHighlightColor.yellow
+                        ? focusNode
+                        : null,
+                    onPressed: !persistenceEnabled
+                        ? null
+                        : () =>
+                              dispatch(ReaderSelectionCommitted(color: color)),
+                    child: Text(_colorName(color)),
+                  ),
+                TextButton(
+                  onPressed: !persistenceEnabled
+                      ? null
+                      : () => dispatch(const ReaderSelectionNoteRequested()),
+                  child: const Text('Add note'),
+                ),
+                TextButton(
+                  focusNode: !copyEnabled && !persistenceEnabled
                       ? focusNode
                       : null,
-                  onPressed:
-                      model.busy ||
-                          !model.annotationsReady ||
-                          model.annotationOperations.isNotEmpty
-                      ? null
-                      : () => dispatch(ReaderSelectionCommitted(color: color)),
-                  child: Text(_colorName(color)),
+                  onPressed: () => dispatch(const ReaderSelectionCancelled()),
+                  child: const Text('Cancel'),
                 ),
-              TextButton(
-                onPressed:
-                    model.busy ||
-                        !model.annotationsReady ||
-                        model.annotationOperations.isNotEmpty
-                    ? null
-                    : () => dispatch(const ReaderSelectionNoteRequested()),
-                child: const Text('Add note'),
-              ),
-              TextButton(
-                onPressed: () => dispatch(const ReaderSelectionCancelled()),
-                child: const Text('Cancel'),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 Rect _selectionActionTarget(
@@ -841,6 +849,7 @@ class _SelectableSurface extends StatelessWidget {
                 anchor: model.anchor,
                 focus: model.focus,
                 savedSelections: model.savedSelections,
+                annotations: model.annotations,
               ),
               child: const SizedBox.expand(),
             ),
@@ -861,6 +870,7 @@ class PagePainter extends CustomPainter {
     required this.anchor,
     required this.focus,
     required this.savedSelections,
+    required this.annotations,
   });
 
   final ui.Image? image;
@@ -871,6 +881,7 @@ class PagePainter extends CustomPainter {
   final int? anchor;
   final int? focus;
   final List<ReaderSelection> savedSelections;
+  final List<FlutterAnnotation> annotations;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -909,6 +920,14 @@ class PagePainter extends CustomPainter {
         true,
       );
     }
+    for (final annotation in annotations) {
+      if (annotation.textRange != null) continue;
+      _paintRectangles(
+        canvas,
+        annotation.rectangles ?? const [],
+        _highlightColor(annotation.color),
+      );
+    }
     if (anchor != null && focus != null) {
       _paintRange(
         canvas,
@@ -940,6 +959,25 @@ class PagePainter extends CustomPainter {
     }
   }
 
+  void _paintRectangles(
+    Canvas canvas,
+    List<FlutterSelectionRect> rectangles,
+    Color color,
+  ) {
+    final fill = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+    final border = Paint()
+      ..color = color.withAlpha(220)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    for (final rect in rectangles) {
+      final area = Rect.fromLTRB(rect.left, rect.top, rect.right, rect.bottom);
+      canvas.drawRect(area, fill);
+      canvas.drawLine(area.bottomLeft, area.bottomRight, border);
+    }
+  }
+
   @override
   bool shouldRepaint(PagePainter oldDelegate) =>
       oldDelegate.image != image ||
@@ -948,7 +986,8 @@ class PagePainter extends CustomPainter {
       oldDelegate.recolorImage != recolorImage ||
       oldDelegate.anchor != anchor ||
       oldDelegate.focus != focus ||
-      oldDelegate.savedSelections != savedSelections;
+      oldDelegate.savedSelections != savedSelections ||
+      oldDelegate.annotations != annotations;
 }
 
 ({Color background, Color foreground}) pageColors(ColorScheme scheme) =>

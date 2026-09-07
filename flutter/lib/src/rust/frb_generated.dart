@@ -909,6 +909,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  FlutterAnnotationTextRange
+  dco_decode_box_autoadd_flutter_annotation_text_range(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_flutter_annotation_text_range(raw);
+  }
+
+  @protected
   FlutterBookFormat dco_decode_box_autoadd_flutter_book_format(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_flutter_book_format(raw);
@@ -962,15 +969,32 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   FlutterAnnotation dco_decode_flutter_annotation(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 6)
-      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return FlutterAnnotation(
       id: dco_decode_String(arr[0]),
       unit: dco_decode_usize(arr[1]),
-      start: dco_decode_usize(arr[2]),
-      end: dco_decode_usize(arr[3]),
-      color: dco_decode_flutter_highlight_color(arr[4]),
-      body: dco_decode_opt_String(arr[5]),
+      textRange: dco_decode_opt_box_autoadd_flutter_annotation_text_range(
+        arr[2],
+      ),
+      quote: dco_decode_opt_String(arr[3]),
+      rectangles: dco_decode_opt_list_flutter_selection_rect(arr[4]),
+      color: dco_decode_flutter_highlight_color(arr[5]),
+      body: dco_decode_opt_String(arr[6]),
+    );
+  }
+
+  @protected
+  FlutterAnnotationTextRange dco_decode_flutter_annotation_text_range(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return FlutterAnnotationTextRange(
+      start: dco_decode_usize(arr[0]),
+      end: dco_decode_usize(arr[1]),
     );
   }
 
@@ -1190,6 +1214,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<FlutterSelectionRect> dco_decode_list_flutter_selection_rect(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>)
+        .map(dco_decode_flutter_selection_rect)
+        .toList();
+  }
+
+  @protected
   List<FlutterSelectionVisualLine>
   dco_decode_list_flutter_selection_visual_line(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -1217,6 +1251,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  FlutterAnnotationTextRange?
+  dco_decode_opt_box_autoadd_flutter_annotation_text_range(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null
+        ? null
+        : dco_decode_box_autoadd_flutter_annotation_text_range(raw);
+  }
+
+  @protected
   FlutterBookFormat? dco_decode_opt_box_autoadd_flutter_book_format(
     dynamic raw,
   ) {
@@ -1232,6 +1275,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return raw == null
         ? null
         : dco_decode_box_autoadd_flutter_rendered_buffer(raw);
+  }
+
+  @protected
+  List<FlutterSelectionRect>? dco_decode_opt_list_flutter_selection_rect(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_list_flutter_selection_rect(raw);
   }
 
   @protected
@@ -1314,6 +1365,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  FlutterAnnotationTextRange
+  sse_decode_box_autoadd_flutter_annotation_text_range(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_flutter_annotation_text_range(deserializer));
+  }
+
+  @protected
   FlutterBookFormat sse_decode_box_autoadd_flutter_book_format(
     SseDeserializer deserializer,
   ) {
@@ -1374,18 +1434,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_id = sse_decode_String(deserializer);
     var var_unit = sse_decode_usize(deserializer);
-    var var_start = sse_decode_usize(deserializer);
-    var var_end = sse_decode_usize(deserializer);
+    var var_textRange =
+        sse_decode_opt_box_autoadd_flutter_annotation_text_range(deserializer);
+    var var_quote = sse_decode_opt_String(deserializer);
+    var var_rectangles = sse_decode_opt_list_flutter_selection_rect(
+      deserializer,
+    );
     var var_color = sse_decode_flutter_highlight_color(deserializer);
     var var_body = sse_decode_opt_String(deserializer);
     return FlutterAnnotation(
       id: var_id,
       unit: var_unit,
-      start: var_start,
-      end: var_end,
+      textRange: var_textRange,
+      quote: var_quote,
+      rectangles: var_rectangles,
       color: var_color,
       body: var_body,
     );
+  }
+
+  @protected
+  FlutterAnnotationTextRange sse_decode_flutter_annotation_text_range(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_start = sse_decode_usize(deserializer);
+    var var_end = sse_decode_usize(deserializer);
+    return FlutterAnnotationTextRange(start: var_start, end: var_end);
   }
 
   @protected
@@ -1652,6 +1727,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<FlutterSelectionRect> sse_decode_list_flutter_selection_rect(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <FlutterSelectionRect>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_flutter_selection_rect(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   List<FlutterSelectionVisualLine>
   sse_decode_list_flutter_selection_visual_line(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -1690,6 +1779,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  FlutterAnnotationTextRange?
+  sse_decode_opt_box_autoadd_flutter_annotation_text_range(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_flutter_annotation_text_range(
+        deserializer,
+      ));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   FlutterBookFormat? sse_decode_opt_box_autoadd_flutter_book_format(
     SseDeserializer deserializer,
   ) {
@@ -1710,6 +1815,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_flutter_rendered_buffer(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  List<FlutterSelectionRect>? sse_decode_opt_list_flutter_selection_rect(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_list_flutter_selection_rect(deserializer));
     } else {
       return null;
     }
@@ -1880,6 +1998,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_flutter_annotation_text_range(
+    FlutterAnnotationTextRange self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_flutter_annotation_text_range(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_flutter_book_format(
     FlutterBookFormat self,
     SseSerializer serializer,
@@ -1947,10 +2074,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.id, serializer);
     sse_encode_usize(self.unit, serializer);
-    sse_encode_usize(self.start, serializer);
-    sse_encode_usize(self.end, serializer);
+    sse_encode_opt_box_autoadd_flutter_annotation_text_range(
+      self.textRange,
+      serializer,
+    );
+    sse_encode_opt_String(self.quote, serializer);
+    sse_encode_opt_list_flutter_selection_rect(self.rectangles, serializer);
     sse_encode_flutter_highlight_color(self.color, serializer);
     sse_encode_opt_String(self.body, serializer);
+  }
+
+  @protected
+  void sse_encode_flutter_annotation_text_range(
+    FlutterAnnotationTextRange self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize(self.start, serializer);
+    sse_encode_usize(self.end, serializer);
   }
 
   @protected
@@ -2162,6 +2303,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_flutter_selection_rect(
+    List<FlutterSelectionRect> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_flutter_selection_rect(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_flutter_selection_visual_line(
     List<FlutterSelectionVisualLine> self,
     SseSerializer serializer,
@@ -2204,6 +2357,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_flutter_annotation_text_range(
+    FlutterAnnotationTextRange? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_flutter_annotation_text_range(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_box_autoadd_flutter_book_format(
     FlutterBookFormat? self,
     SseSerializer serializer,
@@ -2226,6 +2392,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_flutter_rendered_buffer(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_list_flutter_selection_rect(
+    List<FlutterSelectionRect>? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_list_flutter_selection_rect(self, serializer);
     }
   }
 

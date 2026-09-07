@@ -64,6 +64,52 @@ void main() {
     }
   });
 
+  test(
+    'geometry-only PDF annotations paint their persisted rectangles',
+    () async {
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+      final annotation = FlutterAnnotation(
+        id: 'geometry',
+        unit: BigInt.zero,
+        rectangles: const [
+          FlutterSelectionRect(left: 10, top: 10, right: 20, bottom: 20),
+        ],
+        color: FlutterHighlightColor.yellow,
+      );
+      PagePainter(
+        image: null,
+        surface: FlutterSelectionSurface(
+          handle: FlutterSelectionHandle(registry: BigInt.one, id: BigInt.one),
+          width: 100,
+          height: 100,
+          text: '',
+          copyEligible: false,
+          endpoints: const [],
+          graphemeBoundaries: Uint32List(0),
+          wordBoundaries: Uint32List(0),
+          visualLines: const [],
+        ),
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black,
+        recolorImage: false,
+        anchor: null,
+        focus: null,
+        savedSelections: const [],
+        annotations: [annotation],
+      ).paint(canvas, const Size(100, 100));
+      final image = await recorder.endRecording().toImage(100, 100);
+      final bytes = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      final offset = (15 * 100 + 15) * 4;
+      expect(bytes, isNotNull);
+      expect([
+        for (var channel = 0; channel < 3; channel += 1)
+          bytes!.getUint8(offset + channel),
+      ], isNot(everyElement(255)));
+      image.dispose();
+    },
+  );
+
   test('reader model recursively freezes collection inputs and copies', () {
     final endpoints = <FlutterSelectionEndpoint>[
       FlutterSelectionEndpoint(
@@ -991,6 +1037,106 @@ void main() {
     await bridge.disposed.future;
   });
 
+  test('line edge movements use Home and End semantics', () async {
+    final bridge = _ControlledBridge();
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/book.epub');
+
+    controller.dispatch(const ReaderSelectionStarted(3));
+    controller.dispatch(const ReaderSelectionEnded());
+    controller.dispatch(
+      const ReaderSelectionKeyboardExtended(ReaderSelectionMovement.lineStart),
+    );
+    expect(controller.model.anchor, 3);
+    expect(controller.model.focus, 1);
+
+    controller.dispatch(const ReaderSelectionStarted(3));
+    controller.dispatch(const ReaderSelectionEnded());
+    controller.dispatch(
+      const ReaderSelectionKeyboardExtended(ReaderSelectionMovement.lineEnd),
+    );
+    expect(controller.model.anchor, 3);
+    expect(controller.model.focus, 4);
+
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
+  test('horizontal keyboard movement follows visual bidi carets', () async {
+    final bridge = _ControlledBridge(
+      selectionVisualLines: [
+        FlutterSelectionVisualLine(
+          carets: [
+            for (final (offset, x) in [(3, 10.0), (2, 20.0), (1, 30.0)])
+              FlutterSelectionCaret(
+                offset: BigInt.from(offset),
+                x: x,
+                top: 10,
+                bottom: 30,
+              ),
+          ],
+        ),
+        FlutterSelectionVisualLine(
+          carets: [
+            for (final (offset, x) in [
+              (0, 0.0),
+              (1, 10.0),
+              (3, 20.0),
+              (2, 30.0),
+              (3, 40.0),
+              (4, 50.0),
+            ])
+              FlutterSelectionCaret(
+                offset: BigInt.from(offset),
+                x: x,
+                top: 50,
+                bottom: 70,
+              ),
+          ],
+        ),
+      ],
+    );
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/book.epub');
+    controller.dispatch(
+      const ReaderSelectionPointerStarted(7, 2, x: 20, y: 20),
+    );
+    controller.dispatch(const ReaderSelectionPointerEnded(7));
+    controller.dispatch(
+      const ReaderSelectionKeyboardExtended(
+        ReaderSelectionMovement.visualRight,
+      ),
+    );
+    expect(controller.model.anchor, 2);
+    expect(controller.model.focus, 1);
+
+    controller.dispatch(const ReaderSelectionStarted(2));
+    controller.dispatch(const ReaderSelectionEnded());
+    controller.dispatch(
+      const ReaderSelectionKeyboardExtended(ReaderSelectionMovement.visualLeft),
+    );
+    expect(controller.model.anchor, 2);
+    expect(controller.model.focus, 3);
+
+    controller.dispatch(const ReaderSelectionCancelled());
+    controller.dispatch(
+      const ReaderSelectionPointerStarted(8, 3, x: 20, y: 60),
+    );
+    controller.dispatch(const ReaderSelectionPointerEnded(8));
+    for (var index = 0; index < 3; index += 1) {
+      controller.dispatch(
+        const ReaderSelectionKeyboardExtended(
+          ReaderSelectionMovement.visualRight,
+        ),
+      );
+    }
+    expect(controller.model.anchor, 3);
+    expect(controller.model.focus, 4);
+
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
   test('saved highlight navigation restores reader keyboard focus', () async {
     final bridge = _ControlledBridge(initialAnnotations: [_annotation('one')]);
     final focusTargets = <ReaderFocusTarget>[];
@@ -1009,8 +1155,38 @@ void main() {
         ReaderSelectionMovement.nextGrapheme,
       ),
     );
-    expect(controller.model.anchor, _annotation('one').start.toInt());
-    expect(controller.model.focus, _annotation('one').end.toInt() + 1);
+    expect(
+      controller.model.anchor,
+      _annotation('one').textRange!.start.toInt(),
+    );
+    expect(
+      controller.model.focus,
+      _annotation('one').textRange!.end.toInt() + 1,
+    );
+
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
+  test('saved highlight navigation cancels an outgoing create', () async {
+    final bridge = _ControlledBridge(initialAnnotations: [_annotation('one')]);
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/book.epub');
+    bridge.createCompleter = Completer<FlutterAnnotation>();
+    controller.dispatch(const ReaderSelectionStarted(4));
+    controller.dispatch(const ReaderSelectionExtended(8));
+    controller.dispatch(const ReaderSelectionEnded());
+    controller.dispatch(const ReaderSelectionCommitted());
+    final cancellation = bridge.createdCancellations.last;
+
+    controller.dispatch(const ReaderAnnotationNavigated('one'));
+    expect(bridge.cancelled, contains(cancellation));
+    expect(controller.model.anchor, 1);
+    expect(controller.model.focus, 3);
+    bridge.createCompleter!.completeError(StateError('cancelled'));
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.model.annotationError, isNull);
 
     controller.dispose();
     await bridge.disposed.future;
@@ -1412,6 +1588,49 @@ void main() {
     await bridge.disposed.future;
   });
 
+  for (final createFails in [false, true]) {
+    test(
+      'a stale Copy failure cannot replace a ${createFails ? 'failed' : 'successful'} save result',
+      () async {
+        final bridge = _ControlledBridge();
+        final copy = Completer<void>();
+        final controller = ReaderController(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+          selectionCopier: (_) => copy.future,
+        );
+        await _openControlled(controller, bridge, '/tmp/a.epub');
+        controller.dispatch(const ReaderSelectionStarted(1));
+        controller.dispatch(const ReaderSelectionExtended(3));
+        controller.dispatch(const ReaderSelectionEnded());
+        controller.dispatch(const ReaderSelectionCopyRequested());
+        bridge.createCompleter = Completer<FlutterAnnotation>();
+        controller.dispatch(const ReaderSelectionCommitted());
+        if (createFails) {
+          bridge.createCompleter!.completeError(StateError('save failed'));
+        } else {
+          bridge.createCompleter!.complete(_annotation('created'));
+        }
+        await Future<void>.delayed(Duration.zero);
+        await Future<void>.delayed(Duration.zero);
+        copy.completeError(StateError('stale clipboard failure'));
+        await Future<void>.delayed(Duration.zero);
+
+        if (createFails) {
+          expect(
+            controller.model.selectionActionError,
+            contains('save failed'),
+          );
+        } else {
+          expect(controller.model.selectionPhase, ReaderSelectionPhase.idle);
+          expect(controller.model.selectionActionError, isNull);
+        }
+        controller.dispose();
+        await bridge.disposed.future;
+      },
+    );
+  }
+
   testWidgets('annotation controls prevent overlapping writes', (tester) async {
     final bridge = _ControlledBridge(initialAnnotations: [_annotation('one')]);
     await tester.pumpWidget(
@@ -1732,9 +1951,27 @@ void main() {
     expect(find.text('Yellow'), findsOneWidget);
 
     await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
-    await tester.sendKeyEvent(LogicalKeyboardKey.f10);
+    await tester.sendKeyEvent(LogicalKeyboardKey.home);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
     await tester.pump();
+    expect(find.text('Yellow'), findsNothing);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.end);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pump();
+    expect(find.text('Yellow'), findsOneWidget);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.home);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pump();
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.f10);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pumpAndSettle();
     expect(find.text('Yellow'), findsOneWidget);
     expect(
       tester
@@ -1770,6 +2007,116 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pumpAndSettle();
     expect(bridge.createdRanges.last, (BigInt.one, BigInt.from(4)));
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('keyboard actions focus Cancel when other actions are disabled', (
+    tester,
+  ) async {
+    final bridge = _ControlledBridge(
+      format: FlutterBookFormat.pdf,
+      copyEligible: false,
+      listFailure: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book.pdf');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    final surface = find.byKey(const ValueKey('reader-selection-surface'));
+    final bounds = tester.getRect(surface);
+    final side = bounds.shortestSide;
+    final topLeft = bounds.center - Offset(side / 2, side / 2);
+    final gesture = await tester.createGesture(
+      kind: ui.PointerDeviceKind.mouse,
+    );
+    await gesture.down(topLeft + Offset(side * .2, side * .2));
+    await gesture.moveBy(Offset(side * .5, side * .5));
+    await gesture.up();
+    await tester.pump();
+    await tester.tapAt(topLeft + Offset(side * .2, side * .2));
+    await tester.pump();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.f10);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pumpAndSettle();
+
+    final cancel = tester.widget<TextButton>(
+      find.widgetWithText(TextButton, 'Cancel'),
+    );
+    expect(
+      cancel.focusNode!.hasFocus,
+      isTrue,
+      reason:
+          'primary=${FocusManager.instance.primaryFocus}, cancel=${cancel.focusNode}',
+    );
+    expect(
+      tester
+          .widget<TextButton>(find.widgetWithText(TextButton, 'Copy'))
+          .onPressed,
+      isNull,
+    );
+    expect(
+      tester
+          .widget<FilledButton>(find.widgetWithText(FilledButton, 'Yellow'))
+          .onPressed,
+      isNull,
+    );
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('a second touch outside cannot cancel the owning drag', (
+    tester,
+  ) async {
+    final bridge = _ControlledBridge(format: FlutterBookFormat.epub);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    final surface = find.byKey(const ValueKey('reader-selection-surface'));
+    final bounds = tester.getRect(surface);
+    final side = bounds.shortestSide;
+    final topLeft = bounds.center - Offset(side / 2, side / 2);
+    final owner = await tester.createGesture(kind: ui.PointerDeviceKind.touch);
+    await owner.down(topLeft + Offset(side * .2, side * .2));
+    await owner.moveBy(Offset(side * .5, side * .5));
+    final second = await tester.createGesture(kind: ui.PointerDeviceKind.touch);
+    await second.down(tester.getCenter(find.byType(TextField)));
+    await tester.pump();
+
+    final painter =
+        tester
+                .widget<CustomPaint>(
+                  find.byWidgetPredicate(
+                    (widget) =>
+                        widget is CustomPaint && widget.painter is PagePainter,
+                  ),
+                )
+                .painter!
+            as PagePainter;
+    expect(painter.anchor, 1);
+    expect(painter.focus, 8);
+    await second.up();
+    await owner.up();
+    await tester.pump();
+    expect(find.text('Yellow'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox());
     await bridge.disposed.future;
@@ -1878,8 +2225,7 @@ void main() {
 FlutterAnnotation _annotation(String id) => FlutterAnnotation(
   id: id,
   unit: BigInt.zero,
-  start: BigInt.one,
-  end: BigInt.from(3),
+  textRange: FlutterAnnotationTextRange(start: BigInt.one, end: BigInt.from(3)),
   color: FlutterHighlightColor.yellow,
 );
 
@@ -1901,6 +2247,8 @@ final class _ControlledBridge implements FlutterBridge {
     this.listFailure = false,
     this.immediateLists = false,
     this.initialListCompleter,
+    this.selectionVisualLines,
+    this.copyEligible = true,
   }) : initialAnnotations = List.of(initialAnnotations),
        storedAnnotations = List.of(initialAnnotations);
 
@@ -1911,6 +2259,8 @@ final class _ControlledBridge implements FlutterBridge {
   final bool listFailure;
   final bool immediateLists;
   final Completer<List<FlutterAnnotation>>? initialListCompleter;
+  final List<FlutterSelectionVisualLine>? selectionVisualLines;
+  final bool copyEligible;
   final disposed = Completer<void>();
   final createdCancellations = <BigInt>[];
   final releasedCancellations = <BigInt>[];
@@ -1986,7 +2336,7 @@ final class _ControlledBridge implements FlutterBridge {
       width: 100,
       height: 100,
       text: 'Selectable fixture text',
-      copyEligible: true,
+      copyEligible: copyEligible,
       raster: format == FlutterBookFormat.epub
           ? FlutterRenderedBuffer(
               handle: FlutterBufferHandle(
@@ -2024,58 +2374,60 @@ final class _ControlledBridge implements FlutterBridge {
       ],
       graphemeBoundaries: Uint32List.fromList([1, 2, 3, 4, 5, 8]),
       wordBoundaries: Uint32List.fromList([1, 4, 8]),
-      visualLines: [
-        FlutterSelectionVisualLine(
-          carets: [
-            FlutterSelectionCaret(
-              offset: BigInt.one,
-              x: 20,
-              top: 10,
-              bottom: 30,
+      visualLines:
+          selectionVisualLines ??
+          [
+            FlutterSelectionVisualLine(
+              carets: [
+                FlutterSelectionCaret(
+                  offset: BigInt.one,
+                  x: 20,
+                  top: 10,
+                  bottom: 30,
+                ),
+                FlutterSelectionCaret(
+                  offset: BigInt.from(2),
+                  x: 30,
+                  top: 10,
+                  bottom: 30,
+                ),
+                FlutterSelectionCaret(
+                  offset: BigInt.from(3),
+                  x: 40,
+                  top: 10,
+                  bottom: 30,
+                ),
+                FlutterSelectionCaret(
+                  offset: BigInt.from(4),
+                  x: 50,
+                  top: 10,
+                  bottom: 30,
+                ),
+              ],
             ),
-            FlutterSelectionCaret(
-              offset: BigInt.from(2),
-              x: 30,
-              top: 10,
-              bottom: 30,
-            ),
-            FlutterSelectionCaret(
-              offset: BigInt.from(3),
-              x: 40,
-              top: 10,
-              bottom: 30,
-            ),
-            FlutterSelectionCaret(
-              offset: BigInt.from(4),
-              x: 50,
-              top: 10,
-              bottom: 30,
+            FlutterSelectionVisualLine(
+              carets: [
+                FlutterSelectionCaret(
+                  offset: BigInt.from(4),
+                  x: 20,
+                  top: 60,
+                  bottom: 80,
+                ),
+                FlutterSelectionCaret(
+                  offset: BigInt.from(5),
+                  x: 30,
+                  top: 60,
+                  bottom: 80,
+                ),
+                FlutterSelectionCaret(
+                  offset: BigInt.from(8),
+                  x: 70,
+                  top: 60,
+                  bottom: 80,
+                ),
+              ],
             ),
           ],
-        ),
-        FlutterSelectionVisualLine(
-          carets: [
-            FlutterSelectionCaret(
-              offset: BigInt.from(4),
-              x: 20,
-              top: 60,
-              bottom: 80,
-            ),
-            FlutterSelectionCaret(
-              offset: BigInt.from(5),
-              x: 30,
-              top: 60,
-              bottom: 80,
-            ),
-            FlutterSelectionCaret(
-              offset: BigInt.from(8),
-              x: 70,
-              top: 60,
-              bottom: 80,
-            ),
-          ],
-        ),
-      ],
     );
   }
 
@@ -2115,8 +2467,7 @@ final class _ControlledBridge implements FlutterBridge {
               FlutterAnnotation(
                 id: 'created-$createCalls',
                 unit: unit,
-                start: start,
-                end: end,
+                textRange: FlutterAnnotationTextRange(start: start, end: end),
                 color: color,
                 body: body,
               ),
@@ -2142,8 +2493,9 @@ final class _ControlledBridge implements FlutterBridge {
         storedAnnotations[index] = FlutterAnnotation(
           id: current.id,
           unit: current.unit,
-          start: current.start,
-          end: current.end,
+          textRange: current.textRange,
+          quote: current.quote,
+          rectangles: current.rectangles,
           color: color,
           body: body,
         );
@@ -2283,8 +2635,7 @@ class _FakeBridge implements FlutterBridge {
   }) async => FlutterAnnotation(
     id: 'annotation',
     unit: unit,
-    start: start,
-    end: end,
+    textRange: FlutterAnnotationTextRange(start: start, end: end),
     color: color,
     body: body,
   );
@@ -2473,8 +2824,7 @@ final class _SequentialBridge implements FlutterBridge {
   }) async => FlutterAnnotation(
     id: 'annotation',
     unit: unit,
-    start: start,
-    end: end,
+    textRange: FlutterAnnotationTextRange(start: start, end: end),
     color: color,
     body: body,
   );
