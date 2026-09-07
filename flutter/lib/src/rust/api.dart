@@ -302,19 +302,28 @@ class FlutterRenderedBuffer {
 class FlutterSelectionCaret {
   final BigInt offset;
   final double x;
+  final double alongLine;
+  final bool vertical;
   final double top;
   final double bottom;
 
   const FlutterSelectionCaret({
     required this.offset,
     required this.x,
+    required this.alongLine,
+    required this.vertical,
     required this.top,
     required this.bottom,
   });
 
   @override
   int get hashCode =>
-      offset.hashCode ^ x.hashCode ^ top.hashCode ^ bottom.hashCode;
+      offset.hashCode ^
+      x.hashCode ^
+      alongLine.hashCode ^
+      vertical.hashCode ^
+      top.hashCode ^
+      bottom.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -323,6 +332,8 @@ class FlutterSelectionCaret {
           runtimeType == other.runtimeType &&
           offset == other.offset &&
           x == other.x &&
+          alongLine == other.alongLine &&
+          vertical == other.vertical &&
           top == other.top &&
           bottom == other.bottom;
 }

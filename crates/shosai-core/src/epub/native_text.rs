@@ -907,12 +907,16 @@ fn is_bidi_paragraph_separator(character: char) -> bool {
 }
 fn paragraph_ranges(text: &str) -> Vec<Range<usize>> {
     let base = text.as_ptr() as usize;
-    BidiParagraphs::new(text)
+    let mut ranges = BidiParagraphs::new(text)
         .map(|paragraph| {
             let start = paragraph.as_ptr() as usize - base;
             start..start + paragraph.len()
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if text.chars().last().is_some_and(is_bidi_paragraph_separator) {
+        ranges.push(text.len()..text.len());
+    }
+    ranges
 }
 fn checked_scalar_range(
     scalar_boundaries: &[usize],

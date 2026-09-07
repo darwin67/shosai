@@ -221,18 +221,9 @@ void main() {
       expect(created.textRange?.end, endpoint.rangeEnd);
       expect(created.quote, isNotEmpty);
       if (expectedFormat == FlutterBookFormat.pdf) {
-        expect(created.rectangles, isNotNull);
-        expect(created.rectangles, isNotEmpty);
-        final rectangle = created.rectangles!.first;
-        expect(rectangle.left, greaterThanOrEqualTo(0));
-        expect(rectangle.top, greaterThanOrEqualTo(0));
-        expect(rectangle.right, lessThanOrEqualTo(surface.width));
-        expect(rectangle.bottom, lessThanOrEqualTo(surface.height));
-        expect(rectangle.left, isNot(rectangle.top));
-        expect(rectangle.left, lessThanOrEqualTo(endpoint.rect.left));
-        expect(rectangle.top, lessThanOrEqualTo(endpoint.rect.top));
-        expect(rectangle.right, greaterThanOrEqualTo(endpoint.rect.right));
-        expect(rectangle.bottom, greaterThanOrEqualTo(endpoint.rect.bottom));
+        // Text-backed highlights paint from their range on the retained
+        // selection surface; only geometry-only PDF annotations export rects.
+        expect(created.rectangles, isEmpty);
       } else {
         expect(created.rectangles, isEmpty);
       }

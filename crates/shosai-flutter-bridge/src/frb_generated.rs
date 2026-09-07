@@ -1086,11 +1086,15 @@ impl SseDecode for crate::api::FlutterSelectionCaret {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_offset = <usize>::sse_decode(deserializer);
         let mut var_x = <f32>::sse_decode(deserializer);
+        let mut var_alongLine = <f32>::sse_decode(deserializer);
+        let mut var_vertical = <bool>::sse_decode(deserializer);
         let mut var_top = <f32>::sse_decode(deserializer);
         let mut var_bottom = <f32>::sse_decode(deserializer);
         return crate::api::FlutterSelectionCaret {
             offset: var_offset,
             x: var_x,
+            along_line: var_alongLine,
+            vertical: var_vertical,
             top: var_top,
             bottom: var_bottom,
         };
@@ -1666,6 +1670,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::FlutterSelectionCaret {
         [
             self.offset.into_into_dart().into_dart(),
             self.x.into_into_dart().into_dart(),
+            self.along_line.into_into_dart().into_dart(),
+            self.vertical.into_into_dart().into_dart(),
             self.top.into_into_dart().into_dart(),
             self.bottom.into_into_dart().into_dart(),
         ]
@@ -1975,6 +1981,8 @@ impl SseEncode for crate::api::FlutterSelectionCaret {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <usize>::sse_encode(self.offset, serializer);
         <f32>::sse_encode(self.x, serializer);
+        <f32>::sse_encode(self.along_line, serializer);
+        <bool>::sse_encode(self.vertical, serializer);
         <f32>::sse_encode(self.top, serializer);
         <f32>::sse_encode(self.bottom, serializer);
     }
@@ -2387,6 +2395,8 @@ mod io {
             crate::api::FlutterSelectionCaret {
                 offset: self.offset.cst_decode(),
                 x: self.x.cst_decode(),
+                along_line: self.along_line.cst_decode(),
+                vertical: self.vertical.cst_decode(),
                 top: self.top.cst_decode(),
                 bottom: self.bottom.cst_decode(),
             }
@@ -2644,6 +2654,8 @@ mod io {
             Self {
                 offset: Default::default(),
                 x: Default::default(),
+                along_line: Default::default(),
+                vertical: Default::default(),
                 top: Default::default(),
                 bottom: Default::default(),
             }
@@ -3154,6 +3166,8 @@ mod io {
     pub struct wire_cst_flutter_selection_caret {
         offset: usize,
         x: f32,
+        along_line: f32,
+        vertical: bool,
         top: f32,
         bottom: f32,
     }

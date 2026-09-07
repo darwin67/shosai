@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow, bail};
 use sqlx::Row;
 use sqlx::sqlite::{SqlitePool, SqliteRow};
+use thiserror::Error;
 #[cfg(test)]
 use tokio::sync::Semaphore;
 use unicode_normalization::UnicodeNormalization;
@@ -22,6 +23,8 @@ pub const MAX_QUOTE_SCALARS: usize = 65_536;
 pub const MAX_QUOTE_CONTEXT_INPUT_SCALARS: usize = 65_536;
 pub const MAX_CONTEXT_SCALARS: usize = 32;
 pub const MAX_PDF_RECTANGLES: usize = 16_384;
+pub const MAX_ANNOTATIONS_PER_SNAPSHOT: usize = 1_024;
+pub const MAX_PDF_RECTANGLES_PER_SNAPSHOT: usize = 65_536;
 pub const MAX_ANNOTATION_BODY_SCALARS: usize = 65_536;
 pub const MAX_FINGERPRINT_BYTES: usize = 1_024;
 pub const MAX_FINGERPRINT_ALGORITHM_BYTES: usize = 64;
@@ -29,6 +32,10 @@ pub const MAX_LOCAL_PATH_BYTES: usize = 32_768;
 pub const MAX_EPUB_RESOURCE_PATH_BYTES: usize = 4_096;
 pub const MAX_PROVENANCE_SYSTEM_BYTES: usize = 256;
 pub const MAX_PROVENANCE_ID_BYTES: usize = 4_096;
+
+#[derive(Debug, Error)]
+#[error("annotation snapshot exceeds its aggregate retention limit")]
+pub struct AnnotationSnapshotLimit;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AnnotationId(Uuid);
@@ -391,6 +398,8 @@ pub struct AnnotationStore {
     pool: SqlitePool,
     #[cfg(test)]
     persistence_gate: Option<Arc<AnnotationPersistenceTestGate>>,
+    #[cfg(test)]
+    list_gate: Option<Arc<AnnotationPersistenceTestGate>>,
 }
 
 #[cfg(test)]
@@ -424,17 +433,21 @@ impl AnnotationStore {
             pool,
             #[cfg(test)]
             persistence_gate: None,
+            #[cfg(test)]
+            list_gate: None,
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn new_with_persistence_gate(
+    pub(crate) fn new_with_test_gates(
         pool: SqlitePool,
         persistence_gate: Option<Arc<AnnotationPersistenceTestGate>>,
+        list_gate: Option<Arc<AnnotationPersistenceTestGate>>,
     ) -> Self {
         Self {
             pool,
             persistence_gate,
+            list_gate,
         }
     }
 
@@ -597,14 +610,27 @@ impl AnnotationStore {
             .begin()
             .await
             .context("failed to begin annotation list snapshot")?;
+        #[cfg(test)]
+        if let Some(gate) = &self.list_gate {
+            gate.entered.add_permits(1);
+            gate.release.acquire().await.unwrap().forget();
+        }
         let rows = sqlx::query(
-            "SELECT * FROM annotations WHERE book_id IS NULL AND local_path = ? AND deleted_at IS NULL ORDER BY created_at, id",
+            "SELECT * FROM annotations WHERE book_id IS NULL AND local_path = ? AND deleted_at IS NULL ORDER BY created_at, id LIMIT ?",
         )
         .bind(local_path)
+        .bind(
+            i64::try_from(MAX_ANNOTATIONS_PER_SNAPSHOT + 1)
+                .expect("annotation snapshot limit fits in i64"),
+        )
         .fetch_all(&mut *transaction)
         .await
         .context("failed to list annotations for local path")?;
+        if rows.len() > MAX_ANNOTATIONS_PER_SNAPSHOT {
+            return Err(AnnotationSnapshotLimit.into());
+        }
         let mut annotations = Vec::with_capacity(rows.len());
+        let mut rectangle_count = 0usize;
         for row in rows {
             let id: String = row.try_get("id")?;
             let rectangle_rows = sqlx::query(
@@ -615,6 +641,12 @@ impl AnnotationStore {
             .fetch_all(&mut *transaction)
             .await
             .context("failed to load PDF annotation rectangles")?;
+            rectangle_count = rectangle_count
+                .checked_add(rectangle_rows.len())
+                .ok_or(AnnotationSnapshotLimit)?;
+            if rectangle_count > MAX_PDF_RECTANGLES_PER_SNAPSHOT {
+                return Err(AnnotationSnapshotLimit.into());
+            }
             annotations.push(row_to_annotation(row, rows_to_rectangles(rectangle_rows)?)?);
         }
         transaction

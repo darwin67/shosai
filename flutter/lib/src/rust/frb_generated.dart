@@ -1101,13 +1101,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   FlutterSelectionCaret dco_decode_flutter_selection_caret(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 4)
-      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return FlutterSelectionCaret(
       offset: dco_decode_usize(arr[0]),
       x: dco_decode_f_32(arr[1]),
-      top: dco_decode_f_32(arr[2]),
-      bottom: dco_decode_f_32(arr[3]),
+      alongLine: dco_decode_f_32(arr[2]),
+      vertical: dco_decode_bool(arr[3]),
+      top: dco_decode_f_32(arr[4]),
+      bottom: dco_decode_f_32(arr[5]),
     );
   }
 
@@ -1582,11 +1584,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_offset = sse_decode_usize(deserializer);
     var var_x = sse_decode_f_32(deserializer);
+    var var_alongLine = sse_decode_f_32(deserializer);
+    var var_vertical = sse_decode_bool(deserializer);
     var var_top = sse_decode_f_32(deserializer);
     var var_bottom = sse_decode_f_32(deserializer);
     return FlutterSelectionCaret(
       offset: var_offset,
       x: var_x,
+      alongLine: var_alongLine,
+      vertical: var_vertical,
       top: var_top,
       bottom: var_bottom,
     );
@@ -2198,6 +2204,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_usize(self.offset, serializer);
     sse_encode_f_32(self.x, serializer);
+    sse_encode_f_32(self.alongLine, serializer);
+    sse_encode_bool(self.vertical, serializer);
     sse_encode_f_32(self.top, serializer);
     sse_encode_f_32(self.bottom, serializer);
   }

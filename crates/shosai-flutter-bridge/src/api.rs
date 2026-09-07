@@ -238,6 +238,8 @@ pub struct FlutterSelectionEndpoint {
 pub struct FlutterSelectionCaret {
     pub offset: usize,
     pub x: f32,
+    pub along_line: f32,
+    pub vertical: bool,
     pub top: f32,
     pub bottom: f32,
 }
@@ -312,6 +314,8 @@ impl From<SelectionSurface> for FlutterSelectionSurface {
                         .map(|caret| FlutterSelectionCaret {
                             offset: caret.offset,
                             x: caret.x,
+                            along_line: caret.along_line,
+                            vertical: caret.vertical,
                             top: caret.top,
                             bottom: caret.bottom,
                         })

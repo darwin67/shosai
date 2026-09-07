@@ -777,6 +777,8 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ) {
     wireObj.offset = cst_encode_usize(apiObj.offset);
     wireObj.x = cst_encode_f_32(apiObj.x);
+    wireObj.along_line = cst_encode_f_32(apiObj.alongLine);
+    wireObj.vertical = cst_encode_bool(apiObj.vertical);
     wireObj.top = cst_encode_f_32(apiObj.top);
     wireObj.bottom = cst_encode_f_32(apiObj.bottom);
   }
@@ -2123,6 +2125,12 @@ final class wire_cst_flutter_selection_caret extends ffi.Struct {
 
   @ffi.Float()
   external double x;
+
+  @ffi.Float()
+  external double along_line;
+
+  @ffi.Bool()
+  external bool vertical;
 
   @ffi.Float()
   external double top;

@@ -49,6 +49,9 @@ pub struct PdfSelectionEndpoint {
 pub struct PdfSelectionCaret {
     pub character: usize,
     pub x: f32,
+    /// Coordinate in the direction in which carets advance on this line.
+    pub along_line: f32,
+    pub vertical: bool,
     pub top: f32,
     pub bottom: f32,
 }
@@ -168,40 +171,42 @@ impl PdfSelectionSnapshot {
     /// Visual lines and their retained caret positions, as classified by the
     /// PDF extractor. Consumers must not reconstruct lines from glyph bounds.
     pub fn visual_lines(&self) -> Vec<PdfSelectionLine> {
+        self.visual_lines_cancellable(&|| false)
+            .expect("an uncancelled metadata export cannot fail")
+    }
+
+    pub fn visual_lines_cancellable(
+        &self,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<PdfSelectionLine>> {
         self.lines
             .iter()
-            .map(|row| {
-                let mut carets = row
-                    .zones
-                    .iter()
-                    .filter(|zone| zone.visual_caret)
-                    .map(|zone| PdfSelectionCaret {
+            .map(|row| -> Result<PdfSelectionLine> {
+                check_cancelled(Some(is_cancelled))?;
+                let mut carets = Vec::new();
+                for zone in &row.zones {
+                    check_cancelled(Some(is_cancelled))?;
+                    if !zone.visual_caret {
+                        continue;
+                    }
+                    carets.push(PdfSelectionCaret {
                         character: zone.endpoint.character,
                         x: zone.caret_x,
+                        along_line: if zone.vertical {
+                            zone.caret_y
+                        } else {
+                            zone.caret_x
+                        },
+                        vertical: zone.vertical,
                         top: row.bounds.top,
                         bottom: row.bounds.bottom,
-                    })
-                    .collect::<Vec<_>>();
-                if row.zones.first().is_some_and(|zone| zone.vertical) {
-                    carets.sort_by(|left, right| {
-                        let left_y = row
-                            .zones
-                            .iter()
-                            .find(|zone| zone.endpoint.character == left.character)
-                            .map_or(0.0, |zone| zone.caret_y);
-                        let right_y = row
-                            .zones
-                            .iter()
-                            .find(|zone| zone.endpoint.character == right.character)
-                            .map_or(0.0, |zone| zone.caret_y);
-                        left_y.total_cmp(&right_y)
                     });
-                } else {
-                    carets.sort_by(|left, right| left.x.total_cmp(&right.x));
                 }
-                carets
-                    .dedup_by(|left, right| left.character == right.character && left.x == right.x);
-                PdfSelectionLine { carets }
+                carets.sort_by(|left, right| left.along_line.total_cmp(&right.along_line));
+                carets.dedup_by(|left, right| {
+                    left.character == right.character && left.along_line == right.along_line
+                });
+                Ok(PdfSelectionLine { carets })
             })
             .collect()
     }
@@ -839,7 +844,7 @@ mod tests {
             bitmap_height: 10,
             text: "fi".into(),
             text_mapping_complete: true,
-            lines: super::pdf_keyboard_lines(zones.clone()),
+            lines: super::pdf_keyboard_lines(zones.clone(), &|| false).unwrap(),
             rows: super::pdf_selection_rows(zones),
         };
 
@@ -876,7 +881,7 @@ mod tests {
             bitmap_height: 50,
             text: "ABC".into(),
             text_mapping_complete: true,
-            lines: super::pdf_keyboard_lines(zones.clone()),
+            lines: super::pdf_keyboard_lines(zones.clone(), &|| false).unwrap(),
             rows: super::pdf_selection_rows(zones),
         };
 
@@ -898,6 +903,88 @@ mod tests {
         );
         assert_eq!(lines[1].carets[0].top, 30.0);
         assert_eq!(lines[1].carets[0].bottom, 42.0);
+    }
+
+    #[test]
+    fn keyboard_line_metadata_cancels_many_distinct_lines() {
+        let mut zones = Vec::new();
+        for character in 0..10_000 {
+            let top = character as f32 * 2.0;
+            let geometry = super::PdfCharacterGeometry {
+                bounds: super::PdfSelectionRect {
+                    left: 0.0,
+                    top,
+                    right: 1.0,
+                    bottom: top + 1.0,
+                },
+                page_bounds: (0.0, top, 1.0, top + 1.0),
+                character,
+                page_x: 0.5,
+                page_y: top + 0.5,
+                orientation: Some((false, true)),
+                direction: Some(super::PdfTextDirection::LeftToRight),
+            };
+            super::append_pdf_glyph_zones(&mut zones, &[geometry], false, true);
+        }
+        let checks = std::cell::Cell::new(0);
+        let error = super::pdf_keyboard_lines(zones, &|| {
+            checks.set(checks.get() + 1);
+            checks.get() > 128
+        })
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "import cancelled");
+        assert!(checks.get() < 10_000);
+    }
+
+    #[test]
+    fn long_rotated_line_exports_precomputed_along_line_metadata() {
+        let mut zones = Vec::new();
+        for character in 0..10_000 {
+            let top = character as f32;
+            let geometry = super::PdfCharacterGeometry {
+                bounds: super::PdfSelectionRect {
+                    left: 4.0,
+                    top,
+                    right: 5.0,
+                    bottom: top + 1.0,
+                },
+                page_bounds: (4.0, top, 5.0, top + 1.0),
+                character,
+                page_x: 4.5,
+                page_y: top + 0.5,
+                orientation: Some((true, true)),
+                direction: Some(super::PdfTextDirection::LeftToRight),
+            };
+            super::append_pdf_glyph_zones(&mut zones, &[geometry], true, true);
+        }
+        let snapshot = super::PdfSelectionSnapshot {
+            bitmap_width: 10,
+            bitmap_height: 10_001,
+            text: String::new(),
+            text_mapping_complete: true,
+            lines: super::pdf_keyboard_lines(zones.clone(), &|| false).unwrap(),
+            rows: super::pdf_selection_rows(zones),
+        };
+
+        let checks = std::cell::Cell::new(0);
+        let error = snapshot
+            .visual_lines_cancellable(&|| {
+                checks.set(checks.get() + 1);
+                checks.get() > 128
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "import cancelled");
+
+        let lines = snapshot.visual_lines_cancellable(&|| false).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].carets.iter().all(|caret| caret.vertical));
+        assert!(
+            lines[0]
+                .carets
+                .windows(2)
+                .all(|pair| pair[0].along_line <= pair[1].along_line)
+        );
     }
 
     #[test]
@@ -925,7 +1012,7 @@ mod tests {
             bitmap_height: 10,
             text: "e\u{301}".into(),
             text_mapping_complete: true,
-            lines: super::pdf_keyboard_lines(zones.clone()),
+            lines: super::pdf_keyboard_lines(zones.clone(), &|| false).unwrap(),
             rows: super::pdf_selection_rows(zones),
         };
 
@@ -1852,7 +1939,7 @@ impl PdfDoc {
             bitmap_height,
             text: owned_text,
             text_mapping_complete,
-            lines: pdf_keyboard_lines(zones.clone()),
+            lines: pdf_keyboard_lines(zones.clone(), is_cancelled)?,
             rows: pdf_selection_rows(zones),
         };
         if snapshot.retained_bytes() > PDF_SELECTION_MAX_RETAINED_BYTES {
@@ -2299,7 +2386,10 @@ fn pdf_selection_rows(mut zones: Vec<PdfSelectionZone>) -> Vec<PdfSelectionRow> 
     rows
 }
 
-fn pdf_keyboard_lines(mut zones: Vec<PdfSelectionZone>) -> Vec<PdfSelectionRow> {
+fn pdf_keyboard_lines(
+    mut zones: Vec<PdfSelectionZone>,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<PdfSelectionRow>> {
     zones.sort_by(|left, right| {
         left.vertical
             .cmp(&right.vertical)
@@ -2320,7 +2410,8 @@ fn pdf_keyboard_lines(mut zones: Vec<PdfSelectionZone>) -> Vec<PdfSelectionRow> 
     });
     let mut lines: Vec<PdfSelectionRow> = Vec::new();
     for zone in zones {
-        let same_line = |line: &&mut PdfSelectionRow| {
+        check_cancelled(Some(is_cancelled))?;
+        let same_line = lines.last().is_some_and(|line| {
             line.zones
                 .first()
                 .is_some_and(|first| first.vertical == zone.vertical)
@@ -2331,8 +2422,9 @@ fn pdf_keyboard_lines(mut zones: Vec<PdfSelectionZone>) -> Vec<PdfSelectionRow> 
                     zone.line_bounds.bottom > line.bounds.top
                         && zone.line_bounds.top < line.bounds.bottom
                 }
-        };
-        if let Some(line) = lines.iter_mut().find(same_line) {
+        });
+        if same_line {
+            let line = lines.last_mut().expect("same_line requires a last line");
             line.bounds.left = line.bounds.left.min(zone.line_bounds.left);
             line.bounds.top = line.bounds.top.min(zone.line_bounds.top);
             line.bounds.right = line.bounds.right.max(zone.line_bounds.right);
@@ -2345,7 +2437,7 @@ fn pdf_keyboard_lines(mut zones: Vec<PdfSelectionZone>) -> Vec<PdfSelectionRow> 
             });
         }
     }
-    lines
+    Ok(lines)
 }
 
 fn searchable_page_text_bounded(

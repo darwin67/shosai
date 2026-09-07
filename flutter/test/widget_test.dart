@@ -149,7 +149,14 @@ void main() {
     final selections = <ReaderSelection>[const ReaderSelection(0, 1)];
     final operations = <String>{'write'};
     final carets = <FlutterSelectionCaret>[
-      FlutterSelectionCaret(offset: BigInt.zero, x: 0, top: 0, bottom: 1),
+      FlutterSelectionCaret(
+        offset: BigInt.zero,
+        x: 0,
+        alongLine: 0,
+        vertical: false,
+        top: 0,
+        bottom: 1,
+      ),
     ];
     final lines = <FlutterSelectionVisualLine>[
       FlutterSelectionVisualLine(carets: carets),
@@ -1104,6 +1111,8 @@ void main() {
               FlutterSelectionCaret(
                 offset: BigInt.from(offset),
                 x: x,
+                alongLine: x,
+                vertical: false,
                 top: 10,
                 bottom: 30,
               ),
@@ -1122,6 +1131,8 @@ void main() {
               FlutterSelectionCaret(
                 offset: BigInt.from(offset),
                 x: x,
+                alongLine: x,
+                vertical: false,
                 top: 50,
                 bottom: 70,
               ),
@@ -1207,6 +1218,43 @@ void main() {
     await bridge.disposed.future;
   });
 
+  test(
+    'line movement preserves along-line affinity between vertical lines',
+    () async {
+      FlutterSelectionCaret caret(int offset, double x, double alongLine) =>
+          FlutterSelectionCaret(
+            offset: BigInt.from(offset),
+            x: x,
+            alongLine: alongLine,
+            vertical: true,
+            top: 0,
+            bottom: 100,
+          );
+      final bridge = _ControlledBridge(
+        selectionVisualLines: [
+          FlutterSelectionVisualLine(
+            carets: [caret(1, 10, 10), caret(2, 10, 50), caret(3, 10, 90)],
+          ),
+          FlutterSelectionVisualLine(
+            carets: [caret(4, 40, 5), caret(5, 40, 52), caret(8, 40, 95)],
+          ),
+        ],
+      );
+      final controller = _epubController(bridge);
+      await _openControlled(controller, bridge, '/tmp/book.epub');
+      controller.dispatch(const ReaderSelectionStarted(2));
+      controller.dispatch(const ReaderSelectionEnded());
+      controller.dispatch(
+        const ReaderSelectionKeyboardExtended(ReaderSelectionMovement.nextLine),
+      );
+
+      expect(controller.model.anchor, 2);
+      expect(controller.model.focus, 5);
+      controller.dispose();
+      await bridge.disposed.future;
+    },
+  );
+
   test('keyboard movement safely skips non-navigable metadata lines', () async {
     FlutterSelectionVisualLine line(int offset, double top) =>
         FlutterSelectionVisualLine(
@@ -1214,6 +1262,8 @@ void main() {
             FlutterSelectionCaret(
               offset: BigInt.from(offset),
               x: 10,
+              alongLine: 10,
+              vertical: false,
               top: top,
               bottom: top + 10,
             ),
@@ -1550,6 +1600,46 @@ void main() {
       controller.dispose();
       await bridge.disposed.future;
     });
+  }
+
+  for (final body in <String?>[null, 'edited note']) {
+    test(
+      'annotation ${body == null ? 'recolor' : 'note'} handles cancellation allocation failure',
+      () async {
+        final bridge = _ControlledBridge(
+          initialAnnotations: [_annotation('one')],
+          immediateLists: true,
+        );
+        final controller = _epubController(bridge);
+        await _openControlled(controller, bridge, '/tmp/a.epub');
+        bridge.failCancellationCreation = true;
+
+        controller.dispatch(
+          ReaderAnnotationUpdated('one', FlutterHighlightColor.green, body),
+        );
+        await Future<void>.delayed(Duration.zero);
+        expect(
+          controller.model.annotationError,
+          contains('cancellation tokens'),
+        );
+        expect(controller.model.annotationOperations, isEmpty);
+        expect(bridge.updateCalls, 0);
+
+        bridge.failCancellationCreation = false;
+        bridge.updateCompleter = null;
+        controller.dispatch(
+          ReaderAnnotationUpdated('one', FlutterHighlightColor.blue, body),
+        );
+        while (controller.model.annotationOperations.isNotEmpty) {
+          await Future<void>.delayed(Duration.zero);
+        }
+        expect(controller.model.annotationError, isNull);
+        expect(bridge.updateCalls, 1);
+
+        controller.dispose();
+        await bridge.disposed.future;
+      },
+    );
   }
 
   test(
@@ -2458,6 +2548,7 @@ final class _ControlledBridge implements FlutterBridge {
   var renderCalls = 0;
   var finishedOperations = 0;
   var disposeCount = 0;
+  var failCancellationCreation = false;
   var _nextId = BigInt.one;
   final _listedDocuments = <BigInt>{};
   final createdRanges = <(BigInt, BigInt)>[];
@@ -2479,6 +2570,12 @@ final class _ControlledBridge implements FlutterBridge {
   @override
   BigInt createCancellation() {
     _alive();
+    if (failCancellationCreation) {
+      throw const FlutterBridgeError(
+        kind: FlutterBridgeErrorKind.invalidRequest,
+        message: 'too many cancellation tokens',
+      );
+    }
     final id = _nextId;
     _nextId += BigInt.one;
     createdCancellations.add(id);
@@ -2560,24 +2657,32 @@ final class _ControlledBridge implements FlutterBridge {
                 FlutterSelectionCaret(
                   offset: BigInt.one,
                   x: 20,
+                  alongLine: 20,
+                  vertical: false,
                   top: 10,
                   bottom: 30,
                 ),
                 FlutterSelectionCaret(
                   offset: BigInt.from(2),
                   x: 30,
+                  alongLine: 30,
+                  vertical: false,
                   top: 10,
                   bottom: 30,
                 ),
                 FlutterSelectionCaret(
                   offset: BigInt.from(3),
                   x: 40,
+                  alongLine: 40,
+                  vertical: false,
                   top: 10,
                   bottom: 30,
                 ),
                 FlutterSelectionCaret(
                   offset: BigInt.from(4),
                   x: 50,
+                  alongLine: 50,
+                  vertical: false,
                   top: 10,
                   bottom: 30,
                 ),
@@ -2588,18 +2693,24 @@ final class _ControlledBridge implements FlutterBridge {
                 FlutterSelectionCaret(
                   offset: BigInt.from(4),
                   x: 20,
+                  alongLine: 20,
+                  vertical: false,
                   top: 60,
                   bottom: 80,
                 ),
                 FlutterSelectionCaret(
                   offset: BigInt.from(5),
                   x: 30,
+                  alongLine: 30,
+                  vertical: false,
                   top: 60,
                   bottom: 80,
                 ),
                 FlutterSelectionCaret(
                   offset: BigInt.from(8),
                   x: 70,
+                  alongLine: 70,
+                  vertical: false,
                   top: 60,
                   bottom: 80,
                 ),

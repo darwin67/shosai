@@ -1294,9 +1294,22 @@ final class ReaderController implements Listenable {
       return;
     }
     final generation = _model.generation;
+    late final BigInt cancellation;
+    try {
+      cancellation = _bridge.createCancellation();
+    } on FlutterBridgeError catch (error) {
+      if (_isCurrent(generation)) {
+        _emit(_model.copyWith(annotationError: error.message));
+      }
+      return;
+    } catch (error) {
+      if (_isCurrent(generation)) {
+        _emit(_model.copyWith(annotationError: error.toString()));
+      }
+      return;
+    }
     final revision = ++_annotationRevision;
     final operationId = 'update:${message.id}:${++_nextOperationId}';
-    final cancellation = _bridge.createCancellation();
     _annotationCancellations.add(cancellation);
     _activeBridgeOperations += 1;
     _emit(
@@ -1727,7 +1740,7 @@ int? _adjacentOffset(List<int> offsets, int? current, bool forward) {
     offset: next.offset.toInt(),
     origin: origin.offset.toInt(),
     line: destinationLine,
-    preferredX: next.x,
+    preferredX: next.alongLine,
   );
 }
 
@@ -1755,7 +1768,7 @@ int? _adjacentOffset(List<int> offsets, int? current, bool forward) {
   final targetX = preferredX ?? origin.preferredX;
   final caret = carets.reduce(
     (best, candidate) =>
-        (candidate.x - targetX).abs() < (best.x - targetX).abs()
+        (candidate.alongLine - targetX).abs() < (best.alongLine - targetX).abs()
         ? candidate
         : best,
   );
@@ -1805,14 +1818,18 @@ int? _navigableLine(List<FlutterSelectionVisualLine> lines, bool forward) {
       preferredLine < lines.length) {
     for (final caret in lines[preferredLine].carets) {
       if (caret.offset.toInt() == offset) {
-        return (offset: offset, line: preferredLine, preferredX: caret.x);
+        return (
+          offset: offset,
+          line: preferredLine,
+          preferredX: caret.alongLine,
+        );
       }
     }
   }
   for (var line = 0; line < lines.length; line += 1) {
     for (final caret in lines[line].carets) {
       if (caret.offset.toInt() == offset) {
-        return (offset: offset, line: line, preferredX: caret.x);
+        return (offset: offset, line: line, preferredX: caret.alongLine);
       }
     }
   }
@@ -1835,7 +1852,7 @@ int? _navigableLine(List<FlutterSelectionVisualLine> lines, bool forward) {
       final dx = caret.x - x;
       final distance = dx * dx + dy * dy;
       if (bestDistance == null || distance < bestDistance) {
-        best = (offset: offset, line: line, preferredX: caret.x);
+        best = (offset: offset, line: line, preferredX: caret.alongLine);
         bestDistance = distance;
       }
     }
@@ -1851,7 +1868,11 @@ int? _navigableLine(List<FlutterSelectionVisualLine> lines, bool forward) {
   final carets = lines[line].carets;
   if (carets.isEmpty) return null;
   final caret = forward ? carets.first : carets.last;
-  return (offset: caret.offset.toInt(), line: line, preferredX: caret.x);
+  return (
+    offset: caret.offset.toInt(),
+    line: line,
+    preferredX: caret.alongLine,
+  );
 }
 
 FlutterSelectionSurface _freezeSurface(FlutterSelectionSurface surface) {
