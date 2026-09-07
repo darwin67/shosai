@@ -204,6 +204,19 @@ pub struct FlutterSelectionEndpoint {
     pub rect: FlutterSelectionRect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlutterSelectionCaret {
+    pub offset: usize,
+    pub x: f32,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlutterSelectionVisualLine {
+    pub carets: Vec<FlutterSelectionCaret>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlutterSelectionSurface {
     pub handle: FlutterSelectionHandle,
@@ -213,6 +226,9 @@ pub struct FlutterSelectionSurface {
     pub resource_path: Option<String>,
     pub raster: Option<FlutterRenderedBuffer>,
     pub endpoints: Vec<FlutterSelectionEndpoint>,
+    pub grapheme_boundaries: Vec<u32>,
+    pub word_boundaries: Vec<u32>,
+    pub visual_lines: Vec<FlutterSelectionVisualLine>,
 }
 
 impl From<SelectionSurface> for FlutterSelectionSurface {
@@ -242,6 +258,32 @@ impl From<SelectionSurface> for FlutterSelectionSurface {
                         right: endpoint.rect.right,
                         bottom: endpoint.rect.bottom,
                     },
+                })
+                .collect(),
+            grapheme_boundaries: value
+                .grapheme_boundaries
+                .into_iter()
+                .map(|offset| offset as u32)
+                .collect(),
+            word_boundaries: value
+                .word_boundaries
+                .into_iter()
+                .map(|offset| offset as u32)
+                .collect(),
+            visual_lines: value
+                .visual_lines
+                .into_iter()
+                .map(|line| FlutterSelectionVisualLine {
+                    carets: line
+                        .carets
+                        .into_iter()
+                        .map(|caret| FlutterSelectionCaret {
+                            offset: caret.offset,
+                            x: caret.x,
+                            top: caret.top,
+                            bottom: caret.bottom,
+                        })
+                        .collect(),
                 })
                 .collect(),
         }

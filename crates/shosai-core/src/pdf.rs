@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use pdfium_render::prelude::*;
 use unicode_bidi::BidiClass;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::document::{Document, DocumentMetadata, RenderedPage};
 
@@ -39,6 +40,19 @@ pub struct PdfSelectionEndpoint {
     pub character: usize,
     pub page_x: f32,
     pub page_y: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PdfSelectionCaret {
+    pub character: usize,
+    pub x: f32,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PdfSelectionLine {
+    pub carets: Vec<PdfSelectionCaret>,
 }
 
 #[derive(Clone, Debug)]
@@ -132,18 +146,42 @@ impl PdfSelectionSnapshot {
             .collect()
     }
 
-    /// Return PDF page-coordinate rectangles for a durable character range.
-    pub fn page_rectangles(&self, start: usize, end: usize) -> Vec<(usize, (f32, f32, f32, f32))> {
+    /// Visual lines and their retained caret positions, as classified by the
+    /// PDF extractor. Consumers must not reconstruct lines from glyph bounds.
+    pub fn visual_lines(&self) -> Vec<PdfSelectionLine> {
         self.rows
             .iter()
-            .flat_map(|row| &row.zones)
-            .filter(|zone| {
-                zone.endpoint.character == zone.character
-                    && start <= zone.character
-                    && zone.character < end
+            .map(|row| {
+                let mut carets = row
+                    .zones
+                    .iter()
+                    .map(|zone| PdfSelectionCaret {
+                        character: zone.endpoint.character,
+                        x: (zone.bounds.left + zone.bounds.right) / 2.0,
+                        top: row.bounds.top,
+                        bottom: row.bounds.bottom,
+                    })
+                    .collect::<Vec<_>>();
+                carets.sort_by(|left, right| left.x.total_cmp(&right.x));
+                carets.dedup_by(|left, right| left.character == right.character);
+                PdfSelectionLine { carets }
             })
-            .map(|zone| (zone.character, zone.page_bounds))
             .collect()
+    }
+
+    /// Return PDF page-coordinate rectangles for a durable character range.
+    pub fn page_rectangles(&self, start: usize, end: usize) -> Vec<(usize, (f32, f32, f32, f32))> {
+        let mut rectangles = self
+            .rows
+            .iter()
+            .flat_map(|row| &row.zones)
+            .filter(|zone| start <= zone.character && zone.character < end)
+            .map(|zone| (zone.character, zone.page_bounds))
+            .collect::<Vec<_>>();
+        // Each PDFium character owns two hit zones. Keep one durable rectangle
+        // per original character regardless of grapheme-snapped caret offsets.
+        rectangles.dedup_by_key(|(character, _)| *character);
+        rectangles
     }
 
     pub fn retained_bytes(&self) -> usize {
@@ -226,8 +264,10 @@ mod tests {
     use crate::document::Document;
 
     use super::{
-        BoundedPageTextError, PdfDoc, bundled_pdfium_path, read_pdf_file_with_limit,
-        validate_pdf_bitmap_size, validate_pdf_preflight, validate_pdf_selection_endpoint_count,
+        BoundedPageTextError, PdfDoc, PdfSelectionEndpoint, PdfSelectionRect, PdfSelectionZone,
+        bundled_pdfium_path, grapheme_boundary_for_character, grapheme_ranges, pdf_selection_rows,
+        read_pdf_file_with_limit, validate_pdf_bitmap_size, validate_pdf_preflight,
+        validate_pdf_selection_endpoint_count,
     };
     use std::cell::Cell;
     use std::fs::File;
@@ -384,6 +424,38 @@ mod tests {
         assert_eq!(snapshot.page_rectangles(0, 1).len(), 1);
         assert_eq!(snapshot.page_rectangles(1, 2).len(), 1);
         assert_eq!(snapshot.page_rectangles(2, 1), Vec::new());
+    }
+
+    #[test]
+    fn decomposed_accent_has_no_interior_caret_boundary() {
+        let ranges = grapheme_ranges("e\u{301}x");
+        assert_eq!(ranges, vec![0..2, 2..3]);
+        assert_eq!(grapheme_boundary_for_character(&ranges, 1, false), Some(0));
+        assert_eq!(grapheme_boundary_for_character(&ranges, 1, true), Some(2));
+    }
+
+    #[test]
+    fn overlapping_mixed_height_pdf_glyphs_share_a_visual_line() {
+        let zone = |character, top, bottom| PdfSelectionZone {
+            bounds: PdfSelectionRect {
+                left: character as f32,
+                top,
+                right: character as f32 + 1.0,
+                bottom,
+            },
+            page_bounds: (0.0, 0.0, 1.0, 1.0),
+            character,
+            endpoint: PdfSelectionEndpoint {
+                underlying_character: character,
+                character,
+                page_x: 0.0,
+                page_y: 0.0,
+            },
+        };
+        let rows = pdf_selection_rows(vec![zone(0, 8.0, 12.0), zone(1, 9.0, 30.0)]);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].zones.len(), 2);
     }
 
     #[test]
@@ -1446,6 +1518,18 @@ impl PdfDoc {
                     ),
                     BoundedPageTextError::Document(error) => error,
                 })?;
+        // PDFium indexes remain untouched for annotation ranges, while every
+        // interactive half-zone is snapped to an extended grapheme boundary.
+        let graphemes = grapheme_ranges(&owned_text);
+        for zone in &mut zones {
+            if let Some(boundary) = grapheme_boundary_for_character(
+                &graphemes,
+                zone.character,
+                zone.endpoint.character != zone.character,
+            ) {
+                zone.endpoint.character = boundary;
+            }
+        }
         let snapshot = PdfSelectionSnapshot {
             bitmap_width,
             bitmap_height,
@@ -1571,6 +1655,28 @@ impl PdfDoc {
             pixels: bytes::Bytes::from(pixels),
         })
     }
+}
+
+fn grapheme_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut scalar = 0;
+    text.graphemes(true)
+        .map(|grapheme| {
+            let start = scalar;
+            scalar += grapheme.chars().count();
+            start..scalar
+        })
+        .collect()
+}
+
+fn grapheme_boundary_for_character(
+    graphemes: &[std::ops::Range<usize>],
+    character: usize,
+    trailing: bool,
+) -> Option<usize> {
+    graphemes
+        .iter()
+        .find(|range| range.start <= character && character < range.end)
+        .map(|range| if trailing { range.end } else { range.start })
 }
 
 fn selection_neighbor_direction(
@@ -1786,11 +1892,9 @@ fn pdf_selection_rows(mut zones: Vec<PdfSelectionZone>) -> Vec<PdfSelectionRow> 
     });
     let mut rows: Vec<PdfSelectionRow> = Vec::new();
     for zone in zones {
-        let center_y = (zone.bounds.top + zone.bounds.bottom) / 2.0;
-        if let Some(row) = rows
-            .last_mut()
-            .filter(|row| center_y >= row.bounds.top && center_y < row.bounds.bottom)
-        {
+        if let Some(row) = rows.last_mut().filter(|row| {
+            zone.bounds.bottom > row.bounds.top && zone.bounds.top < row.bounds.bottom
+        }) {
             row.bounds.left = row.bounds.left.min(zone.bounds.left);
             row.bounds.top = row.bounds.top.min(zone.bounds.top);
             row.bounds.right = row.bounds.right.max(zone.bounds.right);

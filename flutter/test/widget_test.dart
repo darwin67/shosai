@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -82,6 +83,9 @@ void main() {
         height: 1,
         text: 'a',
         endpoints: endpoints,
+        graphemeBoundaries: Uint32List.fromList([0, 1]),
+        wordBoundaries: Uint32List.fromList([0, 1]),
+        visualLines: const [],
       ),
       annotations: annotations,
       savedSelections: selections,
@@ -440,6 +444,9 @@ void main() {
             byteLen: BigInt.from(4),
           ),
           endpoints: const [],
+          graphemeBoundaries: Uint32List(0),
+          wordBoundaries: Uint32List(0),
+          visualLines: const [],
         ),
       );
       await bridge.disposed.future;
@@ -879,6 +886,56 @@ void main() {
     },
   );
 
+  test('pointer cancellation only clears its owning interaction', () async {
+    final bridge = _ControlledBridge();
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/book.epub');
+
+    controller.dispatch(const ReaderSelectionPointerStarted(7, 1));
+    controller.dispatch(const ReaderSelectionPointerMoved(7, 8));
+    controller.dispatch(const ReaderSelectionPointerCancelled(9));
+    expect(controller.model.selectionPhase, ReaderSelectionPhase.selecting);
+    expect(controller.model.focus, 8);
+
+    controller.dispatch(const ReaderSelectionPointerCancelled(7));
+    expect(controller.model.selectionPhase, ReaderSelectionPhase.idle);
+    expect(controller.model.anchor, isNull);
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
+  test('keyboard selection crosses a collapsed retained anchor', () async {
+    final bridge = _ControlledBridge();
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/book.epub');
+    controller.dispatch(const ReaderSelectionStarted(3));
+    controller.dispatch(const ReaderSelectionExtended(4));
+    controller.dispatch(const ReaderSelectionEnded());
+
+    controller.dispatch(
+      const ReaderSelectionKeyboardExtended(
+        ReaderSelectionMovement.previousGrapheme,
+      ),
+    );
+    expect(controller.model.selectionPhase, ReaderSelectionPhase.idle);
+    expect(controller.model.anchor, 3);
+    expect(controller.model.focus, 3);
+    controller.dispatch(
+      const ReaderSelectionKeyboardExtended(
+        ReaderSelectionMovement.previousGrapheme,
+      ),
+    );
+    expect(controller.model.selectionPhase, ReaderSelectionPhase.selected);
+    expect(controller.model.anchor, 3);
+    expect(controller.model.focus, 2);
+
+    controller.dispatch(const ReaderSelectionCommitted());
+    await Future<void>.delayed(Duration.zero);
+    expect(bridge.createdRanges.single, (BigInt.from(2), BigInt.from(3)));
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
   test('an old create cannot clear a newer selection', () async {
     final bridge = _ControlledBridge();
     final controller = _epubController(bridge);
@@ -904,6 +961,34 @@ void main() {
     controller.dispose();
     await bridge.disposed.future;
   });
+
+  test(
+    'an old create failure is not attributed to a newer selection',
+    () async {
+      final bridge = _ControlledBridge();
+      final controller = _epubController(bridge);
+      await _openControlled(controller, bridge, '/tmp/a.epub');
+      bridge.createCompleter = Completer<FlutterAnnotation>();
+      controller.dispatch(const ReaderSelectionStarted(1));
+      controller.dispatch(const ReaderSelectionExtended(3));
+      controller.dispatch(const ReaderSelectionEnded());
+      controller.dispatch(const ReaderSelectionCommitted());
+      controller.dispatch(const ReaderSelectionStarted(7));
+      controller.dispatch(const ReaderSelectionExtended(9));
+      controller.dispatch(const ReaderSelectionEnded());
+      bridge.createCompleter!.completeError(StateError('old create failed'));
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.model.selectionPhase, ReaderSelectionPhase.selected);
+      expect(controller.model.anchor, 7);
+      expect(controller.model.focus, 9);
+      expect(controller.model.selectionError, isNull);
+      expect(controller.model.annotationError, contains('earlier highlight'));
+      controller.dispose();
+      await bridge.disposed.future;
+    },
+  );
 
   for (final createFails in [false, true]) {
     test(
@@ -1376,9 +1461,10 @@ void main() {
           expect(painter().savedSelections, isEmpty);
           final gesture = await tester.createGesture(kind: device);
           await gesture.down(surfaceTopLeft + Offset(side * .2, side * .2));
-          await gesture.moveBy(Offset(side * .05, side * .05));
           await tester.pump();
-          await gesture.moveBy(Offset(side * .45, side * .45));
+          expect(painter().anchor, 1, reason: 'press must retain the anchor');
+          expect(painter().focus, 1);
+          await gesture.moveBy(Offset(side * .5, side * .5));
           await gesture.up();
           await tester.pump();
 
@@ -1440,17 +1526,38 @@ void main() {
     await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
     await tester.pump();
     expect(find.text('Save highlight'), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(
+            find.widgetWithText(FilledButton, 'Save highlight'),
+          )
+          .focusNode!
+          .hasFocus,
+      isTrue,
+    );
 
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pump();
     expect(find.text('Save highlight'), findsNothing);
 
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
     await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pump();
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pumpAndSettle();
-    expect(bridge.createdRanges.single, (BigInt.one, BigInt.from(8)));
+    expect(bridge.createdRanges.single, (BigInt.one, BigInt.from(4)));
+
+    await tester.tap(find.byKey(const ValueKey('reader-selection-surface')));
+    await tester.pump();
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(bridge.createdRanges.last, (BigInt.one, BigInt.from(4)));
 
     await tester.pumpWidget(const SizedBox());
     await bridge.disposed.future;
@@ -1480,9 +1587,23 @@ void main() {
       kind: ui.PointerDeviceKind.mouse,
     );
     await gesture.down(topLeft + Offset(side * .2, side * .2));
-    await gesture.moveBy(Offset(side * .05, side * .05));
+    await gesture.moveBy(Offset(side * .5, side * .5));
     await tester.pump();
-    await gesture.moveBy(Offset(side * .45, side * .45));
+    expect(
+      (tester
+                  .widget<CustomPaint>(
+                    find.byWidgetPredicate(
+                      (widget) =>
+                          widget is CustomPaint &&
+                          widget.painter is PagePainter,
+                    ),
+                  )
+                  .painter
+              as PagePainter)
+          .focus,
+      8,
+      reason: 'the test must establish a non-empty drag before cancellation',
+    );
     await gesture.cancel();
     await tester.pump();
 
@@ -1649,6 +1770,60 @@ final class _ControlledBridge implements FlutterBridge {
             right: 80,
             bottom: 80,
           ),
+        ),
+      ],
+      graphemeBoundaries: Uint32List.fromList([1, 2, 3, 4, 5, 8]),
+      wordBoundaries: Uint32List.fromList([1, 4, 8]),
+      visualLines: [
+        FlutterSelectionVisualLine(
+          carets: [
+            FlutterSelectionCaret(
+              offset: BigInt.one,
+              x: 20,
+              top: 10,
+              bottom: 30,
+            ),
+            FlutterSelectionCaret(
+              offset: BigInt.from(2),
+              x: 30,
+              top: 10,
+              bottom: 30,
+            ),
+            FlutterSelectionCaret(
+              offset: BigInt.from(3),
+              x: 40,
+              top: 10,
+              bottom: 30,
+            ),
+            FlutterSelectionCaret(
+              offset: BigInt.from(4),
+              x: 50,
+              top: 10,
+              bottom: 30,
+            ),
+          ],
+        ),
+        FlutterSelectionVisualLine(
+          carets: [
+            FlutterSelectionCaret(
+              offset: BigInt.from(4),
+              x: 20,
+              top: 60,
+              bottom: 80,
+            ),
+            FlutterSelectionCaret(
+              offset: BigInt.from(5),
+              x: 30,
+              top: 60,
+              bottom: 80,
+            ),
+            FlutterSelectionCaret(
+              offset: BigInt.from(8),
+              x: 70,
+              top: 60,
+              bottom: 80,
+            ),
+          ],
         ),
       ],
     );
@@ -1991,6 +2166,9 @@ class _FakeBridge implements FlutterBridge {
             )
           : null,
       endpoints: [],
+      graphemeBoundaries: Uint32List(0),
+      wordBoundaries: Uint32List(0),
+      visualLines: const [],
     );
   }
 
@@ -2161,6 +2339,9 @@ final class _SequentialBridge implements FlutterBridge {
             )
           : null,
       endpoints: [],
+      graphemeBoundaries: Uint32List(0),
+      wordBoundaries: Uint32List(0),
+      visualLines: const [],
     );
   }
 

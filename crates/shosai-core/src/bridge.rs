@@ -26,6 +26,7 @@ use crate::epub::{
     EpubTextDirection, EpubTextEndpoint, EpubTextRequest, EpubTextRun,
 };
 use crate::library::BookFormat;
+use unicode_segmentation::UnicodeSegmentation;
 
 pub const MAX_BRIDGE_BUFFER_BYTES: usize = 160 * 1024 * 1024;
 pub const MAX_BRIDGE_RETAINED_BUFFER_BYTES: usize = 320 * 1024 * 1024;
@@ -121,6 +122,22 @@ pub struct SelectionPageRect {
     pub rect: SelectionRect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SelectionCaret {
+    /// Logical scalar/PDFium-character boundary represented by this caret.
+    pub offset: usize,
+    pub x: f32,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectionVisualLine {
+    /// Carets in visual (left-to-right) order. The same offset may occur on two
+    /// wrapped lines; its line membership preserves upstream/downstream affinity.
+    pub carets: Vec<SelectionCaret>,
+}
+
 /// Owned visible-surface text and hit zones. Pointer movement consumes this
 /// value locally and never re-enters PDFium or Rust.
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +152,12 @@ pub struct SelectionSurface {
     /// The caller owns this handle and must release it after decoding.
     pub raster: Option<RenderedBuffer>,
     pub endpoints: Vec<SelectionEndpoint>,
+    /// All legal extended-grapheme caret offsets, in logical order.
+    pub grapheme_boundaries: Vec<usize>,
+    /// UAX #29 word-segment stops, including punctuation boundaries.
+    pub word_boundaries: Vec<usize>,
+    /// Renderer/extractor-produced visual line membership and caret geometry.
+    pub visual_lines: Vec<SelectionVisualLine>,
     /// Durable PDF page-coordinate character rectangles; empty for EPUB.
     pub page_rectangles: Vec<SelectionPageRect>,
 }
@@ -1473,6 +1496,7 @@ fn selection_surface(
                 .map_err(map_render_error)?;
             let (bitmap_width, bitmap_height) = snapshot.bitmap_size();
             let text = snapshot.text().to_owned();
+            let (grapheme_boundaries, word_boundaries) = navigation_boundaries(&text);
             let page_rectangles = snapshot
                 .page_rectangles(0, text.chars().count())
                 .into_iter()
@@ -1500,6 +1524,24 @@ fn selection_surface(
                         .endpoints()
                         .into_iter()
                         .map(pdf_selection_endpoint)
+                        .collect(),
+                    grapheme_boundaries,
+                    word_boundaries,
+                    visual_lines: snapshot
+                        .visual_lines()
+                        .into_iter()
+                        .map(|line| SelectionVisualLine {
+                            carets: line
+                                .carets
+                                .into_iter()
+                                .map(|caret| SelectionCaret {
+                                    offset: caret.character,
+                                    x: caret.x,
+                                    top: caret.top,
+                                    bottom: caret.bottom,
+                                })
+                                .collect(),
+                        })
                         .collect(),
                     page_rectangles,
                 },
@@ -1596,6 +1638,28 @@ fn selection_surface(
                 }
             }
             let path = document.chapter(unit).map(|chapter| chapter.path.clone());
+            let (grapheme_boundaries, word_boundaries) = navigation_boundaries(&text);
+            let visual_lines = layout
+                .lines
+                .iter()
+                .enumerate()
+                .map(|(visual_line, line)| {
+                    let mut carets = layout
+                        .endpoints
+                        .iter()
+                        .filter(|endpoint| endpoint.visual_line == visual_line)
+                        .map(|endpoint| SelectionCaret {
+                            offset: endpoint.scalar,
+                            x: endpoint.rect.x + endpoint.rect.width / 2.0,
+                            top: line.top,
+                            bottom: line.top + endpoint.rect.height,
+                        })
+                        .collect::<Vec<_>>();
+                    carets.sort_by(|left, right| left.x.total_cmp(&right.x));
+                    carets.dedup_by(|left, right| left.offset == right.offset);
+                    SelectionVisualLine { carets }
+                })
+                .collect();
             Ok(SelectionExtraction {
                 surface: SelectionSurface {
                     handle: SelectionHandle { registry: 0, id: 0 },
@@ -1619,6 +1683,9 @@ fn selection_surface(
                             },
                         })
                         .collect(),
+                    grapheme_boundaries,
+                    word_boundaries,
+                    visual_lines,
                     page_rectangles: Vec::new(),
                 },
                 raster: rasterize.then_some(raster),
@@ -1628,6 +1695,23 @@ fn selection_surface(
         }
         OpenDocument::Cbz(_) => Err(BridgeError::UnsupportedOperation(BookFormat::Cbz)),
     }
+}
+
+fn navigation_boundaries(text: &str) -> (Vec<usize>, Vec<usize>) {
+    let mut scalar = 0;
+    let mut graphemes = vec![0];
+    for grapheme in text.graphemes(true) {
+        scalar += grapheme.chars().count();
+        graphemes.push(scalar);
+    }
+    let mut words = vec![0];
+    scalar = 0;
+    for segment in text.split_word_bounds() {
+        scalar += segment.chars().count();
+        words.push(scalar);
+    }
+    words.dedup();
+    (graphemes, words)
 }
 
 struct SelectionExtraction {
@@ -1938,6 +2022,16 @@ mod tests {
 
         assert_eq!(mapped.offset, 8);
         assert_eq!((mapped.range_start, mapped.range_end), (7, 8));
+    }
+
+    #[test]
+    fn navigation_stops_are_grapheme_safe_and_unicode_word_aware() {
+        let text = "Cafe\u{301}—naïve! 東京";
+        let (graphemes, words) = navigation_boundaries(text);
+
+        assert!(graphemes.contains(&5));
+        assert!(!graphemes.contains(&4), "decomposed accent is one grapheme");
+        assert_eq!(words, vec![0, 5, 6, 11, 12, 13, 14, 15]);
     }
 
     #[test]

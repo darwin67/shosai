@@ -80,6 +80,8 @@ pub struct EpubTextEndpoint {
     pub scalar: usize,
     pub scalar_start: usize,
     pub scalar_end: usize,
+    /// Index into `EpubTextLayout::lines`, assigned by the shaper.
+    pub visual_line: usize,
 }
 #[derive(Clone, Debug)]
 pub struct EpubTextLine {
@@ -304,6 +306,7 @@ impl EpubFontBook {
                 endpoint.scalar += scalar_start;
                 endpoint.scalar_start += scalar_start;
                 endpoint.scalar_end += scalar_start;
+                endpoint.visual_line += result.lines.len();
             }
             result.width = result.width.max(layout.width);
             result.height += layout.height;
@@ -500,7 +503,7 @@ impl EpubFontBook {
         let mut lines = Vec::with_capacity(runs.len());
         let mut links = Vec::new();
         let mut endpoints = Vec::new();
-        for (run, line_range) in runs.into_iter().zip(line_ranges) {
+        for (visual_line, (run, line_range)) in runs.into_iter().zip(line_ranges).enumerate() {
             check_cancelled(is_cancelled)?;
             let ph = (run.line_height * request.scale).ceil() as usize;
             let mut rgba = if rasterize {
@@ -566,6 +569,7 @@ impl EpubFontBook {
                             scalar: left,
                             scalar_start: cluster_scalar,
                             scalar_end: after,
+                            visual_line,
                         },
                     )?;
                     checked_push_endpoint(
@@ -580,6 +584,7 @@ impl EpubFontBook {
                             scalar: right,
                             scalar_start: cluster_scalar,
                             scalar_end: after,
+                            visual_line,
                         },
                     )?;
                     cluster_scalar = after;
@@ -970,6 +975,7 @@ mod tests {
             scalar: 0,
             scalar_start: 0,
             scalar_end: 1,
+            visual_line: 0,
         };
         let mut endpoints = vec![endpoint; EPUB_TEXT_MAX_ENDPOINTS];
         let error = checked_push_endpoint(&mut endpoints, endpoint).unwrap_err();

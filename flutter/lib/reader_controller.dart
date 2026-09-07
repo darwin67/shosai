@@ -14,6 +14,7 @@ typedef PageDecoder =
     });
 
 typedef NoteEditor = Future<String?> Function(String? initialValue);
+typedef ReaderFocusAdapter = void Function(ReaderFocusTarget target);
 
 const _unchanged = Object();
 
@@ -25,6 +26,9 @@ final class ReaderModel {
     this.selectionPhase = ReaderSelectionPhase.idle,
     this.anchor,
     this.focus,
+    this.selectionPointer,
+    this.selectionVisualLine,
+    this.selectionPreferredX,
     List<ReaderSelection> savedSelections = const [],
     List<FlutterAnnotation> annotations = const [],
     Set<String> annotationOperations = const {},
@@ -48,6 +52,9 @@ final class ReaderModel {
   final ReaderSelectionPhase selectionPhase;
   final int? anchor;
   final int? focus;
+  final int? selectionPointer;
+  final int? selectionVisualLine;
+  final double? selectionPreferredX;
   final List<ReaderSelection> savedSelections;
   final List<FlutterAnnotation> annotations;
   final Set<String> annotationOperations;
@@ -66,6 +73,9 @@ final class ReaderModel {
     ReaderSelectionPhase? selectionPhase,
     Object? anchor = _unchanged,
     Object? focus = _unchanged,
+    Object? selectionPointer = _unchanged,
+    Object? selectionVisualLine = _unchanged,
+    Object? selectionPreferredX = _unchanged,
     List<ReaderSelection>? savedSelections,
     List<FlutterAnnotation>? annotations,
     Set<String>? annotationOperations,
@@ -90,6 +100,15 @@ final class ReaderModel {
       selectionPhase: selectionPhase ?? this.selectionPhase,
       anchor: identical(anchor, _unchanged) ? this.anchor : anchor as int?,
       focus: identical(focus, _unchanged) ? this.focus : focus as int?,
+      selectionPointer: identical(selectionPointer, _unchanged)
+          ? this.selectionPointer
+          : selectionPointer as int?,
+      selectionVisualLine: identical(selectionVisualLine, _unchanged)
+          ? this.selectionVisualLine
+          : selectionVisualLine as int?,
+      selectionPreferredX: identical(selectionPreferredX, _unchanged)
+          ? this.selectionPreferredX
+          : selectionPreferredX as double?,
       savedSelections: savedSelections == null
           ? this.savedSelections
           : List.unmodifiable(savedSelections),
@@ -117,6 +136,8 @@ final class ReaderModel {
 enum ReaderSelectionPhase { idle, selecting, selected, committing }
 
 enum ReaderContentState { loading, ready, failed }
+
+enum ReaderFocusTarget { surface, actions }
 
 enum ReaderSelectionMovement {
   previousGrapheme,
@@ -155,6 +176,28 @@ final class ReaderSelectionExtended extends ReaderMessage {
   final int offset;
 }
 
+final class ReaderSelectionPointerStarted extends ReaderMessage {
+  const ReaderSelectionPointerStarted(this.pointer, this.offset);
+  final int pointer;
+  final int offset;
+}
+
+final class ReaderSelectionPointerMoved extends ReaderMessage {
+  const ReaderSelectionPointerMoved(this.pointer, this.offset);
+  final int pointer;
+  final int offset;
+}
+
+final class ReaderSelectionPointerEnded extends ReaderMessage {
+  const ReaderSelectionPointerEnded(this.pointer);
+  final int pointer;
+}
+
+final class ReaderSelectionPointerCancelled extends ReaderMessage {
+  const ReaderSelectionPointerCancelled(this.pointer);
+  final int pointer;
+}
+
 final class ReaderSelectionKeyboardExtended extends ReaderMessage {
   const ReaderSelectionKeyboardExtended(this.movement);
   final ReaderSelectionMovement movement;
@@ -162,6 +205,10 @@ final class ReaderSelectionKeyboardExtended extends ReaderMessage {
 
 final class ReaderSelectionEnded extends ReaderMessage {
   const ReaderSelectionEnded();
+}
+
+final class ReaderSelectionActionsRequested extends ReaderMessage {
+  const ReaderSelectionActionsRequested();
 }
 
 final class ReaderSelectionCommitted extends ReaderMessage {
@@ -322,13 +369,16 @@ final class ReaderController implements Listenable {
     required FlutterBridge bridge,
     required PageDecoder decoder,
     NoteEditor? noteEditor,
+    ReaderFocusAdapter? focusAdapter,
   }) : _bridge = bridge,
        _decoder = decoder,
-       _noteEditor = noteEditor ?? ((_) async => null);
+       _noteEditor = noteEditor ?? ((_) async => null),
+       _focusAdapter = focusAdapter ?? ((_) {});
 
   final FlutterBridge _bridge;
   final PageDecoder _decoder;
   final NoteEditor _noteEditor;
+  final ReaderFocusAdapter _focusAdapter;
 
   ReaderModel _model = ReaderModel();
   BigInt? _activeCancellation;
@@ -362,10 +412,22 @@ final class ReaderController implements Listenable {
         _selectionStarted(message.offset);
       case ReaderSelectionExtended():
         _selectionExtended(message.offset);
+      case ReaderSelectionPointerStarted():
+        _selectionPointerStarted(message.pointer, message.offset);
+      case ReaderSelectionPointerMoved():
+        _selectionPointerMoved(message.pointer, message.offset);
+      case ReaderSelectionPointerEnded():
+        _selectionPointerEnded(message.pointer);
+      case ReaderSelectionPointerCancelled():
+        _selectionPointerCancelled(message.pointer);
       case ReaderSelectionKeyboardExtended():
         _selectionKeyboardExtended(message.movement);
       case ReaderSelectionEnded():
         _selectionEnded();
+      case ReaderSelectionActionsRequested():
+        if (_model.selectionPhase == ReaderSelectionPhase.selected) {
+          _focusAdapter(ReaderFocusTarget.actions);
+        }
       case ReaderSelectionCommitted():
         _selectionCommitted();
       case ReaderAnnotationUpdated():
@@ -483,6 +545,9 @@ final class ReaderController implements Listenable {
         selectionPhase: ReaderSelectionPhase.idle,
         anchor: null,
         focus: null,
+        selectionPointer: null,
+        selectionVisualLine: null,
+        selectionPreferredX: null,
         savedSelections: const [],
         annotations: const [],
         annotationOperations: const {},
@@ -691,6 +756,9 @@ final class ReaderController implements Listenable {
         selectionPhase: ReaderSelectionPhase.selecting,
         anchor: offset,
         focus: offset,
+        selectionPointer: null,
+        selectionVisualLine: null,
+        selectionPreferredX: null,
       ),
     );
   }
@@ -700,16 +768,46 @@ final class ReaderController implements Listenable {
     _emit(_model.copyWith(focus: offset));
   }
 
+  void _selectionPointerStarted(int pointer, int offset) {
+    if (_model.selectionSurface == null || _closing) return;
+    _focusAdapter(ReaderFocusTarget.surface);
+    _selectionRevision += 1;
+    _emit(
+      _model.copyWith(
+        selectionPhase: ReaderSelectionPhase.selecting,
+        anchor: offset,
+        focus: offset,
+        selectionPointer: pointer,
+        selectionVisualLine: null,
+        selectionPreferredX: null,
+      ),
+    );
+  }
+
+  void _selectionPointerMoved(int pointer, int offset) {
+    if (_model.selectionPhase != ReaderSelectionPhase.selecting ||
+        _model.selectionPointer != pointer) {
+      return;
+    }
+    _emit(_model.copyWith(focus: offset));
+  }
+
+  void _selectionPointerEnded(int pointer) {
+    if (_model.selectionPointer != pointer) return;
+    _selectionEnded();
+  }
+
+  void _selectionPointerCancelled(int pointer) {
+    if (_model.selectionPointer != pointer) return;
+    _selectionCancelled();
+  }
+
   void _selectionKeyboardExtended(ReaderSelectionMovement movement) {
     final surface = _model.selectionSurface;
-    if (surface == null || surface.endpoints.isEmpty || _closing) return;
-    final offsets =
-        surface.endpoints
-            .map((endpoint) => endpoint.offset.toInt())
-            .toSet()
-            .toList()
-          ..sort();
-    if (offsets.length < 2) return;
+    if (surface == null || surface.graphemeBoundaries.length < 2 || _closing) {
+      return;
+    }
+    final graphemes = surface.graphemeBoundaries.toList(growable: false);
 
     final forward = switch (movement) {
       ReaderSelectionMovement.nextGrapheme ||
@@ -718,39 +816,73 @@ final class ReaderController implements Listenable {
       _ => false,
     };
     final current = _model.focus;
-    final next = switch (movement) {
-      ReaderSelectionMovement.previousGrapheme ||
-      ReaderSelectionMovement.nextGrapheme => _adjacentOffset(
-        offsets,
-        current,
-        forward,
-      ),
-      ReaderSelectionMovement.previousWord ||
-      ReaderSelectionMovement.nextWord => _wordOffset(
-        surface.text,
-        offsets,
-        current,
-        forward,
-      ),
+    final lineMove = switch (movement) {
       ReaderSelectionMovement.previousLine ||
       ReaderSelectionMovement.nextLine => _lineOffset(
-        surface.endpoints,
+        surface.visualLines,
         current,
+        _model.selectionVisualLine,
+        _model.selectionPreferredX,
         forward,
       ),
+      _ => null,
     };
+    final boundaries = switch (movement) {
+      ReaderSelectionMovement.previousWord ||
+      ReaderSelectionMovement.nextWord => surface.wordBoundaries.toList(
+        growable: false,
+      ),
+      _ => graphemes,
+    };
+    final next =
+        lineMove?.offset ??
+        switch (movement) {
+          ReaderSelectionMovement.previousGrapheme ||
+          ReaderSelectionMovement.nextGrapheme ||
+          ReaderSelectionMovement.previousWord ||
+          ReaderSelectionMovement.nextWord => _adjacentOffset(
+            boundaries,
+            current,
+            forward,
+          ),
+          ReaderSelectionMovement.previousLine ||
+          ReaderSelectionMovement.nextLine => null,
+        };
     if (next == null) return;
-    final anchor = _model.anchor ?? (forward ? offsets.first : offsets.last);
+    final anchor =
+        _model.anchor ?? (forward ? graphemes.first : graphemes.last);
+    final affinity =
+        lineMove ??
+        _caretForOffset(surface.visualLines, next, _model.selectionVisualLine);
+    final vertical =
+        movement == ReaderSelectionMovement.previousLine ||
+        movement == ReaderSelectionMovement.nextLine;
+    _selectionRevision += 1;
     if (anchor == next) {
-      _selectionCancelled();
+      _emit(
+        _model.copyWith(
+          selectionPhase: ReaderSelectionPhase.idle,
+          anchor: anchor,
+          focus: anchor,
+          selectionPointer: null,
+          selectionVisualLine: affinity?.line,
+          selectionPreferredX: vertical
+              ? _model.selectionPreferredX ?? affinity?.preferredX
+              : affinity?.preferredX,
+        ),
+      );
       return;
     }
-    _selectionRevision += 1;
     _emit(
       _model.copyWith(
         selectionPhase: ReaderSelectionPhase.selected,
         anchor: anchor,
         focus: next,
+        selectionPointer: null,
+        selectionVisualLine: affinity?.line,
+        selectionPreferredX: vertical
+            ? _model.selectionPreferredX ?? affinity?.preferredX
+            : affinity?.preferredX,
       ),
     );
   }
@@ -766,6 +898,7 @@ final class ReaderController implements Listenable {
             : ReaderSelectionPhase.idle,
         anchor: anchor == focus ? null : anchor,
         focus: anchor == focus ? null : focus,
+        selectionPointer: null,
       ),
     );
   }
@@ -1040,7 +1173,12 @@ final class ReaderController implements Listenable {
             : null,
         anchor: ownsSelection && message.error == null ? null : _unchanged,
         focus: ownsSelection && message.error == null ? null : _unchanged,
-        error: message.error ?? _unchanged,
+        selectionError: ownsSelection && message.error != null
+            ? message.error
+            : _unchanged,
+        annotationError: !ownsSelection && message.error != null
+            ? 'An earlier highlight could not be saved: ${message.error}'
+            : _unchanged,
       ),
     );
   }
@@ -1054,6 +1192,9 @@ final class ReaderController implements Listenable {
           anchor: item.start.toInt(),
           focus: item.end.toInt(),
           selectionPhase: ReaderSelectionPhase.selected,
+          selectionPointer: null,
+          selectionVisualLine: null,
+          selectionPreferredX: null,
         ),
       );
     }
@@ -1066,8 +1207,12 @@ final class ReaderController implements Listenable {
         selectionPhase: ReaderSelectionPhase.idle,
         anchor: null,
         focus: null,
+        selectionPointer: null,
+        selectionVisualLine: null,
+        selectionPreferredX: null,
       ),
     );
+    _focusAdapter(ReaderFocusTarget.surface);
   }
 
   void _openFailed(_ReaderOpenFailed message) {
@@ -1135,6 +1280,9 @@ final class ReaderController implements Listenable {
       selectionPhase: ReaderSelectionPhase.idle,
       anchor: null,
       focus: null,
+      selectionPointer: null,
+      selectionVisualLine: null,
+      selectionPreferredX: null,
     );
     pageImage?.dispose();
     if (surface != null) _releaseSurface(surface);
@@ -1193,75 +1341,69 @@ int? _adjacentOffset(List<int> offsets, int? current, bool forward) {
   return null;
 }
 
-int? _wordOffset(String text, List<int> offsets, int? current, bool forward) {
-  final scalars = text.runes.toList(growable: false);
-  var target = current ?? (forward ? offsets.first : offsets.last);
-  target = target.clamp(0, scalars.length);
-  if (forward) {
-    while (target < scalars.length && !_isWhitespace(scalars[target])) {
-      target += 1;
-    }
-    while (target < scalars.length && _isWhitespace(scalars[target])) {
-      target += 1;
-    }
-    for (final offset in offsets) {
-      if (offset >= target && offset > (current ?? offsets.first)) {
-        return offset;
+({int offset, int line, double preferredX})? _lineOffset(
+  List<FlutterSelectionVisualLine> lines,
+  int? current,
+  int? currentLine,
+  double? preferredX,
+  bool forward,
+) {
+  if (lines.isEmpty) return null;
+  final origin = current == null
+      ? _lineEdge(lines, forward ? 0 : lines.length - 1, forward)
+      : _caretForOffset(lines, current, currentLine);
+  if (origin == null) return null;
+  final destinationLine = origin.line + (forward ? 1 : -1);
+  if (destinationLine < 0 || destinationLine >= lines.length) return null;
+  final carets = lines[destinationLine].carets;
+  if (carets.isEmpty) return null;
+  final targetX = preferredX ?? origin.preferredX;
+  final caret = carets.reduce(
+    (best, candidate) =>
+        (candidate.x - targetX).abs() < (best.x - targetX).abs()
+        ? candidate
+        : best,
+  );
+  return (
+    offset: caret.offset.toInt(),
+    line: destinationLine,
+    preferredX: targetX,
+  );
+}
+
+({int offset, int line, double preferredX})? _caretForOffset(
+  List<FlutterSelectionVisualLine> lines,
+  int offset,
+  int? preferredLine,
+) {
+  if (preferredLine != null &&
+      preferredLine >= 0 &&
+      preferredLine < lines.length) {
+    for (final caret in lines[preferredLine].carets) {
+      if (caret.offset.toInt() == offset) {
+        return (offset: offset, line: preferredLine, preferredX: caret.x);
       }
     }
-  } else {
-    while (target > 0 && _isWhitespace(scalars[target - 1])) {
-      target -= 1;
-    }
-    while (target > 0 && !_isWhitespace(scalars[target - 1])) {
-      target -= 1;
-    }
-    for (final offset in offsets.reversed) {
-      if (offset <= target && offset < (current ?? offsets.last)) return offset;
+  }
+  for (var line = 0; line < lines.length; line += 1) {
+    for (final caret in lines[line].carets) {
+      if (caret.offset.toInt() == offset) {
+        return (offset: offset, line: line, preferredX: caret.x);
+      }
     }
   }
   return null;
 }
 
-bool _isWhitespace(int scalar) => String.fromCharCode(scalar).trim().isEmpty;
-
-int? _lineOffset(
-  List<FlutterSelectionEndpoint> endpoints,
-  int? current,
+({int offset, int line, double preferredX})? _lineEdge(
+  List<FlutterSelectionVisualLine> lines,
+  int line,
   bool forward,
 ) {
-  FlutterSelectionEndpoint origin;
-  if (current == null) {
-    origin = forward ? endpoints.first : endpoints.last;
-  } else {
-    final matches = endpoints.where(
-      (endpoint) => endpoint.offset.toInt() == current,
-    );
-    if (matches.isEmpty) return null;
-    origin = matches.first;
-  }
-  final originX = (origin.rect.left + origin.rect.right) / 2;
-  final originY = (origin.rect.top + origin.rect.bottom) / 2;
-  FlutterSelectionEndpoint? best;
-  double? bestLineDistance;
-  double? bestColumnDistance;
-  for (final endpoint in endpoints) {
-    if (endpoint.offset == origin.offset) continue;
-    final y = (endpoint.rect.top + endpoint.rect.bottom) / 2;
-    if (forward ? y <= originY : y >= originY) continue;
-    final lineDistance = (y - originY).abs();
-    final x = (endpoint.rect.left + endpoint.rect.right) / 2;
-    final columnDistance = (x - originX).abs();
-    if (best == null ||
-        lineDistance < bestLineDistance! ||
-        (lineDistance == bestLineDistance &&
-            columnDistance < bestColumnDistance!)) {
-      best = endpoint;
-      bestLineDistance = lineDistance;
-      bestColumnDistance = columnDistance;
-    }
-  }
-  return best?.offset.toInt();
+  final carets = lines[line].carets;
+  if (carets.isEmpty) return null;
+  final caret = forward ? carets.first : carets.last;
+  return (offset: caret.offset.toInt(), line: line, preferredX: caret.x);
 }
 
 FlutterSelectionSurface _freezeSurface(FlutterSelectionSurface surface) =>
@@ -1273,6 +1415,19 @@ FlutterSelectionSurface _freezeSurface(FlutterSelectionSurface surface) =>
       resourcePath: surface.resourcePath,
       raster: surface.raster,
       endpoints: List.unmodifiable(surface.endpoints),
+      graphemeBoundaries: Uint32List.fromList(
+        surface.graphemeBoundaries.toList(growable: false),
+      ),
+      wordBoundaries: Uint32List.fromList(
+        surface.wordBoundaries.toList(growable: false),
+      ),
+      visualLines: List.unmodifiable(
+        surface.visualLines.map(
+          (line) => FlutterSelectionVisualLine(
+            carets: List.unmodifiable(line.carets),
+          ),
+        ),
+      ),
     );
 
 Uint8List premultiplyRgba(Uint8List pixels) {
