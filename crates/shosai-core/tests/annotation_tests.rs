@@ -64,6 +64,15 @@ fn quote_v1_golden_vectors_pin_normalization_and_context_direction() {
     .unwrap();
     assert_eq!(selector.prefix, "x".repeat(31));
     assert_eq!(selector.suffix, "x".repeat(31));
+
+    let selector = QuoteSelector::new(
+        "selected",
+        &format!("{} {}", "discarded", "p".repeat(31)),
+        &format!("{} {}", "s".repeat(31), "discarded"),
+    )
+    .unwrap();
+    assert_eq!(selector.prefix, "p".repeat(31));
+    assert_eq!(selector.suffix, "s".repeat(31));
 }
 
 #[test]

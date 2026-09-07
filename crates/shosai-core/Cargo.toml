@@ -29,6 +29,7 @@ wuff = { version = "=0.2.8", default-features = false }
 image = { version = "0.25.10", default-features = false, features = ["default-formats"] }
 natord = "1.0.9"
 unicode-casefold = "0.2.0"
+unicode-bidi = "0.3.18"
 unicode-normalization = "=0.1.25"
 unicode-segmentation = "=1.13.2"
 sha2 = "0.10.9"

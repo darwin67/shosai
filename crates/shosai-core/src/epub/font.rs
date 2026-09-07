@@ -117,6 +117,8 @@ pub struct EpubFontBook {
     decoded_bytes: usize,
     native_text_id: u64,
     pub(super) native: Mutex<super::native_text::NativeTextState>,
+    #[cfg(test)]
+    pub(super) renderer_entries: Mutex<Option<Arc<AtomicU64>>>,
 }
 
 impl fmt::Debug for EpubFontBook {
@@ -130,6 +132,11 @@ impl fmt::Debug for EpubFontBook {
 }
 
 impl EpubFontBook {
+    #[cfg(test)]
+    fn observe_renderer_entries(&self, entries: Arc<AtomicU64>) {
+        *self.renderer_entries.lock().unwrap() = Some(entries);
+    }
+
     pub(crate) fn retained_decoded_bytes(&self) -> usize {
         self.decoded_bytes
     }
@@ -197,6 +204,8 @@ impl EpubFontBook {
             decoded_bytes: 0,
             native_text_id: NEXT_NATIVE_TEXT_ID.fetch_add(1, AtomicOrdering::Relaxed),
             native: Mutex::new(super::native_text::NativeTextState::empty()),
+            #[cfg(test)]
+            renderer_entries: Mutex::new(None),
         };
         let mut inspected = HashMap::<Descriptor, bool>::new();
         let mut descriptor_limit_reported = false;
@@ -1180,6 +1189,7 @@ mod tests {
 
     #[test]
     fn native_layout_bounds_input_and_forces_each_paragraph_direction() {
+        use super::super::native_text::EPUB_TEXT_MAX_ENDPOINTS;
         use super::super::{
             EPUB_TEXT_MAX_SCALARS, EpubTextAlign, EpubTextDirection, EpubTextRequest, EpubTextRun,
         };
@@ -1224,6 +1234,85 @@ mod tests {
                 .is_err(),
             "paragraph splitting must be bounded before allocating child requests"
         );
+        assert!(
+            book.measure_text(&request("x".repeat(EPUB_TEXT_MAX_ENDPOINTS / 2 + 1)))
+                .is_err(),
+            "retained endpoint geometry must have an independent hard ceiling"
+        );
+
+        let rtl_cluster = book.measure_text(&request("لا".into())).unwrap();
+        let mut endpoints = rtl_cluster.endpoints;
+        endpoints.sort_by(|left, right| left.rect.x.total_cmp(&right.rect.x));
+        assert_eq!(endpoints.len(), 4);
+        assert_eq!(endpoints[0].scalar_start, 1);
+        assert_eq!(endpoints[2].scalar_start, 0);
+    }
+
+    #[test]
+    fn native_measurement_rechecks_cancellation_after_waiting_for_renderer() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        use super::super::{EpubTextAlign, EpubTextDirection, EpubTextRequest, EpubTextRun};
+
+        let book = Arc::new(font_book(
+            r#"@font-face { font-family: "Book"; src: url("../fonts/book.ttf"); }"#,
+            &[("OPS/fonts/book.ttf", INTER)],
+            EpubLimits::default(),
+            1,
+        ));
+        let request = EpubTextRequest {
+            runs: vec![EpubTextRun {
+                text: "measurement must not start after cancellation".into(),
+                family: Some("Book".into()),
+                monospace: false,
+                font_size: 20.0,
+                bold: false,
+                italic: false,
+                foreground: [0, 0, 0, 255],
+                link: None,
+            }],
+            max_width: 400.0,
+            line_height: 28.0,
+            scale: 1.0,
+            align: EpubTextAlign::Left,
+            direction: EpubTextDirection::LeftToRight,
+            highlights: Vec::new(),
+        };
+        let renderer = book.native.lock().unwrap();
+        let checks = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let renderer_entries = Arc::new(AtomicU64::new(0));
+        book.observe_renderer_entries(Arc::clone(&renderer_entries));
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::sync_channel(1);
+        let worker_book = Arc::clone(&book);
+        let worker_checks = Arc::clone(&checks);
+        let worker_cancelled = Arc::clone(&cancelled);
+        let worker_request = request.clone();
+        let worker = std::thread::spawn(move || {
+            worker_book.measure_text_cancellable(&worker_request, &|| {
+                let is_cancelled = worker_cancelled.load(Ordering::SeqCst);
+                if worker_checks.fetch_add(1, Ordering::SeqCst) == 1 {
+                    waiting_tx.send(()).unwrap();
+                }
+                is_cancelled
+            })
+        });
+        waiting_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("measurement must reach the renderer lock");
+        cancelled.store(true, Ordering::SeqCst);
+        drop(renderer);
+
+        let error = worker.join().unwrap().unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert!(checks.load(Ordering::SeqCst) >= 3);
+        assert_eq!(renderer_entries.load(AtomicOrdering::SeqCst), 0);
+
+        cancelled.store(false, Ordering::SeqCst);
+        book.measure_text_cancellable(&request, &|| cancelled.load(Ordering::SeqCst))
+            .unwrap();
+        assert_eq!(renderer_entries.load(AtomicOrdering::SeqCst), 1);
     }
 
     #[test]

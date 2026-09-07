@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use pdfium_render::prelude::*;
+use unicode_bidi::BidiClass;
 
 use crate::document::{Document, DocumentMetadata, RenderedPage};
 
@@ -32,6 +33,9 @@ impl PdfSelectionRect {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PdfSelectionEndpoint {
+    /// PDFium character whose glyph bounds own this half-zone.
+    pub underlying_character: usize,
+    /// Caret boundary represented by this half-zone.
     pub character: usize,
     pub page_x: f32,
     pub page_y: f32,
@@ -41,7 +45,25 @@ pub struct PdfSelectionEndpoint {
 struct PdfSelectionZone {
     bounds: PdfSelectionRect,
     page_bounds: (f32, f32, f32, f32),
+    character: usize,
     endpoint: PdfSelectionEndpoint,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PdfCharacterGeometry {
+    bounds: PdfSelectionRect,
+    page_bounds: (f32, f32, f32, f32),
+    character: usize,
+    page_x: f32,
+    page_y: f32,
+    orientation: Option<(bool, bool)>,
+    direction: Option<PdfTextDirection>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PdfTextDirection {
+    LeftToRight,
+    RightToLeft,
 }
 
 #[derive(Clone, Debug)]
@@ -55,12 +77,17 @@ struct PdfSelectionRow {
 pub struct PdfSelectionSnapshot {
     bitmap_width: u32,
     bitmap_height: u32,
+    text: String,
     rows: Vec<PdfSelectionRow>,
 }
 
 impl PdfSelectionSnapshot {
     pub fn bitmap_size(&self) -> (u32, u32) {
         (self.bitmap_width, self.bitmap_height)
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
     }
 
     pub fn hit_test(&self, bitmap_x: f32, bitmap_y: f32) -> Option<PdfSelectionEndpoint> {
@@ -106,17 +133,22 @@ impl PdfSelectionSnapshot {
     }
 
     /// Return PDF page-coordinate rectangles for a durable character range.
-    pub fn page_rectangles(&self, start: usize, end: usize) -> Vec<(f32, f32, f32, f32)> {
+    pub fn page_rectangles(&self, start: usize, end: usize) -> Vec<(usize, (f32, f32, f32, f32))> {
         self.rows
             .iter()
             .flat_map(|row| &row.zones)
-            .filter(|zone| start <= zone.endpoint.character && zone.endpoint.character < end)
-            .map(|zone| zone.page_bounds)
+            .filter(|zone| {
+                zone.endpoint.character == zone.character
+                    && start <= zone.character
+                    && zone.character < end
+            })
+            .map(|zone| (zone.character, zone.page_bounds))
             .collect()
     }
 
     pub fn retained_bytes(&self) -> usize {
-        self.rows.capacity() * std::mem::size_of::<PdfSelectionRow>()
+        self.text.capacity()
+            + self.rows.capacity() * std::mem::size_of::<PdfSelectionRow>()
             + self
                 .rows
                 .iter()
@@ -202,11 +234,20 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn selectable_pdf(text: &str) -> Vec<u8> {
-        let content = format!("BT /F1 24 Tf 1 0 0 1 130 120 Tm ({text}) Tj ET");
+        selectable_pdf_content(&format!("BT /F1 24 Tf 1 0 0 1 130 120 Tm ({text}) Tj ET"))
+    }
+
+    fn selectable_pdf_content(content: &str) -> Vec<u8> {
+        selectable_pdf_content_with_rotation(content, 90)
+    }
+
+    fn selectable_pdf_content_with_rotation(content: &str, rotation: u16) -> Vec<u8> {
         let objects = [
             "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /CropBox [100 50 300 200] /Rotate 90 /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_string(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /CropBox [100 50 300 200] /Rotate {rotation} /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
+            ),
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
             format!(
                 "<< /Length {} >>\nstream\n{content}\nendstream",
@@ -313,10 +354,502 @@ mod tests {
             .unwrap();
 
         assert_eq!(snapshot.bitmap_size(), (150, 200));
-        assert_eq!(snapshot.endpoint_count(), 6);
+        assert_eq!(snapshot.endpoint_count(), 12);
         assert_eq!(endpoint.character, 0);
         assert!((130.0..150.0).contains(&endpoint.page_x));
         assert!((110.0..140.0).contains(&endpoint.page_y));
+    }
+
+    #[test]
+    fn selection_snapshot_exposes_both_half_open_caret_boundaries() {
+        let document = PdfDoc::from_bytes(selectable_pdf("AB")).unwrap();
+        let snapshot = document.selection_snapshot(0, 1.0).unwrap();
+        let endpoints = snapshot.endpoints();
+
+        assert!(
+            endpoints
+                .iter()
+                .any(|(_, endpoint)| endpoint.character == 0)
+        );
+        assert!(
+            endpoints
+                .iter()
+                .any(|(_, endpoint)| endpoint.character == 1)
+        );
+        assert!(
+            endpoints
+                .iter()
+                .any(|(_, endpoint)| endpoint.character == 2)
+        );
+        assert_eq!(snapshot.page_rectangles(0, 1).len(), 1);
+        assert_eq!(snapshot.page_rectangles(1, 2).len(), 1);
+        assert_eq!(snapshot.page_rectangles(2, 1), Vec::new());
+    }
+
+    #[test]
+    fn selection_half_zones_keep_their_underlying_character_across_whitespace() {
+        let document = PdfDoc::from_bytes(selectable_pdf("A B")).unwrap();
+        let snapshot = document.selection_snapshot(0, 1.0).unwrap();
+        let a: Vec<_> = snapshot
+            .endpoints()
+            .into_iter()
+            .filter(|(_, endpoint)| endpoint.underlying_character == 0)
+            .collect();
+
+        assert_eq!(snapshot.text(), "A B");
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].1.character, 0);
+        assert_eq!(a[1].1.character, 1);
+        assert_eq!(snapshot.page_rectangles(0, 1).len(), 1);
+        assert_eq!(snapshot.page_rectangles(1, 2).len(), 1);
+    }
+
+    #[test]
+    fn final_character_direction_uses_only_its_own_pdf_line() {
+        let document = PdfDoc::from_bytes(selectable_pdf_content(
+            "BT /F1 24 Tf 1 0 0 1 130 130 Tm (AB) Tj 1 0 0 1 110 80 Tm (CD) Tj ET",
+        ))
+        .unwrap();
+        let snapshot = document.selection_snapshot(0, 1.0).unwrap();
+        let indexes: Vec<_> = snapshot
+            .text()
+            .chars()
+            .enumerate()
+            .filter_map(|(index, character)| "ABCD".contains(character).then_some(index))
+            .collect();
+        assert_eq!(indexes.len(), 4);
+
+        let endpoints = snapshot.endpoints();
+        for (first, final_character) in [(indexes[0], indexes[1]), (indexes[2], indexes[3])] {
+            let direction = |character| {
+                let halves: Vec<_> = endpoints
+                    .iter()
+                    .filter(|(_, endpoint)| endpoint.underlying_character == character)
+                    .collect();
+                assert_eq!(halves.len(), 2);
+                let before = halves
+                    .iter()
+                    .find(|(_, endpoint)| endpoint.character == character)
+                    .unwrap()
+                    .0;
+                let after = halves
+                    .iter()
+                    .find(|(_, endpoint)| endpoint.character == character + 1)
+                    .unwrap()
+                    .0;
+                (
+                    after.left + after.right - before.left - before.right,
+                    after.top + after.bottom - before.top - before.bottom,
+                )
+            };
+            let expected = direction(first);
+            let actual = direction(final_character);
+            assert!(expected.0 * actual.0 + expected.1 * actual.1 > 0.0);
+        }
+    }
+
+    #[test]
+    fn vertical_text_matrix_preserves_first_and_final_caret_identity() {
+        let document = PdfDoc::from_bytes(selectable_pdf_content(
+            "BT /F1 24 Tf 0 1 -1 0 180 80 Tm (ABCD) Tj ET",
+        ))
+        .unwrap();
+        let snapshot = document.selection_snapshot(0, 1.0).unwrap();
+        let indexes: Vec<_> = snapshot
+            .text()
+            .chars()
+            .enumerate()
+            .filter_map(|(index, character)| "ABCD".contains(character).then_some(index))
+            .collect();
+        assert_eq!(indexes.len(), 4);
+
+        let endpoints = snapshot.endpoints();
+        for (character, leading, trailing) in [
+            (indexes[0], indexes[0], indexes[0] + 1),
+            (*indexes.last().unwrap(), indexes[3], indexes[3] + 1),
+        ] {
+            let halves: Vec<_> = endpoints
+                .iter()
+                .filter(|(_, endpoint)| endpoint.underlying_character == character)
+                .collect();
+            assert_eq!(halves.len(), 2);
+            assert_eq!(halves[0].1.character, leading);
+            assert_eq!(halves[1].1.character, trailing);
+        }
+
+        let direction = |character| {
+            let halves: Vec<_> = endpoints
+                .iter()
+                .filter(|(_, endpoint)| endpoint.underlying_character == character)
+                .collect();
+            let leading = halves
+                .iter()
+                .find(|(_, endpoint)| endpoint.character == character)
+                .unwrap()
+                .0;
+            let trailing = halves
+                .iter()
+                .find(|(_, endpoint)| endpoint.character == character + 1)
+                .unwrap()
+                .0;
+            (
+                trailing.left + trailing.right - leading.left - leading.right,
+                trailing.top + trailing.bottom - leading.top - leading.bottom,
+            )
+        };
+        let first = direction(indexes[0]);
+        let final_character = direction(indexes[3]);
+        assert!(first.0 * final_character.0 + first.1 * final_character.1 > 0.0);
+    }
+
+    #[test]
+    fn isolated_glyph_uses_its_transformed_baseline_for_caret_halves() {
+        let centers = |matrix: &str, font_size, page_rotation| {
+            let document = PdfDoc::from_bytes(selectable_pdf_content_with_rotation(
+                &format!("BT /F1 {font_size} Tf {matrix} 180 80 Tm (A) Tj ET"),
+                page_rotation,
+            ))
+            .unwrap();
+            let snapshot = document.selection_snapshot(0, 1.0).unwrap();
+            let character = snapshot.text().find('A').unwrap();
+            let halves: Vec<_> = snapshot
+                .endpoints()
+                .into_iter()
+                .filter(|(_, endpoint)| endpoint.underlying_character == character)
+                .collect();
+            assert_eq!(halves.len(), 2);
+            let center = |rect: super::PdfSelectionRect| {
+                (
+                    (rect.left + rect.right) / 2.0,
+                    (rect.top + rect.bottom) / 2.0,
+                )
+            };
+            let leading = halves
+                .iter()
+                .find(|(_, endpoint)| endpoint.character == character)
+                .map(|(rect, _)| center(*rect))
+                .unwrap();
+            let trailing = halves
+                .iter()
+                .find(|(_, endpoint)| endpoint.character == character + 1)
+                .map(|(rect, _)| center(*rect))
+                .unwrap();
+            (leading, trailing)
+        };
+
+        let (leading, trailing) = centers("0 1 -1 0", 24, 0);
+        assert!(leading.1 > trailing.1, "90° baseline points up in pixels");
+        let (leading, trailing) = centers("0 -1 1 0", 24, 0);
+        assert!(
+            leading.1 < trailing.1,
+            "270° baseline points down in pixels"
+        );
+        let (leading, trailing) = centers("1 0 0 1", 24, 90);
+        assert!(
+            leading.1 < trailing.1,
+            "page rotation transforms a horizontal baseline into pixel-space vertical"
+        );
+        let (leading, trailing) = centers("0 .01 -.01 0", 2400, 0);
+        assert!(
+            leading.1 > trailing.1,
+            "a subpixel text-space baseline still retains its physical direction"
+        );
+    }
+
+    #[test]
+    fn logical_run_progression_overrides_upright_and_rotated_matrix_direction() {
+        let direction = |content: &str, vertical| {
+            let document =
+                PdfDoc::from_bytes(selectable_pdf_content_with_rotation(content, 0)).unwrap();
+            let snapshot = document.selection_snapshot(0, 1.0).unwrap();
+            let character = snapshot.text().find('A').unwrap();
+            let endpoints = snapshot.endpoints();
+            let center = |caret| {
+                let rect = endpoints
+                    .iter()
+                    .find(|(_, endpoint)| {
+                        endpoint.underlying_character == character && endpoint.character == caret
+                    })
+                    .unwrap()
+                    .0;
+                if vertical {
+                    (rect.top + rect.bottom) / 2.0
+                } else {
+                    (rect.left + rect.right) / 2.0
+                }
+            };
+            (center(character), center(character + 1))
+        };
+
+        let (leading, trailing) =
+            direction("BT /F1 24 Tf -30 Tc 1 0 0 1 180 80 Tm (ABC) Tj ET", false);
+        assert!(leading > trailing, "logical progression moves left");
+        let (leading, trailing) =
+            direction("BT /F1 24 Tf -30 Tc 0 1 -1 0 180 120 Tm (ABC) Tj ET", true);
+        assert!(leading < trailing, "rotated logical progression moves down");
+    }
+
+    #[test]
+    fn expanded_ligature_subdivisions_reach_the_full_caret_range() {
+        let bounds = super::PdfSelectionRect {
+            left: 0.0,
+            top: 0.0,
+            right: 40.0,
+            bottom: 10.0,
+        };
+        let geometry = |character| super::PdfCharacterGeometry {
+            bounds,
+            page_bounds: (0.0, 0.0, 10.0, 10.0),
+            character,
+            page_x: 5.0,
+            page_y: 5.0,
+            orientation: Some((false, true)),
+            direction: Some(super::PdfTextDirection::LeftToRight),
+        };
+        let glyph = [geometry(0), geometry(1)];
+        assert!(super::same_pdf_glyph(glyph[0], glyph[1]));
+        let mut zones = Vec::new();
+        super::append_pdf_glyph_zones(&mut zones, &glyph, false, true);
+        let snapshot = super::PdfSelectionSnapshot {
+            bitmap_width: 40,
+            bitmap_height: 10,
+            text: "fi".into(),
+            rows: super::pdf_selection_rows(zones),
+        };
+
+        assert_eq!(snapshot.hit_test(5.0, 5.0).unwrap().character, 0);
+        assert_eq!(snapshot.hit_test(35.0, 5.0).unwrap().character, 2);
+    }
+
+    #[test]
+    fn adjacent_bidi_runs_do_not_share_neighbor_direction() {
+        fn rotate_geometry(mut item: super::PdfCharacterGeometry) -> super::PdfCharacterGeometry {
+            item.bounds = super::PdfSelectionRect {
+                left: 0.0,
+                top: item.page_x - 4.0,
+                right: 10.0,
+                bottom: item.page_x + 4.0,
+            };
+            item.page_y = item.page_x;
+            item.page_x = 5.0;
+            item.orientation = item.orientation.map(|(_, positive)| (true, positive));
+            item
+        }
+
+        let geometry = |character, center, direction| super::PdfCharacterGeometry {
+            bounds: super::PdfSelectionRect {
+                left: center - 4.0,
+                top: 0.0,
+                right: center + 4.0,
+                bottom: 10.0,
+            },
+            page_bounds: (center - 4.0, 0.0, center + 4.0, 10.0),
+            character,
+            page_x: center,
+            page_y: 5.0,
+            orientation: Some((
+                false,
+                direction != Some(super::PdfTextDirection::RightToLeft),
+            )),
+            direction,
+        };
+        let rtl = super::PdfTextDirection::RightToLeft;
+        let ltr = super::PdfTextDirection::LeftToRight;
+        let rtl_previous = geometry(1, 40.0, Some(rtl));
+        let rtl_final = geometry(2, 30.0, Some(rtl));
+        let ltr_first = geometry(3, 60.0, Some(ltr));
+        let ltr_next = geometry(4, 70.0, Some(ltr));
+        let neutral = geometry(3, 60.0, None);
+
+        assert_eq!(
+            super::pdf_character_direction(
+                Some(rtl_previous),
+                rtl_final,
+                rtl_final,
+                Some(ltr_first),
+            ),
+            (false, false)
+        );
+        assert_eq!(
+            super::pdf_character_direction(Some(rtl_final), ltr_first, ltr_first, Some(ltr_next),),
+            (false, true)
+        );
+        assert_eq!(
+            super::pdf_character_direction(Some(rtl_previous), rtl_final, rtl_final, Some(neutral),),
+            (false, false)
+        );
+
+        assert_eq!(super::pdf_text_direction('١'), Some(ltr));
+        assert_eq!(
+            super::pdf_logical_orientation((false, true), super::pdf_text_direction('١')),
+            (false, true)
+        );
+        assert_eq!(
+            super::pdf_logical_orientation((true, false), super::pdf_text_direction('١')),
+            (true, false)
+        );
+
+        let mut neutral_run = [
+            geometry(10, 40.0, Some(rtl)),
+            geometry(11, 30.0, None),
+            geometry(12, 20.0, Some(rtl)),
+        ];
+        super::resolve_pdf_neutral_directions(&mut neutral_run);
+        assert_eq!(neutral_run[1].direction, Some(rtl));
+        assert_eq!(
+            super::pdf_character_direction(
+                Some(neutral_run[0]),
+                neutral_run[1],
+                neutral_run[1],
+                Some(neutral_run[2]),
+            ),
+            (false, false)
+        );
+        let rotated_neutral_run = neutral_run.map(rotate_geometry);
+        assert_eq!(
+            super::pdf_character_direction(
+                Some(rotated_neutral_run[0]),
+                rotated_neutral_run[1],
+                rotated_neutral_run[1],
+                Some(rotated_neutral_run[2]),
+            ),
+            (true, false)
+        );
+
+        let mut neutral_with_edge_gap = [
+            geometry(20, 40.0, Some(rtl)),
+            geometry(21, 30.0, None),
+            geometry(23, 20.0, Some(rtl)),
+        ];
+        super::resolve_pdf_neutral_directions(&mut neutral_with_edge_gap);
+        assert_eq!(neutral_with_edge_gap[1].direction, None);
+        assert_eq!(
+            super::pdf_character_direction(
+                Some(neutral_with_edge_gap[0]),
+                neutral_with_edge_gap[0],
+                neutral_with_edge_gap[0],
+                Some(neutral_with_edge_gap[1]),
+            ),
+            (false, false)
+        );
+
+        let mut neutral_with_inner_gap = [
+            geometry(30, 40.0, Some(rtl)),
+            geometry(31, 30.0, None),
+            geometry(33, 20.0, None),
+            geometry(34, 10.0, Some(rtl)),
+        ];
+        super::resolve_pdf_neutral_directions(&mut neutral_with_inner_gap);
+        assert_eq!(neutral_with_inner_gap[1].direction, None);
+        assert_eq!(neutral_with_inner_gap[2].direction, None);
+
+        let mut displaced_neutral_run = [
+            geometry(40, 40.0, Some(rtl)),
+            geometry(41, 30.0, None),
+            geometry(42, 20.0, Some(rtl)),
+        ];
+        displaced_neutral_run[1].bounds.top = 20.0;
+        displaced_neutral_run[1].bounds.bottom = 30.0;
+        super::resolve_pdf_neutral_directions(&mut displaced_neutral_run);
+        assert_eq!(
+            super::pdf_character_direction(
+                Some(displaced_neutral_run[0]),
+                displaced_neutral_run[1],
+                displaced_neutral_run[1],
+                Some(displaced_neutral_run[2]),
+            ),
+            (false, false)
+        );
+        let mut rotated_displaced_neutral_run = displaced_neutral_run.map(rotate_geometry);
+        rotated_displaced_neutral_run[1].bounds.left = 20.0;
+        rotated_displaced_neutral_run[1].bounds.right = 30.0;
+        assert_eq!(
+            super::pdf_character_direction(
+                Some(rotated_displaced_neutral_run[0]),
+                rotated_displaced_neutral_run[1],
+                rotated_displaced_neutral_run[1],
+                Some(rotated_displaced_neutral_run[2]),
+            ),
+            (true, false)
+        );
+
+        let rtl_previous = rotate_geometry(rtl_previous);
+        let rtl_final = rotate_geometry(rtl_final);
+        let ltr_first = rotate_geometry(ltr_first);
+        let ltr_next = rotate_geometry(ltr_next);
+        let neutral = rotate_geometry(neutral);
+        assert_eq!(
+            super::pdf_character_direction(
+                Some(rtl_previous),
+                rtl_final,
+                rtl_final,
+                Some(ltr_first),
+            ),
+            (true, false)
+        );
+        assert_eq!(
+            super::pdf_character_direction(Some(rtl_final), ltr_first, ltr_first, Some(ltr_next),),
+            (true, true)
+        );
+        assert_eq!(
+            super::pdf_character_direction(Some(rtl_previous), rtl_final, rtl_final, Some(neutral),),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn direction_construction_cancels_many_single_character_rows() {
+        let mut content = "BT /F1 1 Tf ".to_owned();
+        for row in 0..200 {
+            content.push_str(&format!("1 0 0 1 110 {} Tm (A) Tj ", 51 + row));
+        }
+        content.push_str("ET");
+        let document = PdfDoc::from_bytes(selectable_pdf_content(&content)).unwrap();
+        let character_count = document.page_text(0).unwrap().chars().count();
+        let calls = Cell::new(0);
+
+        let error = document
+            .selection_snapshot_cancellable(0, 1.0, &|| {
+                calls.set(calls.get() + 1);
+                calls.get() > character_count + 2
+            })
+            .unwrap_err();
+
+        assert_eq!(calls.get(), character_count + 3);
+        assert_eq!(error.to_string(), "import cancelled");
+    }
+
+    #[test]
+    fn actual_emitted_endpoint_limit_is_a_typed_resource_error() {
+        let line = "A".repeat(164);
+        let mut content = "BT /F1 .5 Tf ".to_owned();
+        for row in 0..200 {
+            content.push_str(&format!(
+                "1 0 0 1 110 {} Tm ({line}) Tj ",
+                50.25 + row as f32 * 0.5
+            ));
+        }
+        content.push_str("ET");
+        let document = PdfDoc::from_bytes(selectable_pdf_content(&content)).unwrap();
+
+        let error = document.selection_snapshot(0, 1.0).unwrap_err();
+
+        assert!(
+            error
+                .downcast_ref::<crate::application::ResourceLimitError>()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn selection_snapshot_honors_cooperative_cancellation() {
+        let document = PdfDoc::from_bytes(selectable_pdf("AB")).unwrap();
+
+        let error = document
+            .selection_snapshot_cancellable(0, 1.0, &|| true)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("cancelled"));
     }
 
     #[test]
@@ -425,6 +958,21 @@ impl PdfDoc {
             )?
             .checked_add(metadata)
             .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Self>()))
+    }
+
+    pub(crate) fn selection_admission_byte_len(&self, index: usize, scale: f32) -> Result<usize> {
+        let (width, height) = self
+            .page_sizes
+            .get(index)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("page index {index} out of range"))?;
+        let (width, height) = validate_pdf_bitmap_size(width, height, scale)?;
+        (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .and_then(|bytes| bytes.checked_add(PDF_SELECTION_MAX_RETAINED_BYTES))
+            .and_then(|bytes| bytes.checked_add(MAX_PDF_PAGE_TEXT_BYTES))
+            .context("PDF selection admission overflowed")
     }
 
     /// Open a PDF file from disk.
@@ -739,6 +1287,16 @@ impl PdfDoc {
     /// This performs PDFium work once. Calling methods on the returned snapshot
     /// performs no PDFium, file, or database access.
     pub fn selection_snapshot(&self, index: usize, scale: f32) -> Result<PdfSelectionSnapshot> {
+        self.selection_snapshot_cancellable(index, scale, &|| false)
+    }
+
+    pub fn selection_snapshot_cancellable(
+        &self,
+        index: usize,
+        scale: f32,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<PdfSelectionSnapshot> {
+        check_cancelled(Some(is_cancelled))?;
         if !scale.is_finite() || scale <= 0.0 {
             anyhow::bail!("page scale must be finite and positive");
         }
@@ -759,10 +1317,11 @@ impl PdfDoc {
         let text = page
             .text()
             .map_err(|e| anyhow::anyhow!("failed to load text for page {index}: {e}"))?;
+        check_cancelled(Some(is_cancelled))?;
         // PdfPageTextChars eagerly allocates an index for every character, so
         // reject from PDFium's cheap count before constructing it.
         let character_count = usize::try_from(text.len()).unwrap_or(usize::MAX);
-        validate_pdf_selection_endpoint_count(character_count)?;
+        validate_pdf_selection_endpoint_count(character_count.saturating_mul(2))?;
         let chars = text.chars();
 
         let (pt_w, pt_h) = self.page_sizes[index];
@@ -776,8 +1335,9 @@ impl PdfDoc {
             .map_err(|e| anyhow::anyhow!("failed to render PDF selection page {index}: {e}"))?;
         let bitmap_width = bitmap.width() as u32;
         let bitmap_height = bitmap.height() as u32;
-        let mut zones = Vec::with_capacity(chars.len());
+        let mut character_zones = Vec::with_capacity(chars.len());
         for character in chars.iter() {
+            check_cancelled(Some(is_cancelled))?;
             let Ok(page_bounds) = character.loose_bounds() else {
                 continue;
             };
@@ -794,7 +1354,39 @@ impl PdfDoc {
             if bounds.left >= bounds.right || bounds.top >= bounds.bottom {
                 continue;
             }
-            zones.push(PdfSelectionZone {
+            let page_x = (page_bounds.left().value + page_bounds.right().value) / 2.0;
+            let page_y = (page_bounds.bottom().value + page_bounds.top().value) / 2.0;
+            let direction = character.unicode_char().and_then(pdf_text_direction);
+            let orientation = character
+                .matrix()
+                .ok()
+                .and_then(|matrix| {
+                    let baseline_length = matrix.a().hypot(matrix.b());
+                    if !baseline_length.is_finite() || baseline_length <= f32::EPSILON {
+                        return None;
+                    }
+                    // Pdfium exposes integer device coordinates. Extend the baseline
+                    // probe so a valid subpixel text matrix cannot quantize to zero.
+                    let probe_scale = 1024.0 / baseline_length;
+                    let origin = page
+                        .points_to_pixels(PdfPoints::new(page_x), PdfPoints::new(page_y), &config)
+                        .ok()?;
+                    let baseline = page
+                        .points_to_pixels(
+                            PdfPoints::new(page_x + matrix.a() * probe_scale),
+                            PdfPoints::new(page_y + matrix.b() * probe_scale),
+                            &config,
+                        )
+                        .ok()?;
+                    let dx = baseline.0 - origin.0;
+                    let dy = baseline.1 - origin.1;
+                    (dx != 0 || dy != 0).then(|| {
+                        let vertical = dy.abs() > dx.abs();
+                        (vertical, if vertical { dy > 0 } else { dx > 0 })
+                    })
+                })
+                .map(|orientation| pdf_logical_orientation(orientation, direction));
+            character_zones.push(PdfCharacterGeometry {
                 bounds,
                 page_bounds: (
                     page_bounds.left().value,
@@ -802,16 +1394,62 @@ impl PdfDoc {
                     page_bounds.right().value,
                     page_bounds.top().value,
                 ),
-                endpoint: PdfSelectionEndpoint {
-                    character: character.index(),
-                    page_x: (page_bounds.left().value + page_bounds.right().value) / 2.0,
-                    page_y: (page_bounds.bottom().value + page_bounds.top().value) / 2.0,
-                },
+                character: character.index(),
+                page_x,
+                page_y,
+                orientation,
+                direction,
             });
         }
+        resolve_pdf_neutral_directions(&mut character_zones);
+        let mut zones = Vec::with_capacity(character_zones.len().saturating_mul(2));
+        let mut glyphs = Vec::new();
+        let mut start = 0;
+        while start < character_zones.len() {
+            check_cancelled(Some(is_cancelled))?;
+            let mut end = start + 1;
+            while end < character_zones.len()
+                && character_zones[end].character
+                    == character_zones[end - 1].character.saturating_add(1)
+                && same_pdf_glyph(character_zones[start], character_zones[end])
+            {
+                end += 1;
+            }
+            glyphs.push(start..end);
+            start = end;
+        }
+        for (position, glyph) in glyphs.iter().enumerate() {
+            check_cancelled(Some(is_cancelled))?;
+            let first = character_zones[glyph.start];
+            let last = character_zones[glyph.end - 1];
+            let previous = position
+                .checked_sub(1)
+                .map(|previous| character_zones[glyphs[previous].end - 1]);
+            let next = glyphs
+                .get(position + 1)
+                .map(|next| character_zones[next.start]);
+            let (vertical, forward_positive) = pdf_character_direction(previous, first, last, next);
+            append_pdf_glyph_zones(
+                &mut zones,
+                &character_zones[glyph.clone()],
+                vertical,
+                forward_positive,
+            );
+        }
+        validate_pdf_selection_endpoint_count(zones.len())?;
+        let owned_text =
+            searchable_page_text_bounded(&page, &text, MAX_PDF_PAGE_TEXT_BYTES, is_cancelled)
+                .map_err(|error| match error {
+                    BoundedPageTextError::Cancelled => anyhow::anyhow!("PDF selection cancelled"),
+                    BoundedPageTextError::Limit { actual } => anyhow::anyhow!(
+                        "PDF selection text ({actual} bytes) exceeds its byte limit"
+                    ),
+                    BoundedPageTextError::Document(error) => error,
+                })?;
         let snapshot = PdfSelectionSnapshot {
             bitmap_width,
             bitmap_height,
+            text: owned_text,
             rows: pdf_selection_rows(zones),
         };
         if snapshot.retained_bytes() > PDF_SELECTION_MAX_RETAINED_BYTES {
@@ -932,6 +1570,178 @@ impl PdfDoc {
             height,
             pixels: bytes::Bytes::from(pixels),
         })
+    }
+}
+
+fn selection_neighbor_direction(
+    current: PdfSelectionRect,
+    next: PdfSelectionRect,
+) -> Option<(bool, bool)> {
+    let dx = next.left + next.right - current.left - current.right;
+    let dy = next.top + next.bottom - current.top - current.bottom;
+    let vertical = dy.abs() > dx.abs();
+    let shares_run_axis = if vertical {
+        next.right > current.left && next.left < current.right
+    } else {
+        next.bottom > current.top && next.top < current.bottom
+    };
+    if !shares_run_axis || (dx == 0.0 && dy == 0.0) {
+        return None;
+    }
+    Some((vertical, if vertical { dy > 0.0 } else { dx > 0.0 }))
+}
+
+fn pdf_text_direction(character: char) -> Option<PdfTextDirection> {
+    match unicode_bidi::bidi_class(character) {
+        BidiClass::L | BidiClass::EN | BidiClass::AN => Some(PdfTextDirection::LeftToRight),
+        BidiClass::R | BidiClass::AL => Some(PdfTextDirection::RightToLeft),
+        _ => None,
+    }
+}
+
+fn same_pdf_direction(left: Option<PdfTextDirection>, right: Option<PdfTextDirection>) -> bool {
+    left == right
+}
+
+fn resolve_pdf_neutral_directions(characters: &mut [PdfCharacterGeometry]) {
+    let mut start = 0;
+    while start < characters.len() {
+        if characters[start].direction.is_some() {
+            start += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while end < characters.len() && characters[end].direction.is_none() {
+            end += 1;
+        }
+        let previous = start.checked_sub(1).map(|index| characters[index]);
+        let next = characters.get(end).copied();
+        let contiguous = characters[start..end]
+            .windows(2)
+            .all(|pair| pair[1].character == pair[0].character.saturating_add(1));
+        let direction = previous.and_then(|character| character.direction);
+        if contiguous
+            && previous.is_some_and(|character| {
+                characters[start].character == character.character.saturating_add(1)
+            })
+            && next.is_some_and(|character| {
+                character.character == characters[end - 1].character.saturating_add(1)
+            })
+            && direction.is_some()
+            && direction == next.and_then(|character| character.direction)
+        {
+            for character in &mut characters[start..end] {
+                character.direction = direction;
+                character.orientation = character
+                    .orientation
+                    .map(|orientation| pdf_logical_orientation(orientation, direction));
+            }
+        }
+        start = end;
+    }
+}
+
+fn pdf_logical_orientation(
+    (vertical, forward_positive): (bool, bool),
+    direction: Option<PdfTextDirection>,
+) -> (bool, bool) {
+    (
+        vertical,
+        if direction == Some(PdfTextDirection::RightToLeft) {
+            !forward_positive
+        } else {
+            forward_positive
+        },
+    )
+}
+
+fn pdf_character_direction(
+    previous: Option<PdfCharacterGeometry>,
+    first: PdfCharacterGeometry,
+    last: PdfCharacterGeometry,
+    next: Option<PdfCharacterGeometry>,
+) -> (bool, bool) {
+    let next_direction = next.and_then(|next| {
+        (next.character == last.character.saturating_add(1)
+            && same_pdf_direction(last.direction, next.direction))
+        .then(|| selection_neighbor_direction(first.bounds, next.bounds))
+        .flatten()
+    });
+    let previous_direction = previous.and_then(|previous| {
+        (first.character == previous.character.saturating_add(1)
+            && same_pdf_direction(previous.direction, first.direction))
+        .then(|| selection_neighbor_direction(previous.bounds, first.bounds))
+        .flatten()
+    });
+    next_direction
+        .or(previous_direction)
+        .or(first.orientation)
+        .unwrap_or((false, true))
+}
+
+fn same_pdf_glyph(left: PdfCharacterGeometry, right: PdfCharacterGeometry) -> bool {
+    left.bounds == right.bounds
+        && left.page_bounds == right.page_bounds
+        && left.page_x == right.page_x
+        && left.page_y == right.page_y
+}
+
+fn selection_subdivision(
+    bounds: PdfSelectionRect,
+    vertical: bool,
+    index: usize,
+    count: usize,
+) -> PdfSelectionRect {
+    debug_assert!(index < count && count > 0);
+    let start = index as f32 / count as f32;
+    let end = (index + 1) as f32 / count as f32;
+    if vertical {
+        let height = bounds.bottom - bounds.top;
+        PdfSelectionRect {
+            top: bounds.top + height * start,
+            bottom: bounds.top + height * end,
+            ..bounds
+        }
+    } else {
+        let width = bounds.right - bounds.left;
+        PdfSelectionRect {
+            left: bounds.left + width * start,
+            right: bounds.left + width * end,
+            ..bounds
+        }
+    }
+}
+
+fn append_pdf_glyph_zones(
+    zones: &mut Vec<PdfSelectionZone>,
+    glyph: &[PdfCharacterGeometry],
+    vertical: bool,
+    forward_positive: bool,
+) {
+    let bounds = glyph[0].bounds;
+    let half_count = glyph.len().saturating_mul(2);
+    for (glyph_position, geometry) in glyph.iter().enumerate() {
+        for (caret, logical_half) in [
+            (geometry.character, glyph_position * 2),
+            (geometry.character.saturating_add(1), glyph_position * 2 + 1),
+        ] {
+            let physical_half = if forward_positive {
+                logical_half
+            } else {
+                half_count - logical_half - 1
+            };
+            zones.push(PdfSelectionZone {
+                bounds: selection_subdivision(bounds, vertical, physical_half, half_count),
+                page_bounds: geometry.page_bounds,
+                character: geometry.character,
+                endpoint: PdfSelectionEndpoint {
+                    underlying_character: geometry.character,
+                    character: caret,
+                    page_x: geometry.page_x,
+                    page_y: geometry.page_y,
+                },
+            });
+        }
     }
 }
 
