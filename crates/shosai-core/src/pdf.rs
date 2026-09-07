@@ -540,6 +540,21 @@ mod tests {
     }
 
     #[test]
+    fn selection_admission_covers_keyboard_line_construction_peak() {
+        let peak = super::pdf_selection_construction_peak_bytes().unwrap();
+        let zone_collections =
+            super::PDF_SELECTION_MAX_ENDPOINTS * std::mem::size_of::<super::PdfSelectionZone>() * 3;
+        let line_headers =
+            super::PDF_SELECTION_MAX_ENDPOINTS * std::mem::size_of::<super::PdfSelectionRow>() * 2;
+        let character_work = super::PDF_SELECTION_MAX_ENDPOINTS / 2
+            * (std::mem::size_of::<super::PdfCharacterGeometry>()
+                + std::mem::size_of::<std::ops::Range<usize>>());
+
+        assert!(peak >= zone_collections + line_headers + character_work);
+        assert!(peak > super::PDF_SELECTION_MAX_RETAINED_BYTES);
+    }
+
+    #[test]
     fn decomposed_accent_has_no_interior_caret_boundary() {
         let ranges = grapheme_ranges("e\u{301}x");
         assert_eq!(ranges, vec![0..2, 2..3]);
@@ -1394,7 +1409,7 @@ impl PdfDoc {
         (width as usize)
             .checked_mul(height as usize)
             .and_then(|pixels| pixels.checked_mul(4))
-            .and_then(|bytes| bytes.checked_add(PDF_SELECTION_MAX_RETAINED_BYTES))
+            .and_then(|bytes| bytes.checked_add(pdf_selection_construction_peak_bytes()?))
             .and_then(|bytes| bytes.checked_add(MAX_PDF_PAGE_TEXT_BYTES))
             .context("PDF selection admission overflowed")
     }
@@ -1551,6 +1566,25 @@ impl PdfDoc {
         parsed._admission = Some(admission.finish(retained_bytes)?);
         Ok(parsed)
     }
+}
+
+fn pdf_selection_construction_peak_bytes() -> Option<usize> {
+    // Keyboard-line construction temporarily holds the source zones, the
+    // cloned iterator backing, and the growing line vectors. The hit-test rows
+    // and keyboard lines can each have one header per zone. Character geometry
+    // and glyph ranges remain live until the snapshot has been assembled.
+    let zones_and_rows = std::mem::size_of::<PdfSelectionZone>()
+        .checked_mul(3)?
+        .checked_add(std::mem::size_of::<PdfSelectionRow>().checked_mul(2)?)?
+        .checked_mul(PDF_SELECTION_MAX_ENDPOINTS)?;
+    let characters = std::mem::size_of::<PdfCharacterGeometry>()
+        .checked_add(std::mem::size_of::<std::ops::Range<usize>>())?
+        .checked_mul(PDF_SELECTION_MAX_ENDPOINTS / 2)?;
+    Some(
+        zones_and_rows
+            .checked_add(characters)?
+            .max(PDF_SELECTION_MAX_RETAINED_BYTES),
+    )
 }
 
 #[cfg(test)]
