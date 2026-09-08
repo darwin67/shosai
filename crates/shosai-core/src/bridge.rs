@@ -10,8 +10,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use thiserror::Error;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
-#[cfg(test)]
-use crate::annotations::{AnnotationPersistenceTestGate, MAX_ANNOTATIONS_PER_SNAPSHOT};
 use crate::annotations::{
     ANNOTATION_SNAPSHOT_BASE_BYTES, Annotation, AnnotationId, AnnotationResolution,
     AnnotationSnapshotLimit, AnnotationStore, AnnotationTarget, DocumentFingerprint, EpubAnchor,
@@ -19,6 +17,8 @@ use crate::annotations::{
     MAX_TEXT_ANCHOR_RESOLUTION_WORK, NewAnnotation, PageRect, PdfAnchor, QuoteSelector,
     TextAnchorResolutionError, TextAnchorResolver, TextScalarIndex,
 };
+#[cfg(test)]
+use crate::annotations::{AnnotationPersistenceTestGate, MAX_ANNOTATIONS_PER_SNAPSHOT};
 
 use crate::application::{DeviceFileLocator, OpenDocument, OpenDocumentError, OpenDocumentPlan};
 use crate::document::{Document, RenderedPage};
@@ -999,6 +999,10 @@ impl Bridge {
         body: Option<String>,
     ) -> Result<bool, BridgeError> {
         validate_annotation_body(body.as_deref())?;
+        let _request_slot = try_acquire_slot(
+            Arc::clone(&self.admission.request_slots),
+            BridgeError::RequestLimit,
+        )?;
         let retained = self.document(document)?;
         let id = AnnotationId::from_str(id)
             .map_err(|_| BridgeError::InvalidRequest("invalid annotation ID".into()))?;
@@ -1020,6 +1024,10 @@ impl Bridge {
         document: DocumentHandle,
         id: &str,
     ) -> Result<bool, BridgeError> {
+        let _request_slot = try_acquire_slot(
+            Arc::clone(&self.admission.request_slots),
+            BridgeError::RequestLimit,
+        )?;
         let retained = self.document(document)?;
         let id = AnnotationId::from_str(id)
             .map_err(|_| BridgeError::InvalidRequest("invalid annotation ID".into()))?;
@@ -2777,6 +2785,50 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error, BridgeError::RequestLimit);
+    }
+
+    #[tokio::test]
+    async fn annotation_mutations_share_request_admission() {
+        let mut admission = BridgeAdmission::new(MAX_BRIDGE_RETAINED_BUFFER_BYTES, 1);
+        admission.request_slots = Arc::new(Semaphore::new(1));
+        let admission = Arc::new(admission);
+        let bridge = Bridge::with_admission(Arc::clone(&admission));
+        let document = bridge
+            .open_document(pdf_request(), Cancellation::new())
+            .await
+            .unwrap();
+        let id = AnnotationId::new().to_string();
+        let request = Arc::clone(&admission.request_slots)
+            .acquire_owned()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            bridge
+                .update_annotation(document.handle, &id, HighlightColor::Green, None,)
+                .await,
+            Err(BridgeError::RequestLimit)
+        );
+        assert_eq!(
+            bridge.delete_annotation(document.handle, &id).await,
+            Err(BridgeError::RequestLimit)
+        );
+
+        drop(request);
+        assert!(
+            !bridge
+                .update_annotation(document.handle, &id, HighlightColor::Green, None,)
+                .await
+                .unwrap()
+        );
+        assert_eq!(admission.request_slots.available_permits(), 1);
+        assert!(
+            !bridge
+                .delete_annotation(document.handle, &id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(admission.request_slots.available_permits(), 1);
     }
 
     #[tokio::test]
