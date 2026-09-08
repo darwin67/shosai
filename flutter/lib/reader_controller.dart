@@ -1040,10 +1040,13 @@ final class ReaderController implements Listenable {
       _failedLayout = null;
       return;
     }
-    if (layout == _requestedLayout ||
-        layout == _failedLayout ||
-        _model.contentState != ReaderContentState.ready ||
+    if (_model.contentState != ReaderContentState.ready ||
         document.format == FlutterBookFormat.cbz) {
+      _requestedLayout = layout;
+      _failedLayout = null;
+      return;
+    }
+    if (layout == _requestedLayout || layout == _failedLayout) {
       return;
     }
     _startRelayout(document, layout);

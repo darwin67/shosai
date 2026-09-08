@@ -514,9 +514,17 @@ void main() {
   testWidgets('missing mandatory EPUB raster is a terminal content failure', (
     tester,
   ) async {
+    addTearDown(tester.view.resetDevicePixelRatio);
     final bridge = _FakeBridge()..missingSelectionRaster = true;
     bridge.completeOpen(FlutterBookFormat.epub);
-    await tester.pumpWidget(MaterialApp(home: ReaderScreen(bridge: bridge)));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
     await tester.enterText(find.byType(TextField), '/tmp/book.epub');
     await tester.tap(find.text('Open document'));
     await bridge.operationFinished.future;
@@ -524,6 +532,16 @@ void main() {
 
     expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(find.textContaining('missing its raster'), findsWidgets);
+
+    final desiredScale = tester.view.devicePixelRatio == 2 ? 3.0 : 2.0;
+    tester.view.devicePixelRatio = desiredScale;
+    await tester.pump();
+    await tester.pump();
+    bridge.missingSelectionRaster = false;
+    await tester.enterText(find.byType(TextField), '/tmp/retry.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    expect(bridge.selectionLayouts.last.scale, desiredScale);
     await tester.pumpWidget(const SizedBox());
     await bridge.disposed.future;
   });
@@ -1969,7 +1987,7 @@ void main() {
     await bridge.disposed.future;
   });
 
-  test('queued CBZ layout changes do not start EPUB selection work', () async {
+  test('queued CBZ layout is used by the next EPUB open', () async {
     final bridge = _ControlledBridge(
       format: FlutterBookFormat.cbz,
       immediateLists: true,
@@ -1979,16 +1997,17 @@ void main() {
       decoder: (pixels, {required width, required height}) => _testImage(),
     );
     controller.dispatch(const ReaderOpenRequested('/tmp/book.cbz'));
-    controller.dispatch(
-      const ReaderLayoutChanged(
-        ReaderLayout(scale: 2, width: 300, fontSize: 20),
-      ),
-    );
     await bridge.waitForOp(1);
-
+    const desired = ReaderLayout(scale: 2, width: 300, fontSize: 20);
+    controller.dispatch(const ReaderLayoutChanged(desired));
     expect(bridge.selectionCalls, 0);
     expect(controller.model.selectionError, isNull);
     expect(controller.model.relayoutBusy, isFalse);
+
+    bridge.format = FlutterBookFormat.epub;
+    controller.dispatch(const ReaderOpenRequested('/tmp/book.epub'));
+    await bridge.waitForOp(2);
+    expect(bridge.selectionLayouts, [desired]);
     controller.dispose();
     await bridge.disposed.future;
   });
@@ -3314,7 +3333,7 @@ final class _ControlledBridge implements FlutterBridge {
   }) : initialAnnotations = List.of(initialAnnotations),
        storedAnnotations = List.of(initialAnnotations);
 
-  final FlutterBookFormat format;
+  FlutterBookFormat format;
   final List<FlutterAnnotation> initialAnnotations;
   final List<FlutterAnnotation> storedAnnotations;
   final bool selectionFailure;
@@ -3715,6 +3734,7 @@ class _FakeBridge implements FlutterBridge {
   var renderCalls = 0;
   var updateCalls = 0;
   var deleteCalls = 0;
+  final selectionLayouts = <ReaderLayout>[];
   Completer<FlutterSelectionSurface>? selectionCompleter;
   FlutterBookFormat? completedFormat;
 
@@ -3875,6 +3895,9 @@ class _FakeBridge implements FlutterBridge {
     required double fontSize,
     required BigInt cancellationId,
   }) async {
+    selectionLayouts.add(
+      ReaderLayout(scale: scale, width: width, fontSize: fontSize),
+    );
     if (selectionCompleter case final pending?) return pending.future;
     return FlutterSelectionSurface(
       handle: FlutterSelectionHandle(registry: BigInt.one, id: cancellationId),
