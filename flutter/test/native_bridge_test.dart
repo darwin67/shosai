@@ -233,6 +233,7 @@ void main() {
       await open();
       var listed = await bridge!.listAnnotations(
         document: document!,
+        scale: 1,
         cancellationId: cancellation!,
       );
       expect(listed, hasLength(1));
@@ -256,6 +257,7 @@ void main() {
       );
       listed = await bridge!.listAnnotations(
         document: document!,
+        scale: 1,
         cancellationId: cancellation!,
       );
       expect(listed, hasLength(1));
@@ -269,6 +271,7 @@ void main() {
       expect(
         await bridge!.listAnnotations(
           document: document!,
+          scale: 1,
           cancellationId: cancellation!,
         ),
         isEmpty,

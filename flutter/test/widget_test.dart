@@ -72,6 +72,7 @@ void main() {
       final annotation = FlutterAnnotation(
         id: 'geometry',
         unit: BigInt.zero,
+        resolution: FlutterAnnotationResolution.exact,
         rectangles: const [
           FlutterSelectionRect(left: 10, top: 10, right: 20, bottom: 20),
         ],
@@ -101,6 +102,7 @@ void main() {
           FlutterAnnotation(
             id: 'other-page',
             unit: BigInt.one,
+            resolution: FlutterAnnotationResolution.exact,
             rectangles: const [
               FlutterSelectionRect(left: 30, top: 30, right: 40, bottom: 40),
             ],
@@ -142,6 +144,7 @@ void main() {
       FlutterAnnotation(
         id: 'one',
         unit: BigInt.zero,
+        resolution: FlutterAnnotationResolution.exact,
         rectangles: rectangles,
         color: FlutterHighlightColor.yellow,
       ),
@@ -2522,6 +2525,7 @@ void main() {
 FlutterAnnotation _annotation(String id) => FlutterAnnotation(
   id: id,
   unit: BigInt.zero,
+  resolution: FlutterAnnotationResolution.exact,
   textRange: FlutterAnnotationTextRange(start: BigInt.one, end: BigInt.from(3)),
   color: FlutterHighlightColor.yellow,
 );
@@ -2752,6 +2756,7 @@ final class _ControlledBridge implements FlutterBridge {
   @override
   Future<List<FlutterAnnotation>> listAnnotations({
     required FlutterDocumentHandle document,
+    required double scale,
     required BigInt cancellationId,
   }) {
     listCalls += 1;
@@ -2786,6 +2791,7 @@ final class _ControlledBridge implements FlutterBridge {
               FlutterAnnotation(
                 id: 'created-$createCalls',
                 unit: unit,
+                resolution: FlutterAnnotationResolution.exact,
                 textRange: FlutterAnnotationTextRange(start: start, end: end),
                 color: color,
                 body: body,
@@ -2812,6 +2818,7 @@ final class _ControlledBridge implements FlutterBridge {
         storedAnnotations[index] = FlutterAnnotation(
           id: current.id,
           unit: current.unit,
+          resolution: current.resolution,
           textRange: current.textRange,
           quote: current.quote,
           rectangles: current.rectangles,
@@ -2937,6 +2944,7 @@ class _FakeBridge implements FlutterBridge {
   @override
   Future<List<FlutterAnnotation>> listAnnotations({
     required FlutterDocumentHandle document,
+    required double scale,
     required BigInt cancellationId,
   }) async {
     listCalls += 1;
@@ -2955,6 +2963,7 @@ class _FakeBridge implements FlutterBridge {
   }) async => FlutterAnnotation(
     id: 'annotation',
     unit: unit,
+    resolution: FlutterAnnotationResolution.exact,
     textRange: FlutterAnnotationTextRange(start: start, end: end),
     color: color,
     body: body,
@@ -3131,6 +3140,7 @@ final class _SequentialBridge implements FlutterBridge {
   @override
   Future<List<FlutterAnnotation>> listAnnotations({
     required FlutterDocumentHandle document,
+    required double scale,
     required BigInt cancellationId,
   }) async => const [];
   @override
@@ -3145,6 +3155,7 @@ final class _SequentialBridge implements FlutterBridge {
   }) async => FlutterAnnotation(
     id: 'annotation',
     unit: unit,
+    resolution: FlutterAnnotationResolution.exact,
     textRange: FlutterAnnotationTextRange(start: start, end: end),
     color: color,
     body: body,

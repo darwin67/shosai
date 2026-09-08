@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use shosai_core::annotations::HighlightColor;
+use shosai_core::annotations::{AnnotationResolution, HighlightColor};
 use shosai_core::bridge::{
     AnnotationTextRange, Bridge, BridgeAnnotation, BridgeError, BufferHandle, Cancellation,
     CreateAnnotationRequest, DocumentHandle, OpenRequest, RenderRequest, SelectionHandle,
@@ -56,11 +56,31 @@ impl From<HighlightColor> for FlutterHighlightColor {
 pub struct FlutterAnnotation {
     pub id: String,
     pub unit: usize,
+    pub resolution: FlutterAnnotationResolution,
     pub text_range: Option<FlutterAnnotationTextRange>,
     pub quote: Option<String>,
     pub rectangles: Option<Vec<FlutterSelectionRect>>,
     pub color: FlutterHighlightColor,
     pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlutterAnnotationResolution {
+    Exact,
+    Recovered,
+    Ambiguous,
+    Orphaned,
+}
+
+impl From<AnnotationResolution> for FlutterAnnotationResolution {
+    fn from(value: AnnotationResolution) -> Self {
+        match value {
+            AnnotationResolution::Exact => Self::Exact,
+            AnnotationResolution::Recovered => Self::Recovered,
+            AnnotationResolution::Ambiguous => Self::Ambiguous,
+            AnnotationResolution::Orphaned => Self::Orphaned,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +103,7 @@ impl From<BridgeAnnotation> for FlutterAnnotation {
         Self {
             id: value.id,
             unit: value.unit,
+            resolution: value.resolution.into(),
             text_range: value.text_range.map(Into::into),
             quote: value.quote,
             rectangles: Some(
@@ -553,11 +574,12 @@ impl FlutterBridge {
     pub async fn list_annotations(
         &self,
         document: FlutterDocumentHandle,
+        scale: f32,
         cancellation_id: u64,
     ) -> Result<Vec<FlutterAnnotation>, FlutterBridgeError> {
         let cancellation = self.cancellation(cancellation_id)?;
         self.bridge
-            .list_annotations(document.into(), cancellation)
+            .list_annotations(document.into(), scale, cancellation)
             .await
             .map(|items| items.into_iter().map(Into::into).collect())
             .map_err(Into::into)

@@ -792,6 +792,7 @@ final class ReaderController implements Listenable {
         try {
           final annotations = await _bridge.listAnnotations(
             document: document.handle,
+            scale: 1,
             cancellationId: cancellation,
           );
           if (!_isCurrent(generation)) return;
@@ -1329,6 +1330,7 @@ final class ReaderController implements Listenable {
       final items = changed
           ? await _bridge.listAnnotations(
               document: document.handle,
+              scale: 1,
               cancellationId: cancellation,
             )
           : _model.annotations;
@@ -1910,6 +1912,7 @@ FlutterAnnotation _freezeAnnotation(FlutterAnnotation annotation) {
   final frozen = FlutterAnnotation(
     id: annotation.id,
     unit: annotation.unit,
+    resolution: annotation.resolution,
     textRange: annotation.textRange,
     quote: annotation.quote,
     rectangles: annotation.rectangles == null
