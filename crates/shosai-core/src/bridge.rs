@@ -41,8 +41,11 @@ pub const MAX_BRIDGE_RETAINED_DOCUMENT_BYTES: usize = 3 * 1024 * 1024 * 1024;
 pub const MAX_BRIDGE_PROBE_BYTES: usize = 512 * 1024 * 1024;
 pub const MAX_BRIDGE_LOCAL_ID_BYTES: usize = 4 * 1024;
 pub const MAX_BRIDGE_PATH_KEY_BYTES: usize = 64 * 1024;
-const MAX_ANNOTATION_PDF_TEXT_BYTES: usize = 4 * 1024 * 1024;
-const ANNOTATION_RESOLUTION_WORKSPACE_BYTES: u32 = 112 * 1024 * 1024;
+// The resolver retains five usize/range indexes plus source/profile/normalized
+// text at peak. Limiting PDF text to 2 MiB keeps the conservative 144 MiB
+// reservation below the process-wide transient buffer budget on 64-bit hosts.
+const MAX_ANNOTATION_PDF_TEXT_BYTES: usize = 2 * 1024 * 1024;
+const ANNOTATION_RESOLUTION_WORKSPACE_BYTES: u32 = 144 * 1024 * 1024;
 const ANNOTATION_GEOMETRY_WORKSPACE_BYTES: u32 = 8 * 1024 * 1024;
 
 static NEXT_REGISTRY_ID: AtomicU64 = AtomicU64::new(1);
@@ -2039,12 +2042,24 @@ fn annotation_dtos(
         if is_cancelled() {
             return Err(BridgeError::Cancelled);
         }
-        let unit = match &annotation.target {
-            AnnotationTarget::Epub(anchor) => anchor.spine_occurrence as usize,
-            AnnotationTarget::Pdf(anchor) if anchor.character_range.is_some() => {
+        let unit = match (&annotation.target, document) {
+            (AnnotationTarget::Epub(anchor), OpenDocument::Epub(document)) => {
+                let unit = anchor.spine_occurrence as usize;
+                if !document
+                    .chapter(unit)
+                    .is_some_and(|chapter| chapter.path == anchor.resource_path.as_str())
+                {
+                    continue;
+                }
+                unit
+            }
+            (AnnotationTarget::Pdf(anchor), OpenDocument::Pdf(document))
+                if anchor.character_range.is_some()
+                    && (anchor.page as usize) < document.page_count() =>
+            {
                 anchor.page as usize
             }
-            AnnotationTarget::Pdf(_) => continue,
+            _ => continue,
         };
         annotations_by_unit.entry(unit).or_default().push(index);
     }
@@ -2075,38 +2090,35 @@ fn annotation_dtos(
             continue;
         };
         let resolver =
-            TextAnchorResolver::new(&text, is_cancelled).map_err(|error| match error {
-                TextAnchorResolutionError::Cancelled => BridgeError::Cancelled,
-                TextAnchorResolutionError::WorkLimit => BridgeError::BufferLimit,
+            TextAnchorResolver::new(&text, &mut remaining_work, is_cancelled).map_err(|error| {
+                match error {
+                    TextAnchorResolutionError::Cancelled => BridgeError::Cancelled,
+                    TextAnchorResolutionError::WorkLimit => BridgeError::BufferLimit,
+                }
             })?;
         for index in indices {
-            let (stored_range, quote, matches_resource) =
+            let (stored_range, quote) =
                 match (&annotations[index].target, &annotations[index].quote) {
                     (AnnotationTarget::Epub(anchor), Some(quote)) => (
                         anchor.scalar_start as usize..anchor.scalar_end as usize,
                         quote,
-                        matches!(document, OpenDocument::Epub(document) if document
-                        .chapter(unit)
-                        .is_some_and(|chapter| chapter.path == anchor.resource_path.as_str())),
                     ),
                     (AnnotationTarget::Pdf(anchor), Some(quote)) => {
                         let Some((start, end)) = anchor.character_range else {
                             continue;
                         };
-                        (start as usize..end as usize, quote, true)
+                        (start as usize..end as usize, quote)
                     }
                     _ => continue,
                 };
-            if matches_resource {
-                resolved_texts[index] = Some(
-                    resolver
-                        .resolve(stored_range, quote, &mut remaining_work, is_cancelled)
-                        .map_err(|error| match error {
-                            TextAnchorResolutionError::Cancelled => BridgeError::Cancelled,
-                            TextAnchorResolutionError::WorkLimit => BridgeError::BufferLimit,
-                        })?,
-                );
-            }
+            resolved_texts[index] = Some(
+                resolver
+                    .resolve(stored_range, quote, &mut remaining_work, is_cancelled)
+                    .map_err(|error| match error {
+                        TextAnchorResolutionError::Cancelled => BridgeError::Cancelled,
+                        TextAnchorResolutionError::WorkLimit => BridgeError::BufferLimit,
+                    })?,
+            );
         }
     }
     let batches = annotations
@@ -2565,20 +2577,33 @@ mod tests {
             ),
             Some(QuoteSelector::new("x", "", "").unwrap()),
         );
+        let valid_geometry = annotation(
+            AnnotationTarget::Pdf(
+                PdfAnchor::new(0, None, vec![PageRect::new(0.0, 0.0, 1.0, 1.0).unwrap()]).unwrap(),
+            ),
+            None,
+        );
+        let incompatible = annotation(
+            AnnotationTarget::Epub(EpubAnchor::new(0, "missing.xhtml", 0, 1).unwrap()),
+            Some(QuoteSelector::new("x", "", "").unwrap()),
+        );
 
         let resolved = annotation_dtos(
-            vec![geometry, text],
+            vec![geometry, text, valid_geometry, incompatible],
             &OpenDocument::Pdf(pdf.into()),
             1.0,
             &|| false,
         )
         .unwrap();
-        assert_eq!(resolved.len(), 2);
-        assert!(resolved.iter().all(|item| {
+        assert_eq!(resolved.len(), 4);
+        assert!(resolved[..2].iter().all(|item| {
             item.resolution == AnnotationResolution::Orphaned
                 && item.text_range.is_none()
                 && item.rectangles.is_empty()
         }));
+        assert_eq!(resolved[2].resolution, AnnotationResolution::Exact);
+        assert!(!resolved[2].rectangles.is_empty());
+        assert_eq!(resolved[3].resolution, AnnotationResolution::Orphaned);
     }
 
     #[test]
@@ -3738,6 +3763,44 @@ mod tests {
         assert_eq!(bridge.admission.buffer_bytes.available_permits(), 0);
         assert!(bridge.release_buffer(buffer.handle));
         assert_eq!(bridge.admission.buffer_bytes.available_permits(), 8);
+    }
+
+    #[tokio::test]
+    async fn annotation_resolution_workspace_serializes_at_its_peak_bound() {
+        const INDEX_AND_TEXT_BYTES_PER_INPUT_BYTE: usize = 64;
+        const NORMALIZATION_AND_MATCHER_OVERHEAD: usize = 16 * 1024 * 1024;
+        assert!(
+            MAX_ANNOTATION_PDF_TEXT_BYTES * INDEX_AND_TEXT_BYTES_PER_INPUT_BYTE
+                + NORMALIZATION_AND_MATCHER_OVERHEAD
+                <= ANNOTATION_RESOLUTION_WORKSPACE_BYTES as usize
+        );
+        assert!(ANNOTATION_RESOLUTION_WORKSPACE_BYTES as usize <= MAX_BRIDGE_BUFFER_BYTES);
+
+        let admission = BridgeAdmission::new(MAX_BRIDGE_BUFFER_BYTES, 2);
+        let cancellation = Cancellation::new();
+        let first = acquire_permits(
+            Arc::clone(&admission.buffer_bytes),
+            ANNOTATION_RESOLUTION_WORKSPACE_BYTES,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+        let second = acquire_permits(
+            Arc::clone(&admission.buffer_bytes),
+            ANNOTATION_RESOLUTION_WORKSPACE_BYTES,
+            &cancellation,
+        );
+        tokio::pin!(second);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut second)
+                .await
+                .is_err()
+        );
+        drop(first);
+        let _second = tokio::time::timeout(std::time::Duration::from_secs(1), second)
+            .await
+            .expect("the serialized resolution workspace must be admitted")
+            .unwrap();
     }
 
     #[tokio::test]
