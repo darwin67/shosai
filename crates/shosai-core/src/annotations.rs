@@ -34,6 +34,8 @@ pub const MAX_LOCAL_PATH_BYTES: usize = 32_768;
 pub const MAX_EPUB_RESOURCE_PATH_BYTES: usize = 4_096;
 pub const MAX_PROVENANCE_SYSTEM_BYTES: usize = 256;
 pub const MAX_PROVENANCE_ID_BYTES: usize = 4_096;
+pub(crate) const MAX_TEXT_ANCHOR_RESOLUTION_WORK: usize = 64 * 1024 * 1024;
+const MAX_TEXT_ANCHOR_GRAPHEME_SCALARS: usize = 1_024;
 
 #[derive(Debug, Error)]
 #[error("annotation snapshot exceeds its aggregate retention limit")]
@@ -315,6 +317,578 @@ pub enum AnnotationResolution {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTextAnchor {
+    pub resolution: AnnotationResolution,
+    pub range: Option<Range<usize>>,
+}
+
+#[derive(Debug, Error)]
+pub enum TextAnchorResolutionError {
+    #[error("text anchor selector is invalid")]
+    InvalidSelector,
+    #[error("text anchor resolution was cancelled")]
+    Cancelled,
+    #[error("text anchor resolution exceeded its work limit")]
+    WorkLimit,
+}
+
+pub(crate) struct TextScalarIndex<'a> {
+    text: &'a str,
+    scalar_bytes: Vec<usize>,
+}
+
+impl<'a> TextScalarIndex<'a> {
+    pub(crate) fn new(
+        text: &'a str,
+        remaining_work: &mut usize,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, TextAnchorResolutionError> {
+        let mut scalar_bytes = Vec::with_capacity(text.len().saturating_add(1));
+        for (index, (byte, _)) in text.char_indices().enumerate() {
+            if index % 1024 == 0 && is_cancelled() {
+                return Err(TextAnchorResolutionError::Cancelled);
+            }
+            consume_resolution_work(remaining_work, 1)?;
+            scalar_bytes.push(byte);
+        }
+        scalar_bytes.push(text.len());
+        Ok(Self { text, scalar_bytes })
+    }
+
+    pub(crate) fn resolve_exact(
+        &self,
+        stored_range: Range<usize>,
+        quote: &QuoteSelector,
+        remaining_work: &mut usize,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<ResolvedTextAnchor>, TextAnchorResolutionError> {
+        quote
+            .validate()
+            .map_err(|_| TextAnchorResolutionError::InvalidSelector)?;
+        if stored_range.start >= stored_range.end || stored_range.end >= self.scalar_bytes.len() {
+            return Ok(None);
+        }
+        exact_text_anchor(
+            &self.text[self.scalar_bytes[stored_range.start]..self.scalar_bytes[stored_range.end]],
+            stored_range,
+            quote,
+            remaining_work,
+            is_cancelled,
+        )
+    }
+}
+
+pub(crate) struct TextAnchorResolver<'a> {
+    index: TextScalarIndex<'a>,
+    normalized: MappedNormalizedText,
+}
+
+impl<'a> TextAnchorResolver<'a> {
+    #[cfg(test)]
+    pub(crate) fn new(
+        text: &'a str,
+        remaining_work: &mut usize,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, TextAnchorResolutionError> {
+        let index = TextScalarIndex::new(text, remaining_work, is_cancelled)?;
+        Self::from_index(index, remaining_work, is_cancelled)
+    }
+
+    pub(crate) fn from_index(
+        index: TextScalarIndex<'a>,
+        remaining_work: &mut usize,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, TextAnchorResolutionError> {
+        let normalized = mapped_normalized_quote_text(index.text, remaining_work, is_cancelled)?;
+        Ok(Self { index, normalized })
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        stored_range: Range<usize>,
+        quote: &QuoteSelector,
+        remaining_work: &mut usize,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<ResolvedTextAnchor, TextAnchorResolutionError> {
+        if is_cancelled() {
+            return Err(TextAnchorResolutionError::Cancelled);
+        }
+        if let Some(exact) =
+            self.index
+                .resolve_exact(stored_range.clone(), quote, remaining_work, is_cancelled)?
+        {
+            return Ok(exact);
+        }
+
+        let pattern = quote.exact.as_bytes();
+        consume_resolution_work(remaining_work, pattern.len())?;
+        let mut prefix_table = vec![0; pattern.len()];
+        let mut matched = 0;
+        let mut fallback_steps = 0;
+        for index in 1..pattern.len() {
+            if index % 1024 == 0 && is_cancelled() {
+                return Err(TextAnchorResolutionError::Cancelled);
+            }
+            while matched > 0 && pattern[index] != pattern[matched] {
+                if fallback_steps % 1024 == 0 && is_cancelled() {
+                    return Err(TextAnchorResolutionError::Cancelled);
+                }
+                fallback_steps += 1;
+                consume_resolution_work(remaining_work, 1)?;
+                matched = prefix_table[matched - 1];
+            }
+            consume_resolution_work(remaining_work, 1)?;
+            if pattern[index] == pattern[matched] {
+                matched += 1;
+                prefix_table[index] = matched;
+            }
+        }
+
+        let mut candidate_count = 0;
+        let mut only_candidate = None;
+        let mut last_candidate = None;
+        let mut contextual_candidate = None;
+        let mut contextual_count = 0;
+        let mut start_scalar = 0;
+        let mut end_scalar = 0;
+        let mut mapping_steps = 0;
+        matched = 0;
+        for (byte_index, byte) in self.normalized.text.bytes().enumerate() {
+            if byte_index % 1024 == 0 && is_cancelled() {
+                return Err(TextAnchorResolutionError::Cancelled);
+            }
+            while matched > 0 && byte != pattern[matched] {
+                if fallback_steps % 1024 == 0 && is_cancelled() {
+                    return Err(TextAnchorResolutionError::Cancelled);
+                }
+                fallback_steps += 1;
+                consume_resolution_work(remaining_work, 1)?;
+                matched = prefix_table[matched - 1];
+            }
+            consume_resolution_work(remaining_work, 1)?;
+            if byte == pattern[matched] {
+                matched += 1;
+            }
+            if matched != pattern.len() {
+                continue;
+            }
+            let end_byte = byte_index + 1;
+            let start_byte = end_byte - pattern.len();
+            matched = prefix_table[matched - 1];
+            while self.normalized.byte_offsets[start_scalar] < start_byte {
+                if mapping_steps % 1024 == 0 && is_cancelled() {
+                    return Err(TextAnchorResolutionError::Cancelled);
+                }
+                mapping_steps += 1;
+                consume_resolution_work(remaining_work, 1)?;
+                start_scalar += 1;
+            }
+            if self.normalized.byte_offsets[start_scalar] != start_byte {
+                continue;
+            }
+            if end_scalar < start_scalar {
+                end_scalar = start_scalar;
+            }
+            while self.normalized.byte_offsets[end_scalar] < end_byte {
+                if mapping_steps % 1024 == 0 && is_cancelled() {
+                    return Err(TextAnchorResolutionError::Cancelled);
+                }
+                mapping_steps += 1;
+                consume_resolution_work(remaining_work, 1)?;
+                end_scalar += 1;
+            }
+            if self.normalized.byte_offsets[end_scalar] != end_byte {
+                continue;
+            }
+            let start = start_scalar;
+            let end = end_scalar;
+            if start >= end || !self.has_legal_profile_boundaries(start, end, remaining_work)? {
+                continue;
+            }
+            let source_range = self.normalized.source_ranges[start].start
+                ..self.normalized.source_ranges[end - 1].end;
+            if last_candidate.as_ref() == Some(&source_range) {
+                continue;
+            }
+            last_candidate = Some(source_range.clone());
+            candidate_count += 1;
+            if candidate_count == 1 {
+                only_candidate = Some(source_range.clone());
+            }
+            if is_cancelled() {
+                return Err(TextAnchorResolutionError::Cancelled);
+            }
+            consume_resolution_work(
+                remaining_work,
+                quote.prefix.len().saturating_add(quote.suffix.len()),
+            )?;
+            let matches_context = (quote.prefix.is_empty()
+                || self.normalized.text[..start_byte]
+                    .trim_end_matches(' ')
+                    .ends_with(&quote.prefix))
+                && (quote.suffix.is_empty()
+                    || self.normalized.text[end_byte..]
+                        .trim_start_matches(' ')
+                        .starts_with(&quote.suffix));
+            if matches_context {
+                contextual_count += 1;
+                if contextual_count == 1 {
+                    contextual_candidate = Some(source_range);
+                } else {
+                    return Ok(ResolvedTextAnchor {
+                        resolution: AnnotationResolution::Ambiguous,
+                        range: None,
+                    });
+                }
+            }
+        }
+        if candidate_count == 0 {
+            return Ok(ResolvedTextAnchor {
+                resolution: AnnotationResolution::Orphaned,
+                range: None,
+            });
+        }
+
+        let recovered = match contextual_count {
+            1 => contextual_candidate,
+            0 if candidate_count == 1 => only_candidate,
+            _ => None,
+        };
+        Ok(ResolvedTextAnchor {
+            resolution: if recovered.is_some() {
+                AnnotationResolution::Recovered
+            } else {
+                AnnotationResolution::Ambiguous
+            },
+            range: recovered,
+        })
+    }
+
+    fn has_legal_profile_boundaries(
+        &self,
+        start: usize,
+        end: usize,
+        remaining_work: &mut usize,
+    ) -> Result<bool, TextAnchorResolutionError> {
+        let start_range = &self.normalized.source_ranges[start];
+        let mut omitted = start;
+        while omitted > 0 && self.normalized.source_ranges[omitted - 1] == *start_range {
+            consume_resolution_work(remaining_work, 1)?;
+            omitted -= 1;
+            let byte = self.normalized.byte_offsets[omitted];
+            let next = self.normalized.byte_offsets[omitted + 1];
+            if &self.normalized.text[byte..next] != " " {
+                return Ok(false);
+            }
+        }
+        let end_range = &self.normalized.source_ranges[end - 1];
+        let mut omitted = end;
+        while omitted < self.normalized.source_ranges.len()
+            && self.normalized.source_ranges[omitted] == *end_range
+        {
+            consume_resolution_work(remaining_work, 1)?;
+            let byte = self.normalized.byte_offsets[omitted];
+            let next = self.normalized.byte_offsets[omitted + 1];
+            if &self.normalized.text[byte..next] != " " {
+                return Ok(false);
+            }
+            omitted += 1;
+        }
+        Ok(true)
+    }
+}
+
+/// Resolve a persisted quote against the document's current Unicode-scalar
+/// text. Stored offsets win when their normalized quote still matches; bounded
+/// quote/context matching recovers a unique moved range without guessing when
+/// repeated text remains ambiguous.
+pub fn resolve_text_anchor(
+    text: &str,
+    stored_range: Range<usize>,
+    quote: &QuoteSelector,
+) -> Result<ResolvedTextAnchor, TextAnchorResolutionError> {
+    quote
+        .validate()
+        .map_err(|_| TextAnchorResolutionError::InvalidSelector)?;
+    let mut remaining_work = MAX_TEXT_ANCHOR_RESOLUTION_WORK;
+    let index = TextScalarIndex::new(text, &mut remaining_work, &|| false)?;
+    if let Some(exact) =
+        index.resolve_exact(stored_range.clone(), quote, &mut remaining_work, &|| false)?
+    {
+        return Ok(exact);
+    }
+    TextAnchorResolver::from_index(index, &mut remaining_work, &|| false)
+        .and_then(|resolver| resolver.resolve(stored_range, quote, &mut remaining_work, &|| false))
+}
+
+fn exact_text_anchor(
+    selected: &str,
+    stored_range: Range<usize>,
+    quote: &QuoteSelector,
+    remaining_work: &mut usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Option<ResolvedTextAnchor>, TextAnchorResolutionError> {
+    if let Some(original) = &quote.original
+        && original.len() == selected.len()
+    {
+        let mut identical = true;
+        for (selected, original) in selected
+            .as_bytes()
+            .chunks(1024)
+            .zip(original.as_bytes().chunks(1024))
+        {
+            if is_cancelled() {
+                return Err(TextAnchorResolutionError::Cancelled);
+            }
+            consume_resolution_work(remaining_work, selected.len())?;
+            if selected != original {
+                identical = false;
+                break;
+            }
+        }
+        if identical {
+            return Ok(Some(ResolvedTextAnchor {
+                resolution: AnnotationResolution::Exact,
+                range: Some(stored_range),
+            }));
+        }
+    }
+    if bounded_normalize_quote_v1(selected, remaining_work, is_cancelled)? == quote.exact {
+        Ok(Some(ResolvedTextAnchor {
+            resolution: AnnotationResolution::Exact,
+            range: Some(stored_range),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn consume_resolution_work(
+    remaining_work: &mut usize,
+    amount: usize,
+) -> Result<(), TextAnchorResolutionError> {
+    *remaining_work = remaining_work
+        .checked_sub(amount)
+        .ok_or(TextAnchorResolutionError::WorkLimit)?;
+    Ok(())
+}
+
+fn bounded_normalize_quote_v1(
+    value: &str,
+    remaining_work: &mut usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<String, TextAnchorResolutionError> {
+    let mut source = value.chars().peekable();
+    let mut profile_input = String::new();
+    let mut since_cancel_check = 0;
+    while let Some(character) = source.next() {
+        if since_cancel_check >= 1024 {
+            if is_cancelled() {
+                return Err(TextAnchorResolutionError::Cancelled);
+            }
+            since_cancel_check = 0;
+        }
+        since_cancel_check += 1;
+        consume_resolution_work(remaining_work, 1)?;
+        if character == '\u{00ad}' {
+            continue;
+        }
+        if character == '\r' {
+            if source.peek().is_some_and(|next| *next == '\n') {
+                source.next();
+                since_cancel_check += 1;
+                consume_resolution_work(remaining_work, 1)?;
+            }
+            profile_input.push('\n');
+        } else {
+            profile_input.push(character);
+        }
+    }
+    let mut normalized_text = String::new();
+    let mut pending_space = false;
+    for_each_bounded_grapheme(
+        &profile_input,
+        remaining_work,
+        is_cancelled,
+        |grapheme, remaining_work| {
+            let normalized = grapheme.nfc().collect::<String>();
+            for (index, character) in normalized.chars().enumerate() {
+                if index % 1024 == 0 && is_cancelled() {
+                    return Err(TextAnchorResolutionError::Cancelled);
+                }
+                consume_resolution_work(remaining_work, 1)?;
+                if quote_v1_whitespace(character) {
+                    pending_space = !normalized_text.is_empty();
+                } else {
+                    if pending_space {
+                        normalized_text.push(' ');
+                        pending_space = false;
+                    }
+                    normalized_text.push(character);
+                }
+            }
+            Ok(())
+        },
+    )?;
+    Ok(normalized_text)
+}
+
+fn for_each_bounded_grapheme(
+    value: &str,
+    remaining_work: &mut usize,
+    is_cancelled: &dyn Fn() -> bool,
+    mut visit: impl FnMut(&str, &mut usize) -> Result<(), TextAnchorResolutionError>,
+) -> Result<(), TextAnchorResolutionError> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    // Keep the final grapheme pending until the next bounded window. This
+    // preserves the context needed by ZWJ sequences and regional indicators
+    // without allowing one adversarial cluster to monopolize cancellation.
+    let mut pending_start = 0;
+    let mut loaded_end = 0;
+    loop {
+        if is_cancelled() {
+            return Err(TextAnchorResolutionError::Cancelled);
+        }
+        let mut added = 0;
+        for character in value[loaded_end..]
+            .chars()
+            .take(MAX_TEXT_ANCHOR_GRAPHEME_SCALARS)
+        {
+            loaded_end += character.len_utf8();
+            added += 1;
+        }
+        consume_resolution_work(remaining_work, added)?;
+
+        let at_end = loaded_end == value.len();
+        let window_start = pending_start;
+        let mut graphemes = value[window_start..loaded_end]
+            .grapheme_indices(true)
+            .peekable();
+        while let Some((offset, grapheme)) = graphemes.next() {
+            if graphemes.peek().is_none() && !at_end {
+                pending_start = window_start + offset;
+                if grapheme.chars().count() > MAX_TEXT_ANCHOR_GRAPHEME_SCALARS {
+                    return Err(TextAnchorResolutionError::WorkLimit);
+                }
+                break;
+            }
+            let grapheme_scalars = grapheme.chars().count();
+            if grapheme_scalars > MAX_TEXT_ANCHOR_GRAPHEME_SCALARS {
+                return Err(TextAnchorResolutionError::WorkLimit);
+            }
+            consume_resolution_work(remaining_work, grapheme_scalars)?;
+            visit(grapheme, remaining_work)?;
+            pending_start = window_start + offset + grapheme.len();
+        }
+        if at_end {
+            return Ok(());
+        }
+    }
+}
+
+struct MappedNormalizedText {
+    text: String,
+    byte_offsets: Vec<usize>,
+    source_ranges: Vec<Range<usize>>,
+}
+
+fn mapped_normalized_quote_text(
+    value: &str,
+    remaining_work: &mut usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<MappedNormalizedText, TextAnchorResolutionError> {
+    let mut source = value.chars().enumerate().peekable();
+    let mut profile_input = String::with_capacity(value.len());
+    let mut input_ranges = Vec::with_capacity(value.len());
+    let mut since_cancel_check = 0;
+    while let Some((index, character)) = source.next() {
+        if since_cancel_check >= 1024 {
+            if is_cancelled() {
+                return Err(TextAnchorResolutionError::Cancelled);
+            }
+            since_cancel_check = 0;
+        }
+        since_cancel_check += 1;
+        consume_resolution_work(remaining_work, 1)?;
+        if character == '\u{00ad}' {
+            continue;
+        }
+        if character == '\r' {
+            let end = if source.peek().is_some_and(|(_, next)| *next == '\n') {
+                source.next();
+                since_cancel_check += 1;
+                consume_resolution_work(remaining_work, 1)?;
+                index + 2
+            } else {
+                index + 1
+            };
+            profile_input.push('\n');
+            input_ranges.push(index..end);
+        } else {
+            profile_input.push(character);
+            input_ranges.push(index..index + 1);
+        }
+    }
+    let mut text = String::with_capacity(profile_input.len());
+    let mut source_ranges = Vec::with_capacity(profile_input.len());
+    let mut pending_space: Option<Range<usize>> = None;
+    let mut input_scalar_start = 0;
+    for_each_bounded_grapheme(
+        &profile_input,
+        remaining_work,
+        is_cancelled,
+        |grapheme, remaining_work| {
+            let grapheme_scalars = grapheme.chars().count();
+            let start = input_scalar_start;
+            let end = start + grapheme_scalars;
+            let source_range = input_ranges[start].start..input_ranges[end - 1].end;
+            let normalized = grapheme.nfc().collect::<String>();
+            for (index, character) in normalized.chars().enumerate() {
+                if index % 1024 == 0 && is_cancelled() {
+                    return Err(TextAnchorResolutionError::Cancelled);
+                }
+                consume_resolution_work(remaining_work, 1)?;
+                if quote_v1_whitespace(character) {
+                    if !text.is_empty() {
+                        pending_space = Some(match pending_space.take() {
+                            Some(pending) => pending.start..source_range.end,
+                            None => source_range.clone(),
+                        });
+                    }
+                } else {
+                    if let Some(pending) = pending_space.take() {
+                        text.push(' ');
+                        source_ranges.push(pending);
+                    }
+                    text.push(character);
+                    source_ranges.push(source_range.clone());
+                }
+            }
+            input_scalar_start = end;
+            Ok(())
+        },
+    )?;
+    drop(profile_input);
+    drop(input_ranges);
+    let mut byte_offsets = Vec::with_capacity(text.len().saturating_add(1));
+    for (index, (byte, _)) in text.char_indices().enumerate() {
+        if index % 1024 == 0 && is_cancelled() {
+            return Err(TextAnchorResolutionError::Cancelled);
+        }
+        consume_resolution_work(remaining_work, 1)?;
+        byte_offsets.push(byte);
+    }
+    byte_offsets.push(text.len());
+    Ok(MappedNormalizedText {
+        text,
+        byte_offsets,
+        source_ranges,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportProvenance {
     pub source_system: String,
     pub source_id: Option<String>,
@@ -402,6 +976,8 @@ pub struct AnnotationStore {
     persistence_gate: Option<Arc<AnnotationPersistenceTestGate>>,
     #[cfg(test)]
     list_gate: Option<Arc<AnnotationPersistenceTestGate>>,
+    #[cfg(test)]
+    fail_create_response: bool,
 }
 
 #[cfg(test)]
@@ -437,6 +1013,8 @@ impl AnnotationStore {
             persistence_gate: None,
             #[cfg(test)]
             list_gate: None,
+            #[cfg(test)]
+            fail_create_response: false,
         }
     }
 
@@ -445,11 +1023,13 @@ impl AnnotationStore {
         pool: SqlitePool,
         persistence_gate: Option<Arc<AnnotationPersistenceTestGate>>,
         list_gate: Option<Arc<AnnotationPersistenceTestGate>>,
+        fail_create_response: bool,
     ) -> Self {
         Self {
             pool,
             persistence_gate,
             list_gate,
+            fail_create_response,
         }
     }
 
@@ -540,13 +1120,32 @@ impl AnnotationStore {
             }
         }
         ensure_annotation_snapshot_within_limits(&mut transaction, &annotation.id).await?;
+        #[cfg(test)]
+        if self.fail_create_response {
+            bail!("injected annotation response preparation failure");
+        }
+        let id = annotation.id.to_string();
+        let row = sqlx::query("SELECT * FROM annotations WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .context("failed to prepare inserted annotation")?
+            .context("annotation missing after insert")?;
+        let rectangle_rows = sqlx::query(
+            "SELECT left, bottom, right, top FROM annotation_pdf_rectangles
+             WHERE annotation_id = ? ORDER BY rect_index LIMIT ?",
+        )
+        .bind(id)
+        .bind(i64::try_from(MAX_PDF_RECTANGLES + 1).expect("rectangle limit fits in i64"))
+        .fetch_all(&mut *transaction)
+        .await
+        .context("failed to prepare inserted annotation rectangles")?;
+        let created = row_to_annotation(row, rows_to_rectangles(rectangle_rows)?)?;
         transaction
             .commit()
             .await
             .context("failed to commit annotation")?;
-        self.get_async(&annotation.id, true)
-            .await?
-            .context("annotation missing after insert")
+        Ok(created)
     }
 
     pub async fn get_async(
@@ -1089,6 +1688,246 @@ fn ensure_scalar_limit(value: &str, limit: usize, field: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_anchor_resolution_distinguishes_exact_and_unique_recovery() {
+        let original = "lead Cafe\u{301}\ttext tail";
+        let quote = QuoteSelector::new("Cafe\u{301}\ttext", "lead ", " tail").unwrap();
+        assert_eq!(
+            resolve_text_anchor(original, 5..15, &quote).unwrap(),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Exact,
+                range: Some(5..15),
+            }
+        );
+
+        let changed = "inserted lead Café text tail";
+        assert_eq!(
+            resolve_text_anchor(changed, 5..15, &quote).unwrap(),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Recovered,
+                range: Some(14..23),
+            }
+        );
+    }
+
+    #[test]
+    fn text_anchor_resolution_uses_context_without_guessing_repeated_quotes() {
+        let contextual = QuoteSelector::new("target", "alpha ", " omega").unwrap();
+        assert_eq!(
+            resolve_text_anchor("target noise alpha target omega", 1..7, &contextual).unwrap(),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Recovered,
+                range: Some(19..25),
+            }
+        );
+
+        let ambiguous = QuoteSelector::new("target", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor("target target", 1..7, &ambiguous).unwrap(),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Ambiguous,
+                range: None,
+            }
+        );
+        let overlapping = QuoteSelector::new("aa", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor("aaa", 1..2, &overlapping)
+                .unwrap()
+                .resolution,
+            AnnotationResolution::Ambiguous,
+        );
+    }
+
+    #[test]
+    fn text_anchor_resolution_reports_missing_quotes_as_orphaned() {
+        let quote = QuoteSelector::new("missing", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor("other text", 0..7, &quote).unwrap(),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Orphaned,
+                range: None,
+            }
+        );
+    }
+
+    #[test]
+    fn text_anchor_resolution_preserves_the_normalization_profile_at_source_boundaries() {
+        let composed = QuoteSelector::new("é", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor("xe\u{00ad}\u{0301}", 0..1, &composed).unwrap(),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Recovered,
+                range: Some(1..4),
+            }
+        );
+
+        let partial_cluster = QuoteSelector::new("👩", "", "").unwrap();
+        let resolved = resolve_text_anchor("x👩‍💻", 0..1, &partial_cluster).unwrap();
+        assert_eq!(resolved.resolution, AnnotationResolution::Orphaned);
+        assert!(resolved.range.is_none());
+
+        let whitespace_cluster = QuoteSelector::new(" \u{0301}", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor("x \u{0301}", 0..1, &whitespace_cluster).unwrap(),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Recovered,
+                range: Some(1..3),
+            }
+        );
+    }
+
+    #[test]
+    fn text_anchor_resolution_observes_cancellation_and_work_limits() {
+        let checks = std::cell::Cell::new(0);
+        let text = "x".repeat(2_048);
+        let mut work = MAX_TEXT_ANCHOR_RESOLUTION_WORK;
+        assert!(matches!(
+            TextAnchorResolver::new(&text, &mut work, &|| {
+                checks.set(checks.get() + 1);
+                checks.get() > 1
+            }),
+            Err(TextAnchorResolutionError::Cancelled)
+        ));
+
+        let mut work = MAX_TEXT_ANCHOR_RESOLUTION_WORK;
+        let resolver = TextAnchorResolver::new("different", &mut work, &|| false).unwrap();
+        let quote = QuoteSelector::new("missing", "", "").unwrap();
+        assert!(matches!(
+            resolver.resolve(0..1, &quote, &mut 0, &|| false),
+            Err(TextAnchorResolutionError::WorkLimit)
+        ));
+    }
+
+    #[test]
+    fn text_anchor_resolution_bounds_adversarial_prefixes_and_graphemes() {
+        let text = "a".repeat(32_768);
+        let quote = QuoteSelector::new(&"a".repeat(16_384), "z", "").unwrap();
+        let mut work = MAX_TEXT_ANCHOR_RESOLUTION_WORK;
+        let resolver = TextAnchorResolver::new(&text, &mut work, &|| false).unwrap();
+        assert_eq!(
+            resolver
+                .resolve(0..1, &quote, &mut work, &|| false)
+                .unwrap()
+                .resolution,
+            AnnotationResolution::Ambiguous,
+        );
+
+        let combining = format!("e{}", "\u{0301}".repeat(1_025));
+        let mut work = MAX_TEXT_ANCHOR_RESOLUTION_WORK;
+        assert!(matches!(
+            TextAnchorResolver::new(&combining, &mut work, &|| false),
+            Err(TextAnchorResolutionError::WorkLimit)
+        ));
+
+        let mut work = MAX_TEXT_ANCHOR_RESOLUTION_WORK;
+        let resolver = TextAnchorResolver::new(&text, &mut work, &|| false).unwrap();
+        let checks = std::cell::Cell::new(0);
+        assert!(matches!(
+            resolver.resolve(0..1, &quote, &mut work, &|| {
+                checks.set(checks.get() + 1);
+                checks.get() > 1
+            }),
+            Err(TextAnchorResolutionError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn text_anchor_resolution_handles_unicode_across_workspace_chunks() {
+        for selected in ["😀", "👩‍💻", "🇷🇸", "क्‍ष"] {
+            let prefix = "a".repeat(1_023 + usize::from(selected == "😀"));
+            let text = format!("{prefix}{selected}");
+            let start = prefix.chars().count();
+            let end = start + selected.chars().count();
+            let quote = QuoteSelector::new(selected, "", "").unwrap();
+            assert_eq!(
+                resolve_text_anchor(&text, 0..1, &quote).unwrap(),
+                ResolvedTextAnchor {
+                    resolution: AnnotationResolution::Recovered,
+                    range: Some(start..end),
+                },
+                "failed at a workspace boundary for {selected:?}",
+            );
+        }
+
+        let split_zwj = format!("{}👩‍💻", "a".repeat(1_023));
+        let laptop = QuoteSelector::new("💻", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor(&split_zwj, 0..1, &laptop)
+                .unwrap()
+                .resolution,
+            AnnotationResolution::Orphaned,
+        );
+
+        let split_indicators = format!("{}🇷🇸🇮", "a".repeat(1_023));
+        let flag = QuoteSelector::new("🇷🇸", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor(&split_indicators, 0..1, &flag).unwrap(),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Recovered,
+                range: Some(1_023..1_025),
+            }
+        );
+    }
+
+    #[test]
+    fn text_anchor_resolution_rejects_mutated_empty_selectors() {
+        let mut quote = QuoteSelector::new("quote", "", "").unwrap();
+        quote.exact.clear();
+        assert!(matches!(
+            resolve_text_anchor("quote", 0..5, &quote),
+            Err(TextAnchorResolutionError::InvalidSelector)
+        ));
+    }
+
+    #[test]
+    fn text_anchor_resolution_handles_large_mismatching_stored_ranges() {
+        let text = "a".repeat(131_072);
+        let quote = QuoteSelector::new("missing", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor(&text, 0..text.len(), &quote)
+                .unwrap()
+                .resolution,
+            AnnotationResolution::Orphaned,
+        );
+    }
+
+    #[test]
+    fn exact_text_anchor_does_not_scan_unrelated_graphemes() {
+        let text = format!("ordinary e{}", "\u{301}".repeat(1_025));
+        let quote = QuoteSelector::new("ordinary", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor(&text, 0..8, &quote).unwrap(),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Exact,
+                range: Some(0..8),
+            }
+        );
+
+        let oversized = format!("e{}", "\u{301}".repeat(1_025));
+        let quote = QuoteSelector::new(&oversized, "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor(&text, 9..1_035, &quote).unwrap(),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Exact,
+                range: Some(9..1_035),
+            }
+        );
+    }
+
+    #[test]
+    fn text_anchor_resolution_checks_cancellation_through_crlf_preprocessing() {
+        let text = "x\r\n".repeat(2_048);
+        let mut work = MAX_TEXT_ANCHOR_RESOLUTION_WORK;
+        let checks = std::cell::Cell::new(0);
+        assert!(matches!(
+            mapped_normalized_quote_text(&text, &mut work, &|| {
+                checks.set(checks.get() + 1);
+                checks.get() > 1
+            }),
+            Err(TextAnchorResolutionError::Cancelled)
+        ));
+    }
 
     #[test]
     fn aggregate_snapshot_usage_enforces_each_limit() {
