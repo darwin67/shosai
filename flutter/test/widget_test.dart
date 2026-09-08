@@ -289,6 +289,51 @@ void main() {
     expect(() => copy.annotations.clear(), throwsUnsupportedError);
   });
 
+  test(
+    'selection announcements follow distinct controller state changes',
+    () async {
+      final bridge = _ControlledBridge();
+      final announcements = <String>[];
+      final controller = ReaderController(
+        bridge: bridge,
+        decoder: (pixels, {required width, required height}) => _testImage(),
+        selectionAnnouncer: (description) async =>
+            announcements.add(description),
+      );
+      await _openControlled(controller, bridge, '/tmp/book.epub');
+      expect(announcements, isEmpty);
+
+      controller.dispatch(
+        const ReaderSelectionKeyboardExtended(
+          ReaderSelectionMovement.nextGrapheme,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(announcements, ['Selected text: e']);
+
+      controller.dispatch(const ReaderSelectionActionsRequested());
+      await Future<void>.delayed(Duration.zero);
+      expect(announcements, ['Selected text: e']);
+
+      controller.dispatch(const ReaderSelectionCancelled());
+      await Future<void>.delayed(Duration.zero);
+      expect(announcements, ['Selected text: e', 'No text selected']);
+      controller.dispatch(const ReaderSelectionCancelled());
+      await Future<void>.delayed(Duration.zero);
+      expect(announcements, ['Selected text: e', 'No text selected']);
+
+      controller.dispose();
+      controller.dispatch(
+        const ReaderSelectionKeyboardExtended(
+          ReaderSelectionMovement.nextGrapheme,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(announcements, ['Selected text: e', 'No text selected']);
+      await bridge.disposed.future;
+    },
+  );
+
   testWidgets('CBZ image-only completion displays instead of spinning', (
     tester,
   ) async {
@@ -3218,9 +3263,25 @@ void main() {
       final statusFinder = find.byKey(
         const ValueKey('reader-selection-status'),
       );
-      var status = tester.getSemantics(statusFinder).getSemanticsData();
+      final statusNode = tester.getSemantics(statusFinder);
+      var status = statusNode.getSemanticsData();
       expect(status.label, 'No text selected');
-      expect(status.flagsCollection.isLiveRegion, isFalse);
+      expect(status.flagsCollection.isLiveRegion, isTrue);
+      Rect globalRect(SemanticsNode node) {
+        var transform = node.transform ?? Matrix4.identity();
+        for (var parent = node.parent; parent != null; parent = parent.parent) {
+          if (parent.transform != null) {
+            transform = parent.transform!.multiplied(transform);
+          }
+        }
+        return MatrixUtils.transformRect(transform, node.rect);
+      }
+
+      expect(
+        globalRect(content).overlaps(globalRect(statusNode)),
+        isFalse,
+        reason: '${globalRect(content)} overlaps ${globalRect(statusNode)}',
+      );
       BoxDecoration focusDecoration() =>
           tester
                   .widget<DecoratedBox>(
@@ -3270,6 +3331,26 @@ void main() {
       await tester.pump();
       status = tester.getSemantics(statusFinder).getSemanticsData();
       expect(status.label, 'Selected text: e');
+      expect(status.flagsCollection.isLiveRegion, isTrue);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+      expect(tester.getSemantics(statusFinder), same(statusNode));
+      status = statusNode.getSemanticsData();
+      expect(status.label, 'No text selected');
+      expect(status.flagsCollection.isLiveRegion, isTrue);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      expect(tester.getSemantics(statusFinder), same(statusNode));
+      status = statusNode.getSemanticsData();
+      expect(status.label, 'No text selected');
       expect(status.flagsCollection.isLiveRegion, isTrue);
 
       await tester.tap(find.byType(TextField));

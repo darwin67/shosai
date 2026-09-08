@@ -16,6 +16,7 @@ typedef PageDecoder =
 typedef NoteEditor = Future<String?> Function(String? initialValue);
 typedef ReaderFocusAdapter = void Function(ReaderFocusTarget target);
 typedef SelectionCopier = Future<void> Function(String text);
+typedef ReaderSelectionAnnouncer = Future<void> Function(String description);
 
 const _unchanged = Object();
 final _frozenSurfaces = Expando<bool>();
@@ -119,6 +120,18 @@ final class ReaderModel {
     final scalars = surface.text.runes.toList(growable: false);
     if (start < 0 || end > scalars.length) return null;
     return String.fromCharCodes(scalars.sublist(start, end));
+  }
+
+  String get selectionDescription {
+    final selected = selectedText;
+    return switch (selectionPhase) {
+      ReaderSelectionPhase.idle => 'No text selected',
+      ReaderSelectionPhase.selecting =>
+        selected == null ? 'Selecting text' : 'Selecting text: $selected',
+      ReaderSelectionPhase.selected =>
+        selected == null ? 'Text selection ready' : 'Selected text: $selected',
+      ReaderSelectionPhase.committing => 'Saving selected text',
+    };
   }
 
   ReaderModel copyWith({
@@ -569,17 +582,20 @@ final class ReaderController implements Listenable {
     NoteEditor? noteEditor,
     ReaderFocusAdapter? focusAdapter,
     SelectionCopier? selectionCopier,
+    ReaderSelectionAnnouncer? selectionAnnouncer,
   }) : _bridge = bridge,
        _decoder = decoder,
        _noteEditor = noteEditor ?? ((_) async => null),
        _focusAdapter = focusAdapter ?? ((_) {}),
-       _selectionCopier = selectionCopier ?? ((_) async {});
+       _selectionCopier = selectionCopier ?? ((_) async {}),
+       _selectionAnnouncer = selectionAnnouncer;
 
   final FlutterBridge _bridge;
   final PageDecoder _decoder;
   final NoteEditor _noteEditor;
   final ReaderFocusAdapter _focusAdapter;
   final SelectionCopier _selectionCopier;
+  final ReaderSelectionAnnouncer? _selectionAnnouncer;
 
   ReaderModel _model = ReaderModel();
   BigInt? _activeCancellation;
@@ -2001,7 +2017,12 @@ final class ReaderController implements Listenable {
   }
 
   void _emit(ReaderModel model) {
+    final selectionChanged =
+        _model.selectionDescription != model.selectionDescription;
     _model = model;
+    if (!_closing && selectionChanged && _selectionAnnouncer != null) {
+      unawaited(_announceSelection(model.selectionDescription));
+    }
     if (!_listenersDisposed) {
       for (final listener in _listeners.toList(growable: false)) {
         try {
@@ -2017,6 +2038,22 @@ final class ReaderController implements Listenable {
             ),
           );
         }
+      }
+    }
+  }
+
+  Future<void> _announceSelection(String description) async {
+    try {
+      await _selectionAnnouncer!(description);
+    } catch (error, stackTrace) {
+      if (!_closing) {
+        FlutterError.reportError(
+          FlutterErrorDetails(
+            exception: error,
+            stack: stackTrace,
+            library: 'shosai_flutter',
+          ),
+        );
       }
     }
   }

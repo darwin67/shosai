@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart'
     show ExternalLibrary;
@@ -25,6 +26,7 @@ export 'package:shosai_flutter/reader_controller.dart'
         ReaderModel,
         ReaderOpenRequested,
         ReaderSelection,
+        ReaderSelectionAnnouncer,
         ReaderSelectionActionsRequested,
         ReaderSelectionCancelled,
         ReaderSelectionCommitted,
@@ -126,6 +128,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
         ReaderFocusTarget.actions => _actionFocus.requestFocus(),
       },
       selectionCopier: (text) => Clipboard.setData(ClipboardData(text: text)),
+      selectionAnnouncer: Platform.isLinux
+          ? (description) => SemanticsService.sendAnnouncement(
+              View.of(context),
+              description,
+              Directionality.of(context),
+            )
+          : null,
     )..addListener(_modelChanged);
   }
 
@@ -477,25 +486,25 @@ class _DocumentView extends StatelessWidget {
         ),
       );
     }
-    return Semantics(
-      key: const ValueKey('reader-document-semantics'),
-      container: true,
-      explicitChildNodes: true,
-      label: document.format == FlutterBookFormat.epub
-          ? '$title, EPUB chapter 1 of ${document.logicalUnitCount}. Selectable text.'
-          : '$title, page 1 of ${document.logicalUnitCount}. Selectable text.',
-      child: CallbackShortcuts(
-        bindings: {
-          const SingleActivator(LogicalKeyboardKey.escape): () =>
-              dispatch(const ReaderSelectionCancelled()),
-          const SingleActivator(LogicalKeyboardKey.keyC, control: true): () =>
-              dispatch(const ReaderSelectionCopyRequested()),
-          const SingleActivator(LogicalKeyboardKey.keyC, meta: true): () =>
-              dispatch(const ReaderSelectionCopyRequested()),
-        },
-        child: Column(
-          children: [
-            Expanded(
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.escape): () =>
+            dispatch(const ReaderSelectionCancelled()),
+        const SingleActivator(LogicalKeyboardKey.keyC, control: true): () =>
+            dispatch(const ReaderSelectionCopyRequested()),
+        const SingleActivator(LogicalKeyboardKey.keyC, meta: true): () =>
+            dispatch(const ReaderSelectionCopyRequested()),
+      },
+      child: Column(
+        children: [
+          Expanded(
+            child: Semantics(
+              key: const ValueKey('reader-document-semantics'),
+              container: true,
+              explicitChildNodes: true,
+              label: document.format == FlutterBookFormat.epub
+                  ? '$title, EPUB chapter 1 of ${document.logicalUnitCount}. Selectable text.'
+                  : '$title, page 1 of ${document.logicalUnitCount}. Selectable text.',
               child: TapRegion(
                 onTapOutside: (event) => dispatch(
                   ReaderSelectionPointerPressedOutside(event.pointer),
@@ -638,38 +647,20 @@ class _DocumentView extends StatelessWidget {
                                 key: const ValueKey('reader-content-semantics'),
                                 readOnly: true,
                                 label: 'Document text: ${surface.text}',
-                                child: Stack(
-                                  fit: StackFit.expand,
-                                  children: [
-                                    DecoratedBox(
-                                      key: const ValueKey(
-                                        'reader-focus-indicator',
-                                      ),
-                                      position: DecorationPosition.foreground,
-                                      decoration: BoxDecoration(
-                                        border: readerFocus.hasFocus
-                                            ? Border.all(
-                                                color: Theme.of(
-                                                  context,
-                                                ).colorScheme.primary,
-                                                width: 3,
-                                              )
-                                            : null,
-                                      ),
-                                      child: child,
-                                    ),
-                                    Semantics(
-                                      key: const ValueKey(
-                                        'reader-selection-status',
-                                      ),
-                                      container: true,
-                                      liveRegion:
-                                          model.selectionPhase !=
-                                          ReaderSelectionPhase.idle,
-                                      label: _selectionSemanticsValue(model),
-                                      child: const SizedBox.shrink(),
-                                    ),
-                                  ],
+                                child: DecoratedBox(
+                                  key: const ValueKey('reader-focus-indicator'),
+                                  position: DecorationPosition.foreground,
+                                  decoration: BoxDecoration(
+                                    border: readerFocus.hasFocus
+                                        ? Border.all(
+                                            color: Theme.of(
+                                              context,
+                                            ).colorScheme.primary,
+                                            width: 3,
+                                          )
+                                        : null,
+                                  ),
+                                  child: child,
                                 ),
                               ),
                               child: _SelectableSurface(
@@ -704,74 +695,81 @@ class _DocumentView extends StatelessWidget {
                 ),
               ),
             ),
-            if (model.annotations.isNotEmpty)
-              SizedBox(
-                height: 64,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
-                  children: model.annotations
-                      .map(
-                        (annotation) => Card(
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              TextButton(
-                                onPressed: () => dispatch(
-                                  ReaderAnnotationNavigated(annotation.id),
-                                ),
-                                child: Text(
-                                  'Highlight ${annotation.unit.toInt() + 1}'
-                                  '${_annotationResolutionSuffix(annotation.resolution)}',
-                                ),
+          ),
+          Semantics(
+            key: const ValueKey('reader-selection-status'),
+            container: true,
+            liveRegion: true,
+            label: model.selectionDescription,
+            child: const SizedBox(width: double.infinity, height: 1),
+          ),
+          if (model.annotations.isNotEmpty)
+            SizedBox(
+              height: 64,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                children: model.annotations
+                    .map(
+                      (annotation) => Card(
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            TextButton(
+                              onPressed: () => dispatch(
+                                ReaderAnnotationNavigated(annotation.id),
                               ),
-                              IconButton(
-                                tooltip: 'Change color',
-                                onPressed:
-                                    model.annotationOperations.isNotEmpty ||
-                                        model.relayoutBusy
-                                    ? null
-                                    : () => dispatch(
-                                        ReaderAnnotationUpdated(
-                                          annotation.id,
-                                          _nextColor(annotation.color),
-                                          annotation.body,
-                                        ),
+                              child: Text(
+                                'Highlight ${annotation.unit.toInt() + 1}'
+                                '${_annotationResolutionSuffix(annotation.resolution)}',
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: 'Change color',
+                              onPressed:
+                                  model.annotationOperations.isNotEmpty ||
+                                      model.relayoutBusy
+                                  ? null
+                                  : () => dispatch(
+                                      ReaderAnnotationUpdated(
+                                        annotation.id,
+                                        _nextColor(annotation.color),
+                                        annotation.body,
                                       ),
-                                icon: const Icon(Icons.palette_outlined),
-                              ),
-                              IconButton(
-                                tooltip: 'Edit note',
-                                onPressed:
-                                    model.annotationOperations.isNotEmpty ||
-                                        model.relayoutBusy
-                                    ? null
-                                    : () => dispatch(
-                                        ReaderAnnotationNoteRequested(
-                                          annotation.id,
-                                        ),
+                                    ),
+                              icon: const Icon(Icons.palette_outlined),
+                            ),
+                            IconButton(
+                              tooltip: 'Edit note',
+                              onPressed:
+                                  model.annotationOperations.isNotEmpty ||
+                                      model.relayoutBusy
+                                  ? null
+                                  : () => dispatch(
+                                      ReaderAnnotationNoteRequested(
+                                        annotation.id,
                                       ),
-                                icon: const Icon(Icons.note_alt_outlined),
-                              ),
-                              IconButton(
-                                tooltip: 'Delete highlight',
-                                onPressed:
-                                    model.annotationOperations.isNotEmpty ||
-                                        model.relayoutBusy
-                                    ? null
-                                    : () => dispatch(
-                                        ReaderAnnotationDeleted(annotation.id),
-                                      ),
-                                icon: const Icon(Icons.delete_outline),
-                              ),
-                            ],
-                          ),
+                                    ),
+                              icon: const Icon(Icons.note_alt_outlined),
+                            ),
+                            IconButton(
+                              tooltip: 'Delete highlight',
+                              onPressed:
+                                  model.annotationOperations.isNotEmpty ||
+                                      model.relayoutBusy
+                                  ? null
+                                  : () => dispatch(
+                                      ReaderAnnotationDeleted(annotation.id),
+                                    ),
+                              icon: const Icon(Icons.delete_outline),
+                            ),
+                          ],
                         ),
-                      )
-                      .toList(),
-                ),
+                      ),
+                    )
+                    .toList(),
               ),
-          ],
-        ),
+            ),
+        ],
       ),
     );
   }
@@ -981,18 +979,6 @@ String _colorName(FlutterHighlightColor color) => switch (color) {
   FlutterHighlightColor.pink => 'Pink',
   FlutterHighlightColor.purple => 'Purple',
 };
-
-String _selectionSemanticsValue(ReaderModel model) {
-  final selected = model.selectedText;
-  return switch (model.selectionPhase) {
-    ReaderSelectionPhase.idle => 'No text selected',
-    ReaderSelectionPhase.selecting =>
-      selected == null ? 'Selecting text' : 'Selecting text: $selected',
-    ReaderSelectionPhase.selected =>
-      selected == null ? 'Text selection ready' : 'Selected text: $selected',
-    ReaderSelectionPhase.committing => 'Saving selected text',
-  };
-}
 
 class _SelectableSurface extends StatelessWidget {
   const _SelectableSurface({
