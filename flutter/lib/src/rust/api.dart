@@ -18,6 +18,7 @@ abstract class FlutterBridge implements RustOpaqueInterface {
     required BigInt unit,
     required BigInt start,
     required BigInt end,
+    required double displayScale,
     required FlutterHighlightColor color,
     String? body,
     required BigInt cancellationId,

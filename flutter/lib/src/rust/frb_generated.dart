@@ -88,6 +88,7 @@ abstract class RustLibApi extends BaseApi {
     required BigInt unit,
     required BigInt start,
     required BigInt end,
+    required double displayScale,
     required FlutterHighlightColor color,
     String? body,
     required BigInt cancellationId,
@@ -232,6 +233,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required BigInt unit,
     required BigInt start,
     required BigInt end,
+    required double displayScale,
     required FlutterHighlightColor color,
     String? body,
     required BigInt cancellationId,
@@ -247,9 +249,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           var arg2 = cst_encode_usize(unit);
           var arg3 = cst_encode_usize(start);
           var arg4 = cst_encode_usize(end);
-          var arg5 = cst_encode_flutter_highlight_color(color);
-          var arg6 = cst_encode_opt_String(body);
-          var arg7 = cst_encode_u_64(cancellationId);
+          var arg5 = cst_encode_f_32(displayScale);
+          var arg6 = cst_encode_flutter_highlight_color(color);
+          var arg7 = cst_encode_opt_String(body);
+          var arg8 = cst_encode_u_64(cancellationId);
           return wire.wire__crate__api__FlutterBridge_create_annotation(
             port_,
             arg0,
@@ -260,6 +263,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             arg5,
             arg6,
             arg7,
+            arg8,
           );
         },
         codec: DcoCodec(
@@ -273,6 +277,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           unit,
           start,
           end,
+          displayScale,
           color,
           body,
           cancellationId,
@@ -291,6 +296,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "unit",
           "start",
           "end",
+          "displayScale",
           "color",
           "body",
           "cancellationId",
@@ -2519,6 +2525,7 @@ class FlutterBridgeImpl extends RustOpaque implements FlutterBridge {
     required BigInt unit,
     required BigInt start,
     required BigInt end,
+    required double displayScale,
     required FlutterHighlightColor color,
     String? body,
     required BigInt cancellationId,
@@ -2528,6 +2535,7 @@ class FlutterBridgeImpl extends RustOpaque implements FlutterBridge {
     unit: unit,
     start: start,
     end: end,
+    displayScale: displayScale,
     color: color,
     body: body,
     cancellationId: cancellationId,

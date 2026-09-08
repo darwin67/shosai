@@ -572,6 +572,7 @@ final class ReaderController implements Listenable {
   int _nextOperationId = 0;
   int _noteRevision = 0;
   ReaderLayout _requestedLayout = const ReaderLayout();
+  ReaderLayout? _failedLayout;
   bool _closing = false;
   bool _listenersDisposed = false;
   final Set<VoidCallback> _listeners = {};
@@ -712,7 +713,7 @@ final class ReaderController implements Listenable {
       case _ReaderRelayoutFailed():
         if (_isCurrent(message.generation) &&
             message.revision == _layoutRevision) {
-          _requestedLayout = _model.layout;
+          _failedLayout = _requestedLayout;
           _emit(
             _model.copyWith(
               relayoutBusy: false,
@@ -770,6 +771,7 @@ final class ReaderController implements Listenable {
     }
     _layoutRevision += 1;
     _requestedLayout = _model.layout;
+    _failedLayout = null;
     _annotationRevision += 1;
     _releaseModelResources();
     late final BigInt cancellation;
@@ -990,35 +992,46 @@ final class ReaderController implements Listenable {
   }
 
   void _layoutChanged(ReaderLayout layout) {
-    if (!layout.isValid || layout == _requestedLayout || _closing) return;
+    if (!layout.isValid || _closing) return;
+    if (_model.busy) {
+      _requestedLayout = layout;
+      _failedLayout = null;
+      return;
+    }
     final document = _model.document;
     if (document == null) {
       _requestedLayout = layout;
       _emit(_model.copyWith(layout: layout));
       return;
     }
-    if (_model.busy ||
+    if (layout == _requestedLayout ||
+        layout == _failedLayout ||
         _model.annotationOperations.isNotEmpty ||
         _model.contentState != ReaderContentState.ready ||
         document.format == FlutterBookFormat.cbz) {
       return;
     }
-    _requestedLayout = layout;
-    for (final cancellation in _relayoutCancellations) {
-      _bridge.cancel(id: cancellation);
-    }
+    _startRelayout(document, layout);
+  }
+
+  void _startRelayout(FlutterDocumentSummary document, ReaderLayout layout) {
     final generation = _model.generation;
-    final revision = ++_layoutRevision;
     late final BigInt cancellation;
     try {
       cancellation = _bridge.createCancellation();
     } catch (error) {
-      _requestedLayout = _model.layout;
+      _failedLayout = layout;
       _emit(
         _model.copyWith(selectionError: 'Relayout failed: ${error.toString()}'),
       );
       return;
     }
+    _requestedLayout = layout;
+    _failedLayout = null;
+    for (final active in _relayoutCancellations) {
+      _bridge.cancel(id: active);
+    }
+    final revision = ++_layoutRevision;
     _relayoutCancellations.add(cancellation);
     _activeBridgeOperations += 1;
     _selectionCancelled();
@@ -1036,6 +1049,7 @@ final class ReaderController implements Listenable {
     ReaderLayout layout,
   ) async {
     FlutterSelectionSurface? ownedSurface;
+    FlutterBufferHandle? ownedRaster;
     ui.Image? ownedImage;
     try {
       final surface = await _bridge.selectionSurface(
@@ -1047,6 +1061,7 @@ final class ReaderController implements Listenable {
         cancellationId: cancellation,
       );
       ownedSurface = surface;
+      ownedRaster = surface.raster?.handle;
       if (!_isCurrentLayout(generation, revision)) return;
       if (document.format == FlutterBookFormat.epub) {
         final raster = surface.raster;
@@ -1063,6 +1078,7 @@ final class ReaderController implements Listenable {
           );
         } finally {
           _bridge.releaseBuffer(handle: raster.handle);
+          ownedRaster = null;
         }
       } else {
         final rendered = await _bridge.renderPage(
@@ -1072,6 +1088,7 @@ final class ReaderController implements Listenable {
           cancellationId: cancellation,
         );
         try {
+          if (!_isCurrentLayout(generation, revision)) return;
           final pixels = _bridge.takeBuffer(handle: rendered.handle);
           ownedImage = await _decoder(
             pixels,
@@ -1112,6 +1129,9 @@ final class ReaderController implements Listenable {
       );
     } finally {
       ownedImage?.dispose();
+      if (ownedRaster case final raster?) {
+        _bridge.releaseBuffer(handle: raster);
+      }
       if (ownedSurface case final surface?) _releaseSurface(surface);
       dispatch(_ReaderRelayoutFinished(cancellation));
     }
@@ -1132,6 +1152,8 @@ final class ReaderController implements Listenable {
         selectionSurface: _freezeSurface(message.surface),
         annotations: message.annotations,
         savedSelections: _savedSelections(message.annotations),
+        annotationsReady: true,
+        annotationError: null,
         layout: message.layout,
         relayoutBusy: false,
         selectionError: null,
@@ -1495,6 +1517,7 @@ final class ReaderController implements Listenable {
           unit: BigInt.zero,
           start: BigInt.from(selection.start),
           end: BigInt.from(selection.end),
+          displayScale: _model.layout.scale,
           color: color,
           body: body,
           cancellationId: cancellation,
@@ -1700,6 +1723,15 @@ final class ReaderController implements Listenable {
         .where((item) => item.id == message.id)
         .firstOrNull;
     if (annotation == null) return;
+    if (_model.relayoutBusy) {
+      _emit(
+        _model.copyWith(
+          annotationError:
+              'The note was not saved because the reader layout changed. Try again.',
+        ),
+      );
+      return;
+    }
     if (_model.annotationOperations.isNotEmpty) {
       _emit(
         _model.copyWith(
@@ -1840,6 +1872,12 @@ final class ReaderController implements Listenable {
     }
     if (_isCurrent(message.generation)) {
       _emit(_model.copyWith(busy: false));
+      final document = _model.document;
+      if (document != null &&
+          _requestedLayout != _model.layout &&
+          _model.contentState == ReaderContentState.ready) {
+        _startRelayout(document, _requestedLayout);
+      }
     }
     _activeBridgeOperations -= 1;
     _disposeBridgeIfIdle();

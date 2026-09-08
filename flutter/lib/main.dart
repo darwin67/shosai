@@ -534,7 +534,9 @@ class _DocumentView extends StatelessWidget {
                               ),
                               IconButton(
                                 tooltip: 'Change color',
-                                onPressed: model.annotationOperations.isNotEmpty
+                                onPressed:
+                                    model.annotationOperations.isNotEmpty ||
+                                        model.relayoutBusy
                                     ? null
                                     : () => dispatch(
                                         ReaderAnnotationUpdated(
@@ -547,7 +549,9 @@ class _DocumentView extends StatelessWidget {
                               ),
                               IconButton(
                                 tooltip: 'Edit note',
-                                onPressed: model.annotationOperations.isNotEmpty
+                                onPressed:
+                                    model.annotationOperations.isNotEmpty ||
+                                        model.relayoutBusy
                                     ? null
                                     : () => dispatch(
                                         ReaderAnnotationNoteRequested(
@@ -558,7 +562,9 @@ class _DocumentView extends StatelessWidget {
                               ),
                               IconButton(
                                 tooltip: 'Delete highlight',
-                                onPressed: model.annotationOperations.isNotEmpty
+                                onPressed:
+                                    model.annotationOperations.isNotEmpty ||
+                                        model.relayoutBusy
                                     ? null
                                     : () => dispatch(
                                         ReaderAnnotationDeleted(annotation.id),
