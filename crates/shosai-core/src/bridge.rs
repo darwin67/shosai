@@ -2907,10 +2907,14 @@ mod tests {
 
     #[tokio::test]
     async fn annotation_mutations_share_request_admission() {
+        let directory = tempfile::tempdir().unwrap();
         let mut admission = BridgeAdmission::new(MAX_BRIDGE_RETAINED_BUFFER_BYTES, 1);
         admission.request_slots = Arc::new(Semaphore::new(1));
         let admission = Arc::new(admission);
-        let bridge = Bridge::with_admission(Arc::clone(&admission));
+        let bridge = Bridge::with_admission_database(
+            Arc::clone(&admission),
+            Some(Arc::new(directory.path().join("annotations.sqlite"))),
+        );
         let document = bridge
             .open_document(pdf_request(), Cancellation::new())
             .await
