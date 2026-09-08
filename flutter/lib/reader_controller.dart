@@ -821,7 +821,7 @@ final class ReaderController implements Listenable {
     final openLayout = _requestedLayout;
     _failedLayout = null;
     _annotationRevision += 1;
-    _releaseModelResources();
+    _releaseModelResources(publish: true);
     late final BigInt cancellation;
     try {
       cancellation = _bridge.createCancellation();
@@ -2016,14 +2016,14 @@ final class ReaderController implements Listenable {
     return !_closing && generation == _model.generation;
   }
 
-  void _emit(ReaderModel model) {
+  void _emit(ReaderModel model, {bool notifyListeners = true}) {
     final selectionChanged =
         _model.selectionDescription != model.selectionDescription;
     _model = model;
     if (!_closing && selectionChanged && _selectionAnnouncer != null) {
       unawaited(_announceSelection(model.selectionDescription));
     }
-    if (!_listenersDisposed) {
+    if (notifyListeners && !_listenersDisposed) {
       for (final listener in _listeners.toList(growable: false)) {
         try {
           listener();
@@ -2058,11 +2058,11 @@ final class ReaderController implements Listenable {
     }
   }
 
-  void _releaseModelResources() {
+  void _releaseModelResources({bool publish = false}) {
     final pageImage = _model.pageImage;
     final document = _model.document;
     final surface = _model.selectionSurface;
-    _model = _model.copyWith(
+    final released = _model.copyWith(
       document: null,
       pageImage: null,
       selectionSurface: null,
@@ -2073,6 +2073,11 @@ final class ReaderController implements Listenable {
       selectionVisualLine: null,
       selectionPreferredX: null,
     );
+    if (publish) {
+      _emit(released, notifyListeners: false);
+    } else {
+      _model = released;
+    }
     pageImage?.dispose();
     if (surface != null) _releaseSurface(surface);
     if (document != null) {

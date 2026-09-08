@@ -3,6 +3,8 @@ import 'dart:collection';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart'
+    show debugDefaultTargetPlatformOverride;
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
@@ -50,6 +52,14 @@ void main() {
       ThemeData.estimateBrightnessForColor(colors.background),
       isNot(ThemeData.estimateBrightnessForColor(colors.foreground)),
     );
+  });
+
+  test('desktop platforms use explicit selection announcements', () {
+    expect(usesExplicitSelectionAnnouncements(TargetPlatform.linux), isTrue);
+    expect(usesExplicitSelectionAnnouncements(TargetPlatform.macOS), isTrue);
+    expect(usesExplicitSelectionAnnouncements(TargetPlatform.windows), isTrue);
+    expect(usesExplicitSelectionAnnouncements(TargetPlatform.android), isFalse);
+    expect(usesExplicitSelectionAnnouncements(TargetPlatform.iOS), isFalse);
   });
 
   test('page image source uses non-unit raster pixel dimensions', () async {
@@ -315,9 +325,12 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       expect(announcements, ['Selected text: e']);
 
-      controller.dispatch(const ReaderSelectionCancelled());
+      bridge.failCancellationCreation = true;
+      controller.dispatch(const ReaderOpenRequested('/tmp/replacement.epub'));
       await Future<void>.delayed(Duration.zero);
       expect(announcements, ['Selected text: e', 'No text selected']);
+      expect(controller.model.document, isNull);
+      expect(controller.model.error, contains('too many cancellation tokens'));
       controller.dispatch(const ReaderSelectionCancelled());
       await Future<void>.delayed(Duration.zero);
       expect(announcements, ['Selected text: e', 'No text selected']);
@@ -3238,6 +3251,14 @@ void main() {
     tester,
   ) async {
     final semantics = tester.ensureSemantics();
+    debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+    final announcementLog = <Map<dynamic, dynamic>>[];
+    tester.binding.defaultBinaryMessenger.setMockDecodedMessageHandler<dynamic>(
+      SystemChannels.accessibility,
+      (message) async {
+        announcementLog.add(message as Map<dynamic, dynamic>);
+      },
+    );
     try {
       final bridge = _ControlledBridge(format: FlutterBookFormat.epub);
       await tester.pumpWidget(
@@ -3332,6 +3353,16 @@ void main() {
       status = tester.getSemantics(statusFinder).getSemanticsData();
       expect(status.label, 'Selected text: e');
       expect(status.flagsCollection.isLiveRegion, isTrue);
+      expect(announcementLog.where((event) => event['type'] == 'announce'), [
+        {
+          'type': 'announce',
+          'data': {
+            'viewId': tester.view.viewId,
+            'message': 'Selected text: e',
+            'textDirection': TextDirection.ltr.index,
+          },
+        },
+      ]);
 
       await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
@@ -3341,6 +3372,10 @@ void main() {
       status = statusNode.getSemanticsData();
       expect(status.label, 'No text selected');
       expect(status.flagsCollection.isLiveRegion, isTrue);
+      expect(
+        (announcementLog.last['data'] as Map<dynamic, dynamic>)['message'],
+        'No text selected',
+      );
 
       await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
       await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
@@ -3360,6 +3395,12 @@ void main() {
       await tester.pumpWidget(const SizedBox());
       await bridge.disposed.future;
     } finally {
+      tester.binding.defaultBinaryMessenger
+          .setMockDecodedMessageHandler<dynamic>(
+            SystemChannels.accessibility,
+            null,
+          );
+      debugDefaultTargetPlatformOverride = null;
       semantics.dispose();
     }
   });

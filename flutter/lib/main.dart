@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
@@ -128,7 +129,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
         ReaderFocusTarget.actions => _actionFocus.requestFocus(),
       },
       selectionCopier: (text) => Clipboard.setData(ClipboardData(text: text)),
-      selectionAnnouncer: Platform.isLinux
+      selectionAnnouncer:
+          usesExplicitSelectionAnnouncements(defaultTargetPlatform)
           ? (description) => SemanticsService.sendAnnouncement(
               View.of(context),
               description,
@@ -1266,6 +1268,11 @@ Color _highlightColor(FlutterHighlightColor? color) => switch (color) {
   FlutterHighlightColor.purple => const Color(0x668876c5),
   FlutterHighlightColor.yellow || null => const Color(0x66e2bd54),
 };
+
+bool usesExplicitSelectionAnnouncements(TargetPlatform platform) =>
+    platform == TargetPlatform.linux ||
+    platform == TargetPlatform.macOS ||
+    platform == TargetPlatform.windows;
 
 Future<ui.Image> _decodeRgba(
   Uint8List pixels, {
