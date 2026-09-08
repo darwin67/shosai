@@ -732,12 +732,17 @@ impl Bridge {
             store = self.annotation_store() => store?,
             () = cancellation.cancelled() => return Err(BridgeError::Cancelled),
         };
+        let extraction_scale = if matches!(&retained.document, OpenDocument::Pdf(_)) {
+            display_scale
+        } else {
+            1.0
+        };
         let extracted = self
             .extract_selection(
                 document,
                 Arc::clone(&retained),
                 unit,
-                1.0,
+                extraction_scale,
                 680.0,
                 18.0,
                 false,
@@ -2533,6 +2538,42 @@ mod tests {
         archive.finish().unwrap().into_inner()
     }
 
+    fn selectable_pdf_with_media_box(width: u32, height: u32, text: &str) -> Vec<u8> {
+        let content = format!("BT /F1 200 Tf 1 0 0 1 100 {} Tm ({text}) Tj ET", height / 2);
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
+            ),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+            format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len() + 1
+            ),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
     #[test]
     fn bridge_errors_expose_stable_categories() {
         assert_eq!(
@@ -3356,6 +3397,66 @@ mod tests {
                 start: endpoint.range_start,
                 end: endpoint.range_end,
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn pdf_annotation_creation_uses_the_displayed_scale() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("large-page.pdf");
+        std::fs::write(&path, selectable_pdf_with_media_box(7_000, 7_000, "scale")).unwrap();
+        let bridge = Bridge::with_database_path(directory.path().join("annotations.sqlite"));
+        let document = bridge
+            .open_document(
+                OpenRequest {
+                    book_id: None,
+                    local_id: "large-page".into(),
+                    path_key: crate::path_key::path_key(&path),
+                    format_hint: Some(BookFormat::Pdf),
+                },
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        let retained = bridge.document(document.handle).unwrap();
+        assert!(matches!(
+            selection_transient_byte_len(&retained.document, 0, 1.0, false),
+            Err(BridgeError::BufferLimit)
+        ));
+        let surface = bridge
+            .selection_surface(document.handle, 0, 0.1, 680.0, 18.0, Cancellation::new())
+            .await
+            .unwrap();
+        let endpoint = surface
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.range_start < endpoint.range_end)
+            .copied()
+            .unwrap();
+        assert!(bridge.release_selection(surface.handle));
+
+        let created = bridge
+            .create_annotation(
+                CreateAnnotationRequest {
+                    document: document.handle,
+                    unit: 0,
+                    start: endpoint.range_start,
+                    end: endpoint.range_end,
+                    display_scale: 0.1,
+                    color: HighlightColor::Yellow,
+                    body: None,
+                },
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.resolution, AnnotationResolution::Exact);
+        assert_eq!(
+            bridge
+                .list_annotations(document.handle, 0.1, Cancellation::new())
+                .await
+                .unwrap(),
+            vec![created]
         );
     }
 
