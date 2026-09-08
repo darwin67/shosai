@@ -581,6 +581,54 @@ pub fn resolve_text_anchor(
         .and_then(|resolver| resolver.resolve(stored_range, quote, &mut remaining_work, &|| false))
 }
 
+pub(crate) fn resolve_exact_text_anchor(
+    text: &str,
+    stored_range: Range<usize>,
+    quote: &QuoteSelector,
+    remaining_work: &mut usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Option<ResolvedTextAnchor>, TextAnchorResolutionError> {
+    quote
+        .validate()
+        .map_err(|_| TextAnchorResolutionError::InvalidSelector)?;
+    if stored_range.start >= stored_range.end {
+        return Ok(None);
+    }
+    let mut start_byte = None;
+    let mut end_byte = None;
+    let mut scalar_count = 0;
+    for (index, (byte, _)) in text.char_indices().enumerate() {
+        if index % 1024 == 0 && is_cancelled() {
+            return Err(TextAnchorResolutionError::Cancelled);
+        }
+        consume_resolution_work(remaining_work, 1)?;
+        if index == stored_range.start {
+            start_byte = Some(byte);
+        }
+        if index == stored_range.end {
+            end_byte = Some(byte);
+            break;
+        }
+        scalar_count = index + 1;
+    }
+    if end_byte.is_none() && stored_range.end == scalar_count {
+        end_byte = Some(text.len());
+    }
+    let (Some(start_byte), Some(end_byte)) = (start_byte, end_byte) else {
+        return Ok(None);
+    };
+    if bounded_normalize_quote_v1(&text[start_byte..end_byte], remaining_work, is_cancelled)?
+        == quote.exact
+    {
+        Ok(Some(ResolvedTextAnchor {
+            resolution: AnnotationResolution::Exact,
+            range: Some(stored_range),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
 fn consume_resolution_work(
     remaining_work: &mut usize,
     amount: usize,
@@ -1782,6 +1830,20 @@ mod tests {
                 .unwrap()
                 .resolution,
             AnnotationResolution::Orphaned,
+        );
+    }
+
+    #[test]
+    fn exact_text_anchor_does_not_scan_unrelated_graphemes() {
+        let text = format!("ordinary e{}", "\u{301}".repeat(1_025));
+        let quote = QuoteSelector::new("ordinary", "", "").unwrap();
+        let mut work = MAX_TEXT_ANCHOR_RESOLUTION_WORK;
+        assert_eq!(
+            resolve_exact_text_anchor(&text, 0..8, &quote, &mut work, &|| false).unwrap(),
+            Some(ResolvedTextAnchor {
+                resolution: AnnotationResolution::Exact,
+                range: Some(0..8),
+            })
         );
     }
 
