@@ -1565,12 +1565,250 @@ void main() {
         } else {
           expect(bridge.renderScales, isEmpty);
         }
+        controller.dispatch(const ReaderSelectionStarted(1));
+        controller.dispatch(const ReaderSelectionExtended(3));
+        controller.dispatch(const ReaderSelectionEnded());
+        controller.dispatch(const ReaderSelectionCommitted());
+        await bridge.waitForOp(3);
+        expect(bridge.createdScales.single, 2);
 
         controller.dispose();
         await bridge.disposed.future;
       },
     );
   }
+
+  test('stale EPUB relayout releases its effect-owned raster once', () async {
+    final bridge = _ControlledBridge(
+      format: FlutterBookFormat.epub,
+      immediateLists: true,
+    );
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/book.epub');
+    final staleSelection = Completer<FlutterSelectionSurface>();
+    bridge.selectionCompleters.add(staleSelection);
+    const first = ReaderLayout(scale: 2, width: 300, fontSize: 20);
+    const second = ReaderLayout(scale: 3, width: 400, fontSize: 22);
+
+    controller.dispatch(const ReaderLayoutChanged(first));
+    await _waitUntil(() => bridge.selectionCalls == 2);
+    controller.dispatch(const ReaderLayoutChanged(second));
+    await bridge.waitForOp(2);
+    staleSelection.complete(_surface(BigInt.from(20), raster: true));
+    await bridge.waitForOp(3);
+
+    final raster = FlutterBufferHandle(
+      registry: BigInt.one,
+      id: BigInt.from(20),
+    );
+    final surface = FlutterSelectionHandle(
+      registry: BigInt.one,
+      id: BigInt.from(20),
+    );
+    expect(
+      bridge.releasedBuffers.where((item) => item == raster),
+      hasLength(1),
+    );
+    expect(
+      bridge.releasedSelections.where((item) => item == surface),
+      hasLength(1),
+    );
+    expect(controller.model.layout, second);
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
+  test('stale PDF render is released without transfer or decode', () async {
+    final bridge = _ControlledBridge(
+      format: FlutterBookFormat.pdf,
+      immediateLists: true,
+    );
+    var decodeCalls = 0;
+    final controller = ReaderController(
+      bridge: bridge,
+      decoder: (pixels, {required width, required height}) {
+        decodeCalls += 1;
+        return _testImage();
+      },
+    );
+    await _openControlled(controller, bridge, '/tmp/book.pdf');
+    final staleRender = Completer<FlutterRenderedBuffer>();
+    bridge.renderCompleters.add(staleRender);
+    const first = ReaderLayout(scale: 2, width: 300, fontSize: 20);
+    const second = ReaderLayout(scale: 3, width: 400, fontSize: 22);
+
+    controller.dispatch(const ReaderLayoutChanged(first));
+    await _waitUntil(() => bridge.renderCalls == 2);
+    controller.dispatch(const ReaderLayoutChanged(second));
+    await bridge.waitForOp(2);
+    final staleBuffer = _buffer(BigInt.from(20));
+    staleRender.complete(staleBuffer);
+    await bridge.waitForOp(3);
+
+    expect(decodeCalls, 2, reason: 'only open and current relayout decode');
+    expect(bridge.takenBuffers, isNot(contains(staleBuffer.handle)));
+    expect(
+      bridge.releasedBuffers.where((item) => item == staleBuffer.handle),
+      hasLength(1),
+    );
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
+  test('stale decoded image and annotation list never publish', () async {
+    final bridge = _ControlledBridge(
+      format: FlutterBookFormat.pdf,
+      immediateLists: true,
+    );
+    final staleDecode = Completer<ui.Image>();
+    var decodeCalls = 0;
+    final controller = ReaderController(
+      bridge: bridge,
+      decoder: (pixels, {required width, required height}) {
+        decodeCalls += 1;
+        return decodeCalls == 2 ? staleDecode.future : _testImage();
+      },
+    );
+    await _openControlled(controller, bridge, '/tmp/book.pdf');
+    const first = ReaderLayout(scale: 2, width: 300, fontSize: 20);
+    const second = ReaderLayout(scale: 3, width: 400, fontSize: 22);
+    controller.dispatch(const ReaderLayoutChanged(first));
+    await _waitUntil(() => decodeCalls == 2);
+    controller.dispatch(const ReaderLayoutChanged(second));
+    await bridge.waitForOp(2);
+    final staleImage = await _testImage();
+    staleDecode.complete(staleImage);
+    await bridge.waitForOp(3);
+    expect(staleImage.debugDisposed, isTrue);
+    expect(controller.model.layout, second);
+
+    final staleList = Completer<List<FlutterAnnotation>>();
+    bridge.listCompleters.add(staleList);
+    const third = ReaderLayout(scale: 4, width: 500, fontSize: 24);
+    const fourth = ReaderLayout(scale: 5, width: 600, fontSize: 26);
+    controller.dispatch(const ReaderLayoutChanged(third));
+    await _waitUntil(() => bridge.listCalls == 3);
+    controller.dispatch(const ReaderLayoutChanged(fourth));
+    await bridge.waitForOp(4);
+    staleList.complete([_annotation('stale')]);
+    await bridge.waitForOp(5);
+    expect(controller.model.layout, fourth);
+    expect(controller.model.annotations, isEmpty);
+
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
+  test('failed relayout is not automatically retried', () async {
+    final bridge = _ControlledBridge(immediateLists: true);
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/book.epub');
+    final failure = Completer<FlutterSelectionSurface>();
+    bridge.selectionCompleters.add(failure);
+    const layout = ReaderLayout(scale: 2, width: 300, fontSize: 20);
+    controller.dispatch(const ReaderLayoutChanged(layout));
+    failure.completeError(StateError('persistent failure'));
+    await bridge.waitForOp(2);
+
+    controller.dispatch(const ReaderLayoutChanged(layout));
+    await Future<void>.delayed(Duration.zero);
+    expect(bridge.selectionCalls, 2);
+    expect(controller.model.relayoutBusy, isFalse);
+    expect(controller.model.selectionError, contains('persistent failure'));
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
+  test(
+    'layout changes during open are applied by a follow-up effect',
+    () async {
+      final bridge = _ControlledBridge(immediateLists: true);
+      final controller = _epubController(bridge);
+      const layout = ReaderLayout(scale: 2, width: 300, fontSize: 20);
+      controller.dispatch(const ReaderOpenRequested('/tmp/book.epub'));
+      controller.dispatch(const ReaderLayoutChanged(layout));
+      await bridge.waitForOp(2);
+
+      expect(bridge.selectionLayouts, [const ReaderLayout(), layout]);
+      expect(controller.model.layout, layout);
+      controller.dispose();
+      await bridge.disposed.future;
+    },
+  );
+
+  test('failed superseding allocation leaves active relayout valid', () async {
+    final bridge = _ControlledBridge(immediateLists: true);
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/book.epub');
+    final activeSelection = Completer<FlutterSelectionSurface>();
+    bridge.selectionCompleters.add(activeSelection);
+    const active = ReaderLayout(scale: 2, width: 300, fontSize: 20);
+    const rejected = ReaderLayout(scale: 3, width: 400, fontSize: 22);
+    controller.dispatch(const ReaderLayoutChanged(active));
+    await _waitUntil(() => bridge.selectionCalls == 2);
+    final activeCancellation = bridge.createdCancellations.last;
+    bridge.failCancellationCreation = true;
+    controller.dispatch(const ReaderLayoutChanged(rejected));
+
+    expect(controller.model.relayoutBusy, isTrue);
+    expect(bridge.cancelled, isNot(contains(activeCancellation)));
+    activeSelection.complete(_surface(BigInt.from(20), raster: true));
+    await bridge.waitForOp(2);
+    expect(controller.model.layout, active);
+    expect(controller.model.relayoutBusy, isFalse);
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
+  test('successful relayout restores annotation readiness', () async {
+    final bridge = _ControlledBridge(immediateLists: true)..listFailure = true;
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/book.epub');
+    expect(controller.model.annotationsReady, isFalse);
+    bridge.listFailure = false;
+    controller.dispatch(
+      const ReaderLayoutChanged(
+        ReaderLayout(scale: 2, width: 300, fontSize: 20),
+      ),
+    );
+    await bridge.waitForOp(2);
+    expect(controller.model.annotationsReady, isTrue);
+    expect(controller.model.annotationError, isNull);
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
+  test('note completion during relayout reports a retryable error', () async {
+    final bridge = _ControlledBridge(
+      initialAnnotations: [_annotation('one')],
+      immediateLists: true,
+    );
+    final editor = Completer<String?>();
+    final controller = ReaderController(
+      bridge: bridge,
+      decoder: (pixels, {required width, required height}) => _testImage(),
+      noteEditor: (_) => editor.future,
+    );
+    await _openControlled(controller, bridge, '/tmp/book.epub');
+    controller.dispatch(const ReaderAnnotationNoteRequested('one'));
+    final pendingLayout = Completer<FlutterSelectionSurface>();
+    bridge.selectionCompleters.add(pendingLayout);
+    controller.dispatch(
+      const ReaderLayoutChanged(
+        ReaderLayout(scale: 2, width: 300, fontSize: 20),
+      ),
+    );
+    await _waitUntil(() => controller.model.relayoutBusy);
+    editor.complete('unsaved note');
+    await Future<void>.delayed(Duration.zero);
+
+    expect(controller.model.annotationError, contains('Try again'));
+    expect(bridge.updateCalls, 0);
+    pendingLayout.complete(_surface(BigInt.from(20), raster: true));
+    await bridge.waitForOp(2);
+    controller.dispose();
+    await bridge.disposed.future;
+  });
 
   test(
     'closing rejects update and delete intents while effects drain',
@@ -1962,7 +2200,11 @@ void main() {
   }
 
   testWidgets('annotation controls prevent overlapping writes', (tester) async {
-    final bridge = _ControlledBridge(initialAnnotations: [_annotation('one')]);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge(
+      initialAnnotations: [_annotation('one')],
+      immediateLists: true,
+    );
     await tester.pumpWidget(
       MaterialApp(
         home: ReaderScreen(
@@ -1996,6 +2238,38 @@ void main() {
     await tester.tap(find.byTooltip('Edit note'));
     expect(bridge.updateCalls, 1);
     bridge.updateCompleter!.complete(false);
+    await tester.pumpAndSettle();
+
+    final pendingLayout = Completer<FlutterSelectionSurface>();
+    bridge.selectionCompleters.add(pendingLayout);
+    tester.view.devicePixelRatio = tester.view.devicePixelRatio == 2 ? 3 : 2;
+    await tester.pump();
+    await tester.pump();
+    expect(
+      tester
+          .widget<IconButton>(
+            find.widgetWithIcon(IconButton, Icons.palette_outlined),
+          )
+          .onPressed,
+      isNull,
+    );
+    expect(
+      tester
+          .widget<IconButton>(
+            find.widgetWithIcon(IconButton, Icons.note_alt_outlined),
+          )
+          .onPressed,
+      isNull,
+    );
+    expect(
+      tester
+          .widget<IconButton>(
+            find.widgetWithIcon(IconButton, Icons.delete_outline),
+          )
+          .onPressed,
+      isNull,
+    );
+    pendingLayout.complete(_surface(BigInt.from(20), raster: true));
     await tester.pumpAndSettle();
     await tester.pumpWidget(const SizedBox());
     await bridge.disposed.future;
@@ -2660,6 +2934,33 @@ FlutterAnnotation _annotation(String id) => FlutterAnnotation(
   color: FlutterHighlightColor.yellow,
 );
 
+FlutterRenderedBuffer _buffer(BigInt id) => FlutterRenderedBuffer(
+  handle: FlutterBufferHandle(registry: BigInt.one, id: id),
+  width: 1,
+  height: 1,
+  byteLen: BigInt.from(4),
+);
+
+FlutterSelectionSurface _surface(BigInt id, {required bool raster}) =>
+    FlutterSelectionSurface(
+      handle: FlutterSelectionHandle(registry: BigInt.one, id: id),
+      width: 1,
+      height: 1,
+      text: 'x',
+      copyEligible: true,
+      raster: raster ? _buffer(id) : null,
+      endpoints: const [],
+      graphemeBoundaries: Uint32List.fromList([0, 1]),
+      wordBoundaries: Uint32List.fromList([0, 1]),
+      visualLines: const [],
+    );
+
+Future<void> _waitUntil(bool Function() condition) async {
+  while (!condition()) {
+    await Future<void>.delayed(Duration.zero);
+  }
+}
+
 List<FlutterAnnotation> _resolutionAnnotations() => [
   FlutterAnnotation(
     id: 'recovered',
@@ -2712,7 +3013,7 @@ final class _ControlledBridge implements FlutterBridge {
   final List<FlutterAnnotation> initialAnnotations;
   final List<FlutterAnnotation> storedAnnotations;
   final bool selectionFailure;
-  final bool listFailure;
+  bool listFailure;
   final bool immediateLists;
   final Completer<List<FlutterAnnotation>>? initialListCompleter;
   final List<FlutterSelectionVisualLine>? selectionVisualLines;
@@ -2721,6 +3022,12 @@ final class _ControlledBridge implements FlutterBridge {
   final createdCancellations = <BigInt>[];
   final releasedCancellations = <BigInt>[];
   final cancelled = <BigInt>[];
+  final selectionCompleters = Queue<Completer<FlutterSelectionSurface>>();
+  final renderCompleters = Queue<Completer<FlutterRenderedBuffer>>();
+  final listCompleters = Queue<Completer<List<FlutterAnnotation>>>();
+  final takenBuffers = <FlutterBufferHandle>[];
+  final releasedBuffers = <FlutterBufferHandle>[];
+  final releasedSelections = <FlutterSelectionHandle>[];
   final events = <String>[];
   Completer<bool>? updateCompleter = Completer<bool>();
   Completer<bool>? deleteCompleter;
@@ -2740,6 +3047,7 @@ final class _ControlledBridge implements FlutterBridge {
   var _nextId = BigInt.one;
   final _listedDocuments = <BigInt>{};
   final createdRanges = <(BigInt, BigInt)>[];
+  final createdScales = <double>[];
   final selectionLayouts = <ReaderLayout>[];
   final renderScales = <double>[];
   final listScales = <double>[];
@@ -2800,6 +3108,9 @@ final class _ControlledBridge implements FlutterBridge {
       ReaderLayout(scale: scale, width: width, fontSize: fontSize),
     );
     if (selectionFailure) throw StateError('selection failed');
+    if (selectionCompleters.isNotEmpty) {
+      return selectionCompleters.removeFirst().future;
+    }
     return FlutterSelectionSurface(
       handle: FlutterSelectionHandle(registry: BigInt.one, id: cancellationId),
       width: 100,
@@ -2923,6 +3234,9 @@ final class _ControlledBridge implements FlutterBridge {
     listCalls += 1;
     listScales.add(scale);
     if (listFailure) return Future.error(StateError('annotation list failed'));
+    if (listCompleters.isNotEmpty) {
+      return listCompleters.removeFirst().future;
+    }
     if (immediateLists) return Future.value(List.of(storedAnnotations));
     if (_listedDocuments.add(document.id)) {
       if (initialListCompleter case final completer?) {
@@ -2941,12 +3255,14 @@ final class _ControlledBridge implements FlutterBridge {
     required BigInt unit,
     required BigInt start,
     required BigInt end,
+    required double displayScale,
     required FlutterHighlightColor color,
     String? body,
     required BigInt cancellationId,
   }) async {
     createCalls += 1;
     createdRanges.add((start, end));
+    createdScales.add(displayScale);
     final created =
         await (createCompleter?.future ??
             Future.value(
@@ -3012,6 +3328,9 @@ final class _ControlledBridge implements FlutterBridge {
   }) async {
     renderCalls += 1;
     renderScales.add(scale);
+    if (renderCompleters.isNotEmpty) {
+      return renderCompleters.removeFirst().future;
+    }
     return FlutterRenderedBuffer(
       handle: FlutterBufferHandle(registry: BigInt.one, id: cancellationId),
       width: 1,
@@ -3021,14 +3340,22 @@ final class _ControlledBridge implements FlutterBridge {
   }
 
   @override
-  Uint8List takeBuffer({required FlutterBufferHandle handle}) =>
-      Uint8List.fromList([255, 255, 255, 255]);
+  Uint8List takeBuffer({required FlutterBufferHandle handle}) {
+    takenBuffers.add(handle);
+    return Uint8List.fromList([255, 255, 255, 255]);
+  }
 
   @override
-  bool releaseBuffer({required FlutterBufferHandle handle}) => true;
+  bool releaseBuffer({required FlutterBufferHandle handle}) {
+    releasedBuffers.add(handle);
+    return true;
+  }
 
   @override
-  bool releaseSelection({required FlutterSelectionHandle handle}) => true;
+  bool releaseSelection({required FlutterSelectionHandle handle}) {
+    releasedSelections.add(handle);
+    return true;
+  }
 
   @override
   bool releaseDocument({required FlutterDocumentHandle handle}) => true;
@@ -3120,6 +3447,7 @@ class _FakeBridge implements FlutterBridge {
     required BigInt unit,
     required BigInt start,
     required BigInt end,
+    required double displayScale,
     required FlutterHighlightColor color,
     String? body,
     required BigInt cancellationId,
@@ -3312,6 +3640,7 @@ final class _SequentialBridge implements FlutterBridge {
     required BigInt unit,
     required BigInt start,
     required BigInt end,
+    required double displayScale,
     required FlutterHighlightColor color,
     String? body,
     required BigInt cancellationId,

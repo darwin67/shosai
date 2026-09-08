@@ -214,6 +214,7 @@ void main() {
         unit: BigInt.zero,
         start: endpoint.rangeStart,
         end: endpoint.rangeEnd,
+        displayScale: 1,
         color: FlutterHighlightColor.yellow,
         cancellationId: cancellation!,
       );
