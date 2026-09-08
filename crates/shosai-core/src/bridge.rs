@@ -3175,22 +3175,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_annotation_ignores_unrelated_oversized_graphemes() {
+    async fn exact_annotations_survive_oversized_graphemes() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("oversized-grapheme.epub");
         let body = format!("ordinary e{}", "\u{301}".repeat(1_025));
         std::fs::write(&path, epub_with_body(&body)).unwrap();
         let bridge = Bridge::with_database_path(directory.path().join("annotations.sqlite"));
+        let request = || OpenRequest {
+            book_id: None,
+            local_id: "oversized-grapheme".into(),
+            path_key: crate::path_key::path_key(&path),
+            format_hint: Some(BookFormat::Epub),
+        };
         let document = bridge
-            .open_document(
-                OpenRequest {
-                    book_id: None,
-                    local_id: "oversized-grapheme".into(),
-                    path_key: crate::path_key::path_key(&path),
-                    format_hint: Some(BookFormat::Epub),
-                },
-                Cancellation::new(),
-            )
+            .open_document(request(), Cancellation::new())
             .await
             .unwrap();
         let surface = bridge
@@ -3250,12 +3248,46 @@ mod tests {
             chapter_text.chars().count(),
             stored[0].quote,
         );
+        let oversized_start = chars
+            .iter()
+            .rposition(|character| *character == 'e')
+            .unwrap();
+        let oversized = bridge
+            .create_annotation(
+                CreateAnnotationRequest {
+                    document: document.handle,
+                    unit: 0,
+                    start: oversized_start,
+                    end: chars.len(),
+                    display_scale: 1.0,
+                    color: HighlightColor::Green,
+                    body: None,
+                },
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(oversized.resolution, AnnotationResolution::Exact);
+        let listed = bridge
+            .list_annotations(document.handle, 1.0, Cancellation::new())
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.contains(&created));
+        assert!(listed.contains(&oversized));
+
+        assert!(bridge.release_document(document.handle));
+        let reopened = bridge
+            .open_document(request(), Cancellation::new())
+            .await
+            .unwrap();
         assert_eq!(
             bridge
-                .list_annotations(document.handle, 1.0, Cancellation::new())
+                .list_annotations(reopened.handle, 1.0, Cancellation::new())
                 .await
-                .unwrap(),
-            vec![created]
+                .unwrap()
+                .len(),
+            2
         );
     }
 
@@ -3445,10 +3477,7 @@ mod tests {
                 .await
         });
         gate.wait_until_entered().await;
-        assert_eq!(
-            admission.probe_bytes.available_permits(),
-            probe_bytes
-        );
+        assert_eq!(admission.probe_bytes.available_permits(), probe_bytes);
 
         let selection_bridge = Arc::clone(&bridge);
         let selection = tokio::spawn(async move {

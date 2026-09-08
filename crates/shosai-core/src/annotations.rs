@@ -617,6 +617,32 @@ pub(crate) fn resolve_exact_text_anchor(
     let (Some(start_byte), Some(end_byte)) = (start_byte, end_byte) else {
         return Ok(None);
     };
+    let selected = &text[start_byte..end_byte];
+    if let Some(original) = &quote.original
+        && original.len() == selected.len()
+    {
+        let mut identical = true;
+        for (selected, original) in selected
+            .as_bytes()
+            .chunks(1024)
+            .zip(original.as_bytes().chunks(1024))
+        {
+            if is_cancelled() {
+                return Err(TextAnchorResolutionError::Cancelled);
+            }
+            consume_resolution_work(remaining_work, selected.len())?;
+            if selected != original {
+                identical = false;
+                break;
+            }
+        }
+        if identical {
+            return Ok(Some(ResolvedTextAnchor {
+                resolution: AnnotationResolution::Exact,
+                range: Some(stored_range),
+            }));
+        }
+    }
     if bounded_normalize_quote_v1(&text[start_byte..end_byte], remaining_work, is_cancelled)?
         == quote.exact
     {
