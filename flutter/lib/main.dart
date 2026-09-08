@@ -104,6 +104,7 @@ class ReaderScreen extends StatefulWidget {
 class _ReaderScreenState extends State<ReaderScreen> {
   final TextEditingController _path = TextEditingController();
   final GlobalKey _pathFieldKey = GlobalKey(debugLabel: 'document path');
+  final GlobalKey _contentKey = GlobalKey(debugLabel: 'reader content');
   final FocusNode _openFocus = FocusNode(debugLabel: 'open document');
   final FocusNode _readerFocus = FocusNode(debugLabel: 'reader surface');
   final FocusNode _actionFocus = FocusNode(debugLabel: 'selection actions');
@@ -156,6 +157,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
           model: model,
           path: _path,
           pathFieldKey: _pathFieldKey,
+          contentKey: _contentKey,
           openFocus: _openFocus,
           open: _open,
           dispatch: _controller.dispatch,
@@ -174,6 +176,7 @@ class _ResponsiveReaderBody extends StatelessWidget {
     required this.model,
     required this.path,
     required this.pathFieldKey,
+    required this.contentKey,
     required this.openFocus,
     required this.open,
     required this.dispatch,
@@ -184,6 +187,7 @@ class _ResponsiveReaderBody extends StatelessWidget {
   final ReaderModel model;
   final TextEditingController path;
   final GlobalKey pathFieldKey;
+  final GlobalKey contentKey;
   final FocusNode openFocus;
   final VoidCallback open;
   final void Function(ReaderMessage) dispatch;
@@ -207,6 +211,7 @@ class _ResponsiveReaderBody extends StatelessWidget {
         horizontal: composition == _ReaderComposition.medium,
       );
       final content = _ReaderContentPane(
+        key: contentKey,
         model: model,
         dispatch: dispatch,
         readerFocus: readerFocus,
@@ -341,6 +346,7 @@ class _ReaderControls extends StatelessWidget {
 
 class _ReaderContentPane extends StatelessWidget {
   const _ReaderContentPane({
+    super.key,
     required this.model,
     required this.dispatch,
     required this.readerFocus,

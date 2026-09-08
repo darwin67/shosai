@@ -3041,6 +3041,96 @@ void main() {
     await bridge.disposed.future;
   });
 
+  testWidgets('highlight scroll position survives responsive breakpoints', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge(
+      initialAnnotations: List.generate(
+        8,
+        (index) => _annotation('$index', unit: index),
+      ),
+      immediateLists: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    await tester.drag(find.byType(ListView), const Offset(-600, 0));
+    await tester.pumpAndSettle();
+    final listBefore = tester.state<ScrollableState>(
+      find.byType(Scrollable).last,
+    );
+    expect(listBefore.position.pixels, greaterThan(0));
+
+    tester.view.physicalSize = const Size(1144, 900);
+    await tester.pumpAndSettle();
+    final listAfter = tester.state<ScrollableState>(
+      find.byType(Scrollable).last,
+    );
+    expect(listAfter, same(listBefore));
+    expect(listAfter.position.pixels, greaterThan(0));
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('highlight focus survives responsive breakpoint transitions', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge(
+      initialAnnotations: [_annotation('one')],
+      immediateLists: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    final highlight = find.widgetWithText(TextButton, 'Highlight 1');
+    for (var tabs = 0; tabs < 10; tabs += 1) {
+      final focus = FocusManager.instance.primaryFocus;
+      if (focus != null && focus.rect.overlaps(tester.getRect(highlight))) {
+        break;
+      }
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+    }
+    final focusBefore = FocusManager.instance.primaryFocus!;
+    expect(focusBefore.rect.overlaps(tester.getRect(highlight)), isTrue);
+
+    tester.view.physicalSize = const Size(1144, 900);
+    await tester.pumpAndSettle();
+    expect(FocusManager.instance.primaryFocus, same(focusBefore));
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pump();
+    expect(find.byKey(const ValueKey('selection-actions')), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
   for (final format in [FlutterBookFormat.pdf, FlutterBookFormat.epub]) {
     for (final device in [
       ui.PointerDeviceKind.mouse,
@@ -3503,9 +3593,9 @@ void main() {
   });
 }
 
-FlutterAnnotation _annotation(String id) => FlutterAnnotation(
+FlutterAnnotation _annotation(String id, {int unit = 0}) => FlutterAnnotation(
   id: id,
-  unit: BigInt.zero,
+  unit: BigInt.from(unit),
   resolution: FlutterAnnotationResolution.exact,
   textRange: FlutterAnnotationTextRange(start: BigInt.one, end: BigInt.from(3)),
   color: FlutterHighlightColor.yellow,
