@@ -103,6 +103,7 @@ class ReaderScreen extends StatefulWidget {
 
 class _ReaderScreenState extends State<ReaderScreen> {
   final TextEditingController _path = TextEditingController();
+  final GlobalKey _pathFieldKey = GlobalKey(debugLabel: 'document path');
   final FocusNode _readerFocus = FocusNode(debugLabel: 'reader surface');
   final FocusNode _actionFocus = FocusNode(debugLabel: 'selection actions');
   late final ReaderController _controller;
@@ -152,6 +153,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         child: _ResponsiveReaderBody(
           model: model,
           path: _path,
+          pathFieldKey: _pathFieldKey,
           open: _open,
           dispatch: _controller.dispatch,
           readerFocus: _readerFocus,
@@ -168,6 +170,7 @@ class _ResponsiveReaderBody extends StatelessWidget {
   const _ResponsiveReaderBody({
     required this.model,
     required this.path,
+    required this.pathFieldKey,
     required this.open,
     required this.dispatch,
     required this.readerFocus,
@@ -176,6 +179,7 @@ class _ResponsiveReaderBody extends StatelessWidget {
 
   final ReaderModel model;
   final TextEditingController path;
+  final GlobalKey pathFieldKey;
   final VoidCallback open;
   final void Function(ReaderMessage) dispatch;
   final FocusNode readerFocus;
@@ -192,6 +196,7 @@ class _ResponsiveReaderBody extends StatelessWidget {
       final controls = _ReaderControls(
         model: model,
         path: path,
+        pathFieldKey: pathFieldKey,
         open: open,
         horizontal: composition == _ReaderComposition.medium,
       );
@@ -239,12 +244,14 @@ class _ReaderControls extends StatelessWidget {
   const _ReaderControls({
     required this.model,
     required this.path,
+    required this.pathFieldKey,
     required this.open,
     required this.horizontal,
   });
 
   final ReaderModel model;
   final TextEditingController path;
+  final GlobalKey pathFieldKey;
   final VoidCallback open;
   final bool horizontal;
 
@@ -254,6 +261,7 @@ class _ReaderControls extends StatelessWidget {
       textField: true,
       label: 'Document path',
       child: TextField(
+        key: pathFieldKey,
         controller: path,
         enabled: !model.busy,
         onSubmitted: (_) => open(),

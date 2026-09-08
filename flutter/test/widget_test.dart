@@ -2946,6 +2946,61 @@ void main() {
     await bridge.disposed.future;
   });
 
+  testWidgets('path editing survives responsive breakpoint transitions', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.tap(find.byType(TextField));
+    await tester.pump();
+    tester.testTextInput.enterText('/tmp/part');
+    await tester.pump();
+    final editable = tester.state<EditableTextState>(find.byType(EditableText));
+    expect(editable.widget.focusNode.hasFocus, isTrue);
+    expect(tester.testTextInput.isVisible, isTrue);
+
+    tester.view.physicalSize = const Size(844, 390);
+    await tester.pumpAndSettle();
+    expect(
+      tester.state<EditableTextState>(find.byType(EditableText)),
+      same(editable),
+    );
+    expect(editable.widget.focusNode.hasFocus, isTrue);
+    expect(tester.testTextInput.isVisible, isTrue);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.selection,
+      const TextSelection.collapsed(offset: 9),
+    );
+
+    tester.view.physicalSize = const Size(1180, 800);
+    await tester.pumpAndSettle();
+    expect(
+      tester.state<EditableTextState>(find.byType(EditableText)),
+      same(editable),
+    );
+    expect(editable.widget.focusNode.hasFocus, isTrue);
+    tester.testTextInput.enterText('/tmp/part-two');
+    await tester.pump();
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      '/tmp/part-two',
+    );
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
   for (final format in [FlutterBookFormat.pdf, FlutterBookFormat.epub]) {
     for (final device in [
       ui.PointerDeviceKind.mouse,
