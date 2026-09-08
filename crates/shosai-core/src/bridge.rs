@@ -11,13 +11,13 @@ use thiserror::Error;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 #[cfg(test)]
-use crate::annotations::AnnotationPersistenceTestGate;
+use crate::annotations::{AnnotationPersistenceTestGate, MAX_ANNOTATIONS_PER_SNAPSHOT};
 use crate::annotations::{
     ANNOTATION_SNAPSHOT_BASE_BYTES, Annotation, AnnotationId, AnnotationResolution,
     AnnotationSnapshotLimit, AnnotationStore, AnnotationTarget, DocumentFingerprint, EpubAnchor,
-    HighlightColor, MAX_ANNOTATION_SNAPSHOT_BYTES, MAX_TEXT_ANCHOR_RESOLUTION_WORK, NewAnnotation,
-    PageRect, PdfAnchor, QuoteSelector, TextAnchorResolutionError, TextAnchorResolver,
-    resolve_exact_text_anchor,
+    HighlightColor, MAX_ANNOTATION_BODY_SCALARS, MAX_ANNOTATION_SNAPSHOT_BYTES,
+    MAX_TEXT_ANCHOR_RESOLUTION_WORK, NewAnnotation, PageRect, PdfAnchor, QuoteSelector,
+    TextAnchorResolutionError, TextAnchorResolver, TextScalarIndex,
 };
 
 use crate::application::{DeviceFileLocator, OpenDocument, OpenDocumentError, OpenDocumentPlan};
@@ -420,6 +420,7 @@ struct AnnotationTestHooks {
     before_acceptance: Option<Arc<TestPhaseGate>>,
     persistence: Option<Arc<AnnotationPersistenceTestGate>>,
     list: Option<Arc<AnnotationPersistenceTestGate>>,
+    fail_create_response: bool,
 }
 
 impl BridgeAdmission {
@@ -682,6 +683,9 @@ impl Bridge {
                     self.annotation_test_hooks
                         .as_ref()
                         .and_then(|hooks| hooks.list.clone()),
+                    self.annotation_test_hooks
+                        .as_ref()
+                        .is_some_and(|hooks| hooks.fail_create_response),
                 ));
                 #[cfg(not(test))]
                 Ok(AnnotationStore::new(state.pool().clone()))
@@ -703,6 +707,7 @@ impl Bridge {
             color,
             body,
         } = request;
+        validate_annotation_body(body.as_deref())?;
         if start >= end {
             return Err(BridgeError::InvalidRequest(
                 "annotation range must be non-empty".into(),
@@ -993,6 +998,7 @@ impl Bridge {
         color: HighlightColor,
         body: Option<String>,
     ) -> Result<bool, BridgeError> {
+        validate_annotation_body(body.as_deref())?;
         let retained = self.document(document)?;
         let id = AnnotationId::from_str(id)
             .map_err(|_| BridgeError::InvalidRequest("invalid annotation ID".into()))?;
@@ -2134,6 +2140,8 @@ fn annotation_dtos(
         let Some(text) = text else {
             continue;
         };
+        let scalar_index = TextScalarIndex::new(&text, &mut remaining_work, is_cancelled)
+            .map_err(map_text_anchor_resolution_error)?;
         let mut unresolved = Vec::new();
         for index in indices {
             let (stored_range, quote) =
@@ -2150,14 +2158,9 @@ fn annotation_dtos(
                     }
                     _ => continue,
                 };
-            if let Some(resolved) = resolve_exact_text_anchor(
-                &text,
-                stored_range,
-                quote,
-                &mut remaining_work,
-                is_cancelled,
-            )
-            .map_err(map_text_anchor_resolution_error)?
+            if let Some(resolved) = scalar_index
+                .resolve_exact(stored_range, quote, &mut remaining_work, is_cancelled)
+                .map_err(map_text_anchor_resolution_error)?
             {
                 resolved_texts[index] = Some(resolved);
             } else {
@@ -2167,8 +2170,9 @@ fn annotation_dtos(
         if unresolved.is_empty() {
             continue;
         }
-        let resolver = TextAnchorResolver::new(&text, &mut remaining_work, is_cancelled)
-            .map_err(map_text_anchor_resolution_error)?;
+        let resolver =
+            TextAnchorResolver::from_index(scalar_index, &mut remaining_work, is_cancelled)
+                .map_err(map_text_anchor_resolution_error)?;
         for index in unresolved {
             let (stored_range, quote) =
                 match (&annotations[index].target, &annotations[index].quote) {
@@ -2329,6 +2333,18 @@ fn map_text_anchor_resolution_error(error: TextAnchorResolutionError) -> BridgeE
         }
         TextAnchorResolutionError::Cancelled => BridgeError::Cancelled,
         TextAnchorResolutionError::WorkLimit => BridgeError::BufferLimit,
+    }
+}
+
+fn validate_annotation_body(body: Option<&str>) -> Result<(), BridgeError> {
+    if body.is_some_and(|body| {
+        body.chars().take(MAX_ANNOTATION_BODY_SCALARS + 1).count() > MAX_ANNOTATION_BODY_SCALARS
+    }) {
+        Err(BridgeError::InvalidRequest(format!(
+            "annotation body exceeds {MAX_ANNOTATION_BODY_SCALARS} Unicode scalars"
+        )))
+    } else {
+        Ok(())
     }
 }
 
@@ -3175,6 +3191,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inserted_annotation_decode_failure_rolls_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut bridge = Bridge::with_database_path(directory.path().join("annotations.sqlite"));
+        bridge.annotation_test_hooks = Some(Arc::new(AnnotationTestHooks {
+            fail_create_response: true,
+            ..AnnotationTestHooks::default()
+        }));
+        let document = bridge
+            .open_document(pdf_request(), Cancellation::new())
+            .await
+            .unwrap();
+        let retained = bridge.document(document.handle).unwrap();
+
+        assert!(matches!(
+            bridge
+                .create_annotation(annotation_request(document.handle), Cancellation::new())
+                .await,
+            Err(BridgeError::Storage(message))
+                if message.contains("response preparation failure")
+        ));
+        assert!(
+            bridge
+                .annotation_store()
+                .await
+                .unwrap()
+                .list_for_local_path_async(&retained.local_path)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_annotation_bodies_fail_before_async_work() {
+        let bridge = Bridge::new();
+        let document = bridge
+            .open_document(pdf_request(), Cancellation::new())
+            .await
+            .unwrap();
+        let body = "x".repeat(MAX_ANNOTATION_BODY_SCALARS + 1);
+        let mut request = annotation_request(document.handle);
+        request.body = Some(body.clone());
+
+        assert!(matches!(
+            bridge.create_annotation(request, Cancellation::new()).await,
+            Err(BridgeError::InvalidRequest(message)) if message.contains("annotation body")
+        ));
+        assert!(bridge.annotation_store.get().is_none());
+        assert!(matches!(
+            bridge
+                .update_annotation(
+                    document.handle,
+                    &AnnotationId::new().to_string(),
+                    HighlightColor::Green,
+                    Some(body),
+                )
+                .await,
+            Err(BridgeError::InvalidRequest(message)) if message.contains("annotation body")
+        ));
+        assert!(bridge.annotation_store.get().is_none());
+    }
+
+    #[tokio::test]
     async fn exact_annotations_survive_oversized_graphemes() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("oversized-grapheme.epub");
@@ -3219,35 +3298,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(created.resolution, AnnotationResolution::Exact);
-        let retained = bridge.document(document.handle).unwrap();
-        let stored = bridge
-            .annotation_store()
-            .await
-            .unwrap()
-            .list_for_local_path_async(&retained.local_path)
-            .await
-            .unwrap();
-        let AnnotationTarget::Epub(anchor) = &stored[0].target else {
-            panic!("expected EPUB anchor");
-        };
-        let chapter_text = match &retained.document {
-            OpenDocument::Epub(epub) => epub.presentation().chapter(0).unwrap().search_text(),
-            _ => unreachable!(),
-        };
-        let mut work = MAX_TEXT_ANCHOR_RESOLUTION_WORK;
-        let exact = resolve_exact_text_anchor(
-            chapter_text,
-            anchor.scalar_start as usize..anchor.scalar_end as usize,
-            stored[0].quote.as_ref().unwrap(),
-            &mut work,
-            &|| false,
-        );
-        assert!(
-            matches!(exact, Ok(Some(_))),
-            "exact={exact:?}, anchor={anchor:?}, text scalars={}, quote={:?}, work={work}",
-            chapter_text.chars().count(),
-            stored[0].quote,
-        );
         let oversized_start = chars
             .iter()
             .rposition(|character| *character == 'e')
@@ -3288,6 +3338,42 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn exact_snapshot_reuses_its_scalar_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("exact-snapshot.epub");
+        let body = "e\u{301}".repeat(32_767);
+        std::fs::write(&path, epub_with_body(&body)).unwrap();
+        let document = OpenDocument::open(&DeviceFileLocator::from_path(&path)).unwrap();
+        let quote = QuoteSelector::new("e\u{301}", "", "").unwrap();
+        let annotations = (0..MAX_ANNOTATIONS_PER_SNAPSHOT)
+            .map(|_| Annotation {
+                id: AnnotationId::new(),
+                book_id: None,
+                local_path: Some(path.to_string_lossy().into_owned()),
+                fingerprint: DocumentFingerprint::new("sha256", 1, vec![7; 32]).unwrap(),
+                quote: Some(quote.clone()),
+                target: AnnotationTarget::Epub(
+                    EpubAnchor::new(0, "OPS/chapter.xhtml", 65_532, 65_534).unwrap(),
+                ),
+                color: HighlightColor::Yellow,
+                body: None,
+                provenance: None,
+                created_at: "now".into(),
+                modified_at: "now".into(),
+                deleted_at: None,
+            })
+            .collect();
+
+        let resolved = annotation_dtos(annotations, &document, 1.0, true, &|| false).unwrap();
+        assert_eq!(resolved.len(), MAX_ANNOTATIONS_PER_SNAPSHOT);
+        assert!(
+            resolved
+                .iter()
+                .all(|annotation| annotation.resolution == AnnotationResolution::Exact)
         );
     }
 

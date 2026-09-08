@@ -332,13 +332,12 @@ pub enum TextAnchorResolutionError {
     WorkLimit,
 }
 
-pub(crate) struct TextAnchorResolver<'a> {
+pub(crate) struct TextScalarIndex<'a> {
     text: &'a str,
     scalar_bytes: Vec<usize>,
-    normalized: MappedNormalizedText,
 }
 
-impl<'a> TextAnchorResolver<'a> {
+impl<'a> TextScalarIndex<'a> {
     pub(crate) fn new(
         text: &'a str,
         remaining_work: &mut usize,
@@ -353,12 +352,54 @@ impl<'a> TextAnchorResolver<'a> {
             scalar_bytes.push(byte);
         }
         scalar_bytes.push(text.len());
-        let normalized = mapped_normalized_quote_text(text, remaining_work, is_cancelled)?;
-        Ok(Self {
-            text,
-            scalar_bytes,
-            normalized,
-        })
+        Ok(Self { text, scalar_bytes })
+    }
+
+    pub(crate) fn resolve_exact(
+        &self,
+        stored_range: Range<usize>,
+        quote: &QuoteSelector,
+        remaining_work: &mut usize,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<ResolvedTextAnchor>, TextAnchorResolutionError> {
+        quote
+            .validate()
+            .map_err(|_| TextAnchorResolutionError::InvalidSelector)?;
+        if stored_range.start >= stored_range.end || stored_range.end >= self.scalar_bytes.len() {
+            return Ok(None);
+        }
+        exact_text_anchor(
+            &self.text[self.scalar_bytes[stored_range.start]..self.scalar_bytes[stored_range.end]],
+            stored_range,
+            quote,
+            remaining_work,
+            is_cancelled,
+        )
+    }
+}
+
+pub(crate) struct TextAnchorResolver<'a> {
+    index: TextScalarIndex<'a>,
+    normalized: MappedNormalizedText,
+}
+
+impl<'a> TextAnchorResolver<'a> {
+    pub(crate) fn new(
+        text: &'a str,
+        remaining_work: &mut usize,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, TextAnchorResolutionError> {
+        let index = TextScalarIndex::new(text, remaining_work, is_cancelled)?;
+        Self::from_index(index, remaining_work, is_cancelled)
+    }
+
+    pub(crate) fn from_index(
+        index: TextScalarIndex<'a>,
+        remaining_work: &mut usize,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, TextAnchorResolutionError> {
+        let normalized = mapped_normalized_quote_text(index.text, remaining_work, is_cancelled)?;
+        Ok(Self { index, normalized })
     }
 
     pub(crate) fn resolve(
@@ -371,19 +412,11 @@ impl<'a> TextAnchorResolver<'a> {
         if is_cancelled() {
             return Err(TextAnchorResolutionError::Cancelled);
         }
-        if stored_range.start < stored_range.end
-            && stored_range.end < self.scalar_bytes.len()
-            && bounded_normalize_quote_v1(
-                &self.text
-                    [self.scalar_bytes[stored_range.start]..self.scalar_bytes[stored_range.end]],
-                remaining_work,
-                is_cancelled,
-            )? == quote.exact
+        if let Some(exact) =
+            self.index
+                .resolve_exact(stored_range.clone(), quote, remaining_work, is_cancelled)?
         {
-            return Ok(ResolvedTextAnchor {
-                resolution: AnnotationResolution::Exact,
-                range: Some(stored_range),
-            });
+            return Ok(exact);
         }
 
         let pattern = quote.exact.as_bytes();
@@ -581,43 +614,29 @@ pub fn resolve_text_anchor(
         .and_then(|resolver| resolver.resolve(stored_range, quote, &mut remaining_work, &|| false))
 }
 
-pub(crate) fn resolve_exact_text_anchor(
+#[cfg(test)]
+fn resolve_exact_text_anchor(
     text: &str,
     stored_range: Range<usize>,
     quote: &QuoteSelector,
     remaining_work: &mut usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Option<ResolvedTextAnchor>, TextAnchorResolutionError> {
-    quote
-        .validate()
-        .map_err(|_| TextAnchorResolutionError::InvalidSelector)?;
-    if stored_range.start >= stored_range.end {
-        return Ok(None);
-    }
-    let mut start_byte = None;
-    let mut end_byte = None;
-    let mut scalar_count = 0;
-    for (index, (byte, _)) in text.char_indices().enumerate() {
-        if index % 1024 == 0 && is_cancelled() {
-            return Err(TextAnchorResolutionError::Cancelled);
-        }
-        consume_resolution_work(remaining_work, 1)?;
-        if index == stored_range.start {
-            start_byte = Some(byte);
-        }
-        if index == stored_range.end {
-            end_byte = Some(byte);
-            break;
-        }
-        scalar_count = index + 1;
-    }
-    if end_byte.is_none() && stored_range.end == scalar_count {
-        end_byte = Some(text.len());
-    }
-    let (Some(start_byte), Some(end_byte)) = (start_byte, end_byte) else {
-        return Ok(None);
-    };
-    let selected = &text[start_byte..end_byte];
+    TextScalarIndex::new(text, remaining_work, is_cancelled)?.resolve_exact(
+        stored_range,
+        quote,
+        remaining_work,
+        is_cancelled,
+    )
+}
+
+fn exact_text_anchor(
+    selected: &str,
+    stored_range: Range<usize>,
+    quote: &QuoteSelector,
+    remaining_work: &mut usize,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Option<ResolvedTextAnchor>, TextAnchorResolutionError> {
     if let Some(original) = &quote.original
         && original.len() == selected.len()
     {
@@ -643,9 +662,7 @@ pub(crate) fn resolve_exact_text_anchor(
             }));
         }
     }
-    if bounded_normalize_quote_v1(&text[start_byte..end_byte], remaining_work, is_cancelled)?
-        == quote.exact
-    {
+    if bounded_normalize_quote_v1(selected, remaining_work, is_cancelled)? == quote.exact {
         Ok(Some(ResolvedTextAnchor {
             resolution: AnnotationResolution::Exact,
             range: Some(stored_range),
@@ -968,6 +985,8 @@ pub struct AnnotationStore {
     persistence_gate: Option<Arc<AnnotationPersistenceTestGate>>,
     #[cfg(test)]
     list_gate: Option<Arc<AnnotationPersistenceTestGate>>,
+    #[cfg(test)]
+    fail_create_response: bool,
 }
 
 #[cfg(test)]
@@ -1003,6 +1022,8 @@ impl AnnotationStore {
             persistence_gate: None,
             #[cfg(test)]
             list_gate: None,
+            #[cfg(test)]
+            fail_create_response: false,
         }
     }
 
@@ -1011,11 +1032,13 @@ impl AnnotationStore {
         pool: SqlitePool,
         persistence_gate: Option<Arc<AnnotationPersistenceTestGate>>,
         list_gate: Option<Arc<AnnotationPersistenceTestGate>>,
+        fail_create_response: bool,
     ) -> Self {
         Self {
             pool,
             persistence_gate,
             list_gate,
+            fail_create_response,
         }
     }
 
@@ -1106,13 +1129,32 @@ impl AnnotationStore {
             }
         }
         ensure_annotation_snapshot_within_limits(&mut transaction, &annotation.id).await?;
+        #[cfg(test)]
+        if self.fail_create_response {
+            bail!("injected annotation response preparation failure");
+        }
+        let id = annotation.id.to_string();
+        let row = sqlx::query("SELECT * FROM annotations WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .context("failed to prepare inserted annotation")?
+            .context("annotation missing after insert")?;
+        let rectangle_rows = sqlx::query(
+            "SELECT left, bottom, right, top FROM annotation_pdf_rectangles
+             WHERE annotation_id = ? ORDER BY rect_index LIMIT ?",
+        )
+        .bind(id)
+        .bind(i64::try_from(MAX_PDF_RECTANGLES + 1).expect("rectangle limit fits in i64"))
+        .fetch_all(&mut *transaction)
+        .await
+        .context("failed to prepare inserted annotation rectangles")?;
+        let created = row_to_annotation(row, rows_to_rectangles(rectangle_rows)?)?;
         transaction
             .commit()
             .await
             .context("failed to commit annotation")?;
-        self.get_async(&annotation.id, true)
-            .await?
-            .context("annotation missing after insert")
+        Ok(created)
     }
 
     pub async fn get_async(
