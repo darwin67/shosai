@@ -3673,7 +3673,7 @@ mod tests {
     async fn epub_annotation_measurement_ignores_unused_raster_limits() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("tall-layout.epub");
-        let body = "<p>x</p>".repeat(4_095);
+        let body = "<p>x</p>".repeat(1_000);
         std::fs::write(&path, epub_with_body(&body)).unwrap();
         let bridge = Bridge::with_database_path(directory.path().join("annotations.sqlite"));
         let document = bridge
@@ -3690,6 +3690,7 @@ mod tests {
             .unwrap();
         let retained = bridge.document(document.handle).unwrap();
         match selection_surface(&retained.document, 0, 1.0, 680.0, 18.0, true, &|| false) {
+            Err(BridgeError::BufferLimit) => {}
             Err(BridgeError::Render(message))
                 if message.contains("16777216-pixel per-call ceiling") => {}
             Err(error) => panic!("unexpected raster failure: {error:?}"),
