@@ -388,11 +388,16 @@ impl<'a> TextAnchorResolver<'a> {
         consume_resolution_work(remaining_work, pattern.len())?;
         let mut prefix_table = vec![0; pattern.len()];
         let mut matched = 0;
+        let mut fallback_steps = 0;
         for index in 1..pattern.len() {
             if index % 1024 == 0 && is_cancelled() {
                 return Err(TextAnchorResolutionError::Cancelled);
             }
             while matched > 0 && pattern[index] != pattern[matched] {
+                if fallback_steps % 1024 == 0 && is_cancelled() {
+                    return Err(TextAnchorResolutionError::Cancelled);
+                }
+                fallback_steps += 1;
                 consume_resolution_work(remaining_work, 1)?;
                 matched = prefix_table[matched - 1];
             }
@@ -410,12 +415,17 @@ impl<'a> TextAnchorResolver<'a> {
         let mut contextual_count = 0;
         let mut start_scalar = 0;
         let mut end_scalar = 0;
+        let mut mapping_steps = 0;
         matched = 0;
         for (byte_index, byte) in self.normalized.text.bytes().enumerate() {
             if byte_index % 1024 == 0 && is_cancelled() {
                 return Err(TextAnchorResolutionError::Cancelled);
             }
             while matched > 0 && byte != pattern[matched] {
+                if fallback_steps % 1024 == 0 && is_cancelled() {
+                    return Err(TextAnchorResolutionError::Cancelled);
+                }
+                fallback_steps += 1;
                 consume_resolution_work(remaining_work, 1)?;
                 matched = prefix_table[matched - 1];
             }
@@ -430,6 +440,10 @@ impl<'a> TextAnchorResolver<'a> {
             let start_byte = end_byte - pattern.len();
             matched = prefix_table[matched - 1];
             while self.normalized.byte_offsets[start_scalar] < start_byte {
+                if mapping_steps % 1024 == 0 && is_cancelled() {
+                    return Err(TextAnchorResolutionError::Cancelled);
+                }
+                mapping_steps += 1;
                 consume_resolution_work(remaining_work, 1)?;
                 start_scalar += 1;
             }
@@ -440,6 +454,10 @@ impl<'a> TextAnchorResolver<'a> {
                 end_scalar = start_scalar;
             }
             while self.normalized.byte_offsets[end_scalar] < end_byte {
+                if mapping_steps % 1024 == 0 && is_cancelled() {
+                    return Err(TextAnchorResolutionError::Cancelled);
+                }
+                mapping_steps += 1;
                 consume_resolution_work(remaining_work, 1)?;
                 end_scalar += 1;
             }
@@ -461,6 +479,13 @@ impl<'a> TextAnchorResolver<'a> {
             if candidate_count == 1 {
                 only_candidate = Some(source_range.clone());
             }
+            if is_cancelled() {
+                return Err(TextAnchorResolutionError::Cancelled);
+            }
+            consume_resolution_work(
+                remaining_work,
+                quote.prefix.len().saturating_add(quote.suffix.len()),
+            )?;
             let matches_context = (quote.prefix.is_empty()
                 || self.normalized.text[..start_byte]
                     .trim_end_matches(' ')
@@ -566,7 +591,146 @@ fn bounded_normalize_quote_v1(
     remaining_work: &mut usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<String, TextAnchorResolutionError> {
-    mapped_normalized_quote_text(value, remaining_work, is_cancelled).map(|mapped| mapped.text)
+    let mut source = value.chars().peekable();
+    let mut profile_input = String::new();
+    let mut since_cancel_check = 0;
+    while let Some(character) = source.next() {
+        if since_cancel_check >= 1024 {
+            if is_cancelled() {
+                return Err(TextAnchorResolutionError::Cancelled);
+            }
+            since_cancel_check = 0;
+        }
+        since_cancel_check += 1;
+        consume_resolution_work(remaining_work, 1)?;
+        if character == '\u{00ad}' {
+            continue;
+        }
+        if character == '\r' {
+            if source.peek().is_some_and(|next| *next == '\n') {
+                source.next();
+                since_cancel_check += 1;
+                consume_resolution_work(remaining_work, 1)?;
+            }
+            profile_input.push('\n');
+        } else {
+            profile_input.push(character);
+        }
+    }
+    let mut normalized_text = String::new();
+    let mut pending_space = false;
+    for_each_bounded_grapheme(
+        &profile_input,
+        remaining_work,
+        is_cancelled,
+        |grapheme, remaining_work| {
+            let normalized = grapheme.nfc().collect::<String>();
+            for (index, character) in normalized.chars().enumerate() {
+                if index % 1024 == 0 && is_cancelled() {
+                    return Err(TextAnchorResolutionError::Cancelled);
+                }
+                consume_resolution_work(remaining_work, 1)?;
+                if quote_v1_whitespace(character) {
+                    pending_space = !normalized_text.is_empty();
+                } else {
+                    if pending_space {
+                        normalized_text.push(' ');
+                        pending_space = false;
+                    }
+                    normalized_text.push(character);
+                }
+            }
+            Ok(())
+        },
+    )?;
+    Ok(normalized_text)
+}
+
+fn for_each_bounded_grapheme(
+    value: &str,
+    remaining_work: &mut usize,
+    is_cancelled: &dyn Fn() -> bool,
+    mut visit: impl FnMut(&str, &mut usize) -> Result<(), TextAnchorResolutionError>,
+) -> Result<(), TextAnchorResolutionError> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    let mut chunk_offsets = Vec::new();
+    for (index, (byte, _)) in value.char_indices().enumerate() {
+        if index % MAX_TEXT_ANCHOR_GRAPHEME_SCALARS == 0 {
+            if is_cancelled() {
+                return Err(TextAnchorResolutionError::Cancelled);
+            }
+            chunk_offsets.push(byte);
+        }
+        consume_resolution_work(remaining_work, 1)?;
+    }
+    chunk_offsets.push(value.len());
+
+    let mut cursor = GraphemeCursor::new(0, value.len(), true);
+    let mut chunk_index = 0;
+    let mut grapheme_start = 0;
+    let mut pending_grapheme_scalars = 0_usize;
+    while grapheme_start < value.len() {
+        if is_cancelled() {
+            return Err(TextAnchorResolutionError::Cancelled);
+        }
+        let chunk_start = chunk_offsets[chunk_index];
+        let chunk_end = chunk_offsets[chunk_index + 1];
+        let scan_start = cursor.cur_cursor().max(chunk_start);
+        let boundary = match cursor.next_boundary(&value[chunk_start..chunk_end], chunk_start) {
+            Ok(Some(boundary)) => boundary,
+            Ok(None) => break,
+            Err(GraphemeIncomplete::NextChunk) => {
+                let scanned = value[scan_start..chunk_end].chars().count();
+                consume_resolution_work(remaining_work, scanned)?;
+                pending_grapheme_scalars = pending_grapheme_scalars.saturating_add(scanned);
+                if pending_grapheme_scalars > MAX_TEXT_ANCHOR_GRAPHEME_SCALARS {
+                    return Err(TextAnchorResolutionError::WorkLimit);
+                }
+                chunk_index += 1;
+                if chunk_index + 1 >= chunk_offsets.len() {
+                    return Err(TextAnchorResolutionError::WorkLimit);
+                }
+                continue;
+            }
+            Err(GraphemeIncomplete::PreContext(offset)) => {
+                if is_cancelled() {
+                    return Err(TextAnchorResolutionError::Cancelled);
+                }
+                consume_resolution_work(remaining_work, usize::BITS as usize)?;
+                let Ok(context_index) = chunk_offsets.binary_search(&offset) else {
+                    return Err(TextAnchorResolutionError::WorkLimit);
+                };
+                if context_index == 0 {
+                    return Err(TextAnchorResolutionError::WorkLimit);
+                }
+                let context_start = chunk_offsets[context_index - 1];
+                let context = &value[context_start..offset];
+                let context_scalars = context.chars().count();
+                consume_resolution_work(remaining_work, context_scalars)?;
+                if context_scalars > MAX_TEXT_ANCHOR_GRAPHEME_SCALARS {
+                    return Err(TextAnchorResolutionError::WorkLimit);
+                }
+                cursor.provide_context(context, context_start);
+                continue;
+            }
+            Err(_) => return Err(TextAnchorResolutionError::WorkLimit),
+        };
+        let grapheme = &value[grapheme_start..boundary];
+        let grapheme_scalars = grapheme.chars().count();
+        if grapheme_scalars > MAX_TEXT_ANCHOR_GRAPHEME_SCALARS {
+            return Err(TextAnchorResolutionError::WorkLimit);
+        }
+        consume_resolution_work(remaining_work, grapheme_scalars)?;
+        visit(grapheme, remaining_work)?;
+        grapheme_start = boundary;
+        pending_grapheme_scalars = 0;
+        while chunk_index + 1 < chunk_offsets.len() && boundary >= chunk_offsets[chunk_index + 1] {
+            chunk_index += 1;
+        }
+    }
+    Ok(())
 }
 
 struct MappedNormalizedText {
@@ -583,10 +747,15 @@ fn mapped_normalized_quote_text(
     let mut source = value.chars().enumerate().peekable();
     let mut profile_input = String::new();
     let mut input_ranges = Vec::new();
+    let mut since_cancel_check = 0;
     while let Some((index, character)) = source.next() {
-        if index % 1024 == 0 && is_cancelled() {
-            return Err(TextAnchorResolutionError::Cancelled);
+        if since_cancel_check >= 1024 {
+            if is_cancelled() {
+                return Err(TextAnchorResolutionError::Cancelled);
+            }
+            since_cancel_check = 0;
         }
+        since_cancel_check += 1;
         consume_resolution_work(remaining_work, 1)?;
         if character == '\u{00ad}' {
             continue;
@@ -594,6 +763,7 @@ fn mapped_normalized_quote_text(
         if character == '\r' {
             let end = if source.peek().is_some_and(|(_, next)| *next == '\n') {
                 source.next();
+                since_cancel_check += 1;
                 consume_resolution_work(remaining_work, 1)?;
                 index + 2
             } else {
@@ -609,82 +779,42 @@ fn mapped_normalized_quote_text(
     let mut text = String::new();
     let mut source_ranges = Vec::new();
     let mut pending_space: Option<Range<usize>> = None;
-    let mut chunk_offsets = Vec::new();
-    for (index, (byte, _)) in profile_input.char_indices().enumerate() {
-        if index % MAX_TEXT_ANCHOR_GRAPHEME_SCALARS == 0 {
-            if is_cancelled() {
-                return Err(TextAnchorResolutionError::Cancelled);
-            }
-            chunk_offsets.push(byte);
-        }
-        consume_resolution_work(remaining_work, 1)?;
-    }
-    if !profile_input.is_empty() {
-        chunk_offsets.push(profile_input.len());
-    }
-    let mut cursor = GraphemeCursor::new(0, profile_input.len(), true);
-    let mut chunk_index = 0;
-    let mut grapheme_start = 0;
     let mut input_scalar_start = 0;
-    while grapheme_start < profile_input.len() {
-        if is_cancelled() {
-            return Err(TextAnchorResolutionError::Cancelled);
-        }
-        let chunk_start = chunk_offsets[chunk_index];
-        let chunk_end = chunk_offsets[chunk_index + 1];
-        let boundary =
-            match cursor.next_boundary(&profile_input[chunk_start..chunk_end], chunk_start) {
-                Ok(Some(boundary)) => boundary,
-                Ok(None) => break,
-                Err(GraphemeIncomplete::NextChunk) => {
-                    chunk_index += 1;
-                    if chunk_index + 1 >= chunk_offsets.len()
-                        || cursor.cur_cursor().saturating_sub(grapheme_start)
-                            > MAX_TEXT_ANCHOR_GRAPHEME_SCALARS * 4
-                    {
-                        return Err(TextAnchorResolutionError::WorkLimit);
+    for_each_bounded_grapheme(
+        &profile_input,
+        remaining_work,
+        is_cancelled,
+        |grapheme, remaining_work| {
+            let grapheme_scalars = grapheme.chars().count();
+            let start = input_scalar_start;
+            let end = start + grapheme_scalars;
+            let source_range = input_ranges[start].start..input_ranges[end - 1].end;
+            let normalized = grapheme.nfc().collect::<String>();
+            for (index, character) in normalized.chars().enumerate() {
+                if index % 1024 == 0 && is_cancelled() {
+                    return Err(TextAnchorResolutionError::Cancelled);
+                }
+                consume_resolution_work(remaining_work, 1)?;
+                if quote_v1_whitespace(character) {
+                    if !text.is_empty() {
+                        pending_space = Some(match pending_space.take() {
+                            Some(pending) => pending.start..source_range.end,
+                            None => source_range.clone(),
+                        });
                     }
-                    continue;
+                } else {
+                    if let Some(pending) = pending_space.take() {
+                        text.push(' ');
+                        source_ranges.push(pending);
+                    }
+                    text.push(character);
+                    source_ranges.push(source_range.clone());
                 }
-                Err(_) => return Err(TextAnchorResolutionError::WorkLimit),
-            };
-        let grapheme = &profile_input[grapheme_start..boundary];
-        let grapheme_scalars = grapheme.chars().count();
-        if grapheme_scalars > MAX_TEXT_ANCHOR_GRAPHEME_SCALARS {
-            return Err(TextAnchorResolutionError::WorkLimit);
-        }
-        consume_resolution_work(remaining_work, grapheme_scalars)?;
-        let start = input_scalar_start;
-        let end = start + grapheme_scalars;
-        let source_range = input_ranges[start].start..input_ranges[end - 1].end;
-        let normalized = grapheme.nfc().collect::<String>();
-        for (index, character) in normalized.chars().enumerate() {
-            if index % 1024 == 0 && is_cancelled() {
-                return Err(TextAnchorResolutionError::Cancelled);
             }
-            consume_resolution_work(remaining_work, 1)?;
-            if quote_v1_whitespace(character) {
-                if !text.is_empty() {
-                    pending_space = Some(match pending_space {
-                        Some(pending) => pending.start..source_range.end,
-                        None => source_range.clone(),
-                    });
-                }
-            } else {
-                if let Some(pending) = pending_space.take() {
-                    text.push(' ');
-                    source_ranges.push(pending);
-                }
-                text.push(character);
-                source_ranges.push(source_range.clone());
-            }
-        }
-        grapheme_start = boundary;
-        input_scalar_start = end;
-        while chunk_index + 1 < chunk_offsets.len() && boundary >= chunk_offsets[chunk_index + 1] {
-            chunk_index += 1;
-        }
-    }
+            input_scalar_start = end;
+            Ok(())
+        },
+    )?;
     let mut byte_offsets = Vec::new();
     for (index, (byte, _)) in text.char_indices().enumerate() {
         if index % 1024 == 0 && is_cancelled() {
@@ -1613,6 +1743,39 @@ mod tests {
         let checks = std::cell::Cell::new(0);
         assert!(matches!(
             resolver.resolve(0..1, &quote, &mut work, &|| {
+                checks.set(checks.get() + 1);
+                checks.get() > 1
+            }),
+            Err(TextAnchorResolutionError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn text_anchor_resolution_handles_unicode_across_workspace_chunks() {
+        for selected in ["😀", "👩‍💻", "🇷🇸", "क्‍ष"] {
+            let prefix = "a".repeat(1_023 + usize::from(selected == "😀"));
+            let text = format!("{prefix}{selected}");
+            let start = prefix.chars().count();
+            let end = start + selected.chars().count();
+            let quote = QuoteSelector::new(selected, "", "").unwrap();
+            assert_eq!(
+                resolve_text_anchor(&text, 0..1, &quote).unwrap(),
+                ResolvedTextAnchor {
+                    resolution: AnnotationResolution::Recovered,
+                    range: Some(start..end),
+                },
+                "failed at a workspace boundary for {selected:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn text_anchor_resolution_checks_cancellation_through_crlf_preprocessing() {
+        let text = "x\r\n".repeat(2_048);
+        let mut work = MAX_TEXT_ANCHOR_RESOLUTION_WORK;
+        let checks = std::cell::Cell::new(0);
+        assert!(matches!(
+            mapped_normalized_quote_text(&text, &mut work, &|| {
                 checks.set(checks.get() + 1);
                 checks.get() > 1
             }),
