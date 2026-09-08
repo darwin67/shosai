@@ -348,10 +348,13 @@ pub fn resolve_text_anchor(
 
     let normalized = mapped_normalized_quote_text(text);
     let mut candidates = normalized
-        .text
-        .match_indices(&quote.exact)
-        .filter_map(|(start_byte, value)| {
-            let end_byte = start_byte.checked_add(value.len())?;
+        .byte_offsets
+        .iter()
+        .take(normalized.source_ranges.len())
+        .filter_map(|start_byte| {
+            let value = normalized.text.get(*start_byte..)?;
+            value.starts_with(&quote.exact).then_some(())?;
+            let end_byte = start_byte.checked_add(quote.exact.len())?;
             let start = normalized.byte_offsets.binary_search(&start_byte).ok()?;
             let end = normalized.byte_offsets.binary_search(&end_byte).ok()?;
             (start < end).then(|| {
@@ -1269,6 +1272,11 @@ mod tests {
                 resolution: AnnotationResolution::Ambiguous,
                 range: None,
             }
+        );
+        let overlapping = QuoteSelector::new("aa", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor("aaa", 1..2, &overlapping).resolution,
+            AnnotationResolution::Ambiguous,
         );
     }
 
