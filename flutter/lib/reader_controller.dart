@@ -778,7 +778,7 @@ final class ReaderController implements Listenable {
       _bridge.cancel(id: cancellation);
     }
     _layoutRevision += 1;
-    _requestedLayout = _model.layout;
+    final openLayout = _requestedLayout;
     _failedLayout = null;
     _annotationRevision += 1;
     _releaseModelResources();
@@ -830,9 +830,10 @@ final class ReaderController implements Listenable {
         contentState: ReaderContentState.loading,
         busy: true,
         generation: generation,
+        layout: openLayout,
       ),
     );
-    unawaited(_openEffect(path, generation, cancellation, _model.layout));
+    unawaited(_openEffect(path, generation, cancellation, openLayout));
   }
 
   Future<void> _openEffect(

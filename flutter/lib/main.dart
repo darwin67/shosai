@@ -270,13 +270,7 @@ class _ReaderLayoutReporterState extends State<_ReaderLayoutReporter> {
       );
       if (layout != _observedLayout) {
         _observedLayout = layout;
-        if (layout != widget.model.layout ||
-            widget.model.busy ||
-            widget.model.relayoutBusy) {
-          _pendingLayout = layout;
-        } else {
-          _pendingLayout = null;
-        }
+        _pendingLayout = layout;
       }
       if (_pendingLayout != null && !_scheduled) {
         _scheduled = true;
