@@ -1806,6 +1806,7 @@ void main() {
     expect(bridge.updateCalls, 0);
     pendingLayout.complete(_surface(BigInt.from(20), raster: true));
     await bridge.waitForOp(2);
+    expect(controller.model.annotationError, contains('Try again'));
     controller.dispose();
     await bridge.disposed.future;
   });
@@ -2432,6 +2433,46 @@ void main() {
     );
     pendingLayout.complete(_surface(BigInt.from(20), raster: true));
     await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('returning to the displayed layout cancels pending relayout', (
+    tester,
+  ) async {
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge(immediateLists: true);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/a.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    final displayedScale = tester.view.devicePixelRatio;
+    final selectionCalls = bridge.selectionCalls;
+    final pending = Completer<FlutterSelectionSurface>();
+    bridge.selectionCompleters.add(pending);
+
+    tester.view.devicePixelRatio = displayedScale == 2 ? 3 : 2;
+    await tester.pump();
+    await tester.pump();
+    expect(find.byType(LinearProgressIndicator), findsOneWidget);
+    final pendingCancellation = bridge.createdCancellations.last;
+
+    tester.view.devicePixelRatio = displayedScale;
+    await tester.pump();
+    await tester.pump();
+    expect(bridge.cancelled, contains(pendingCancellation));
+    expect(find.byType(LinearProgressIndicator), findsNothing);
+
+    pending.complete(_surface(BigInt.from(30), raster: true));
+    await tester.pumpAndSettle();
+    expect(bridge.selectionCalls, selectionCalls + 1);
     await tester.pumpWidget(const SizedBox());
     await bridge.disposed.future;
   });
