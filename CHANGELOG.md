@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.1.0] - 2026-09-07
+## [0.1.0] - 2026-09-08
 
 ### 🚀 Features
 
@@ -34,6 +34,7 @@ All notable changes to this project will be documented in this file.
 - *(core)* Add bounded application bridge and resource admission (#79)
 - *(flutter)* Deliver the desktop feasibility slice (#87)
 - *(flutter)* Add persistent cross-format highlights (#88)
+- *(flutter)* Add shared selection interactions (#89)
 
 ### 🐛 Bug Fixes
 
