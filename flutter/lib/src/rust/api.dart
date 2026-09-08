@@ -7,7 +7,7 @@ import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `cancellation`, `from_bridge`, `invalid_request`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
 // Rust type: RustOpaqueNom<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FlutterBridge>>
 abstract class FlutterBridge implements RustOpaqueInterface {
@@ -18,6 +18,7 @@ abstract class FlutterBridge implements RustOpaqueInterface {
     required BigInt unit,
     required BigInt start,
     required BigInt end,
+    required double displayScale,
     required FlutterHighlightColor color,
     String? body,
     required BigInt cancellationId,
@@ -35,6 +36,7 @@ abstract class FlutterBridge implements RustOpaqueInterface {
 
   Future<List<FlutterAnnotation>> listAnnotations({
     required FlutterDocumentHandle document,
+    required double scale,
     required BigInt cancellationId,
   });
 
@@ -88,6 +90,7 @@ abstract class FlutterBridge implements RustOpaqueInterface {
 class FlutterAnnotation {
   final String id;
   final BigInt unit;
+  final FlutterAnnotationResolution resolution;
   final FlutterAnnotationTextRange? textRange;
   final String? quote;
   final List<FlutterSelectionRect>? rectangles;
@@ -97,6 +100,7 @@ class FlutterAnnotation {
   const FlutterAnnotation({
     required this.id,
     required this.unit,
+    required this.resolution,
     this.textRange,
     this.quote,
     this.rectangles,
@@ -108,6 +112,7 @@ class FlutterAnnotation {
   int get hashCode =>
       id.hashCode ^
       unit.hashCode ^
+      resolution.hashCode ^
       textRange.hashCode ^
       quote.hashCode ^
       rectangles.hashCode ^
@@ -121,12 +126,15 @@ class FlutterAnnotation {
           runtimeType == other.runtimeType &&
           id == other.id &&
           unit == other.unit &&
+          resolution == other.resolution &&
           textRange == other.textRange &&
           quote == other.quote &&
           rectangles == other.rectangles &&
           color == other.color &&
           body == other.body;
 }
+
+enum FlutterAnnotationResolution { exact, recovered, ambiguous, orphaned }
 
 class FlutterAnnotationTextRange {
   final BigInt start;

@@ -81,6 +81,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   FlutterAnnotation dco_decode_flutter_annotation(dynamic raw);
 
   @protected
+  FlutterAnnotationResolution dco_decode_flutter_annotation_resolution(
+    dynamic raw,
+  );
+
+  @protected
   FlutterAnnotationTextRange dco_decode_flutter_annotation_text_range(
     dynamic raw,
   );
@@ -265,6 +270,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   FlutterAnnotation sse_decode_flutter_annotation(SseDeserializer deserializer);
+
+  @protected
+  FlutterAnnotationResolution sse_decode_flutter_annotation_resolution(
+    SseDeserializer deserializer,
+  );
 
   @protected
   FlutterAnnotationTextRange sse_decode_flutter_annotation_text_range(
@@ -688,6 +698,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ) {
     wireObj.id = cst_encode_String(apiObj.id);
     wireObj.unit = cst_encode_usize(apiObj.unit);
+    wireObj.resolution = cst_encode_flutter_annotation_resolution(
+      apiObj.resolution,
+    );
     wireObj.text_range =
         cst_encode_opt_box_autoadd_flutter_annotation_text_range(
           apiObj.textRange,
@@ -878,6 +891,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   double cst_encode_f_32(double raw);
 
   @protected
+  int cst_encode_flutter_annotation_resolution(FlutterAnnotationResolution raw);
+
+  @protected
   int cst_encode_flutter_book_format(FlutterBookFormat raw);
 
   @protected
@@ -973,6 +989,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_flutter_annotation(
     FlutterAnnotation self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_flutter_annotation_resolution(
+    FlutterAnnotationResolution self,
     SseSerializer serializer,
   );
 
@@ -1221,6 +1243,7 @@ class RustLibWire implements BaseWire {
     int unit,
     int start,
     int end,
+    double display_scale,
     int color,
     ffi.Pointer<wire_cst_list_prim_u_8_strict> body,
     int cancellation_id,
@@ -1232,6 +1255,7 @@ class RustLibWire implements BaseWire {
       unit,
       start,
       end,
+      display_scale,
       color,
       body,
       cancellation_id,
@@ -1248,6 +1272,7 @@ class RustLibWire implements BaseWire {
             ffi.UintPtr,
             ffi.UintPtr,
             ffi.UintPtr,
+            ffi.Float,
             ffi.Int32,
             ffi.Pointer<wire_cst_list_prim_u_8_strict>,
             ffi.Uint64,
@@ -1266,6 +1291,7 @@ class RustLibWire implements BaseWire {
               int,
               int,
               int,
+              double,
               int,
               ffi.Pointer<wire_cst_list_prim_u_8_strict>,
               int,
@@ -1340,12 +1366,14 @@ class RustLibWire implements BaseWire {
     int port_,
     int that,
     ffi.Pointer<wire_cst_flutter_document_handle> document,
+    double scale,
     int cancellation_id,
   ) {
     return _wire__crate__api__FlutterBridge_list_annotations(
       port_,
       that,
       document,
+      scale,
       cancellation_id,
     );
   }
@@ -1357,6 +1385,7 @@ class RustLibWire implements BaseWire {
             ffi.Int64,
             ffi.UintPtr,
             ffi.Pointer<wire_cst_flutter_document_handle>,
+            ffi.Float,
             ffi.Uint64,
           )
         >
@@ -1370,6 +1399,7 @@ class RustLibWire implements BaseWire {
               int,
               int,
               ffi.Pointer<wire_cst_flutter_document_handle>,
+              double,
               int,
             )
           >();
@@ -2099,6 +2129,9 @@ final class wire_cst_flutter_annotation extends ffi.Struct {
 
   @ffi.UintPtr()
   external int unit;
+
+  @ffi.Int32()
+  external int resolution;
 
   external ffi.Pointer<wire_cst_flutter_annotation_text_range> text_range;
 

@@ -115,8 +115,12 @@ coordinates.
   or changing EPUB pagination geometry.
 - [X] Persist, reopen, navigate to, recolor, annotate, and delete one highlight
   in each format through the Rust annotation store.
-- [ ] Verify PDF zoom/DPI and EPUB viewport/font/theme relayout preserve anchors;
+- [-] Verify PDF zoom/DPI and EPUB viewport/font/theme relayout preserve anchors;
   surface exact, recovered, ambiguous, and orphaned states.
+  - [X] Preserve and resolve anchors across relayout when document bytes retain
+    the same fingerprint.
+  - [ ] Define stable document association, then recover anchors after document
+    bytes and fingerprints change without treating path equality as identity.
 - [ ] Implement responsive reader compositions for desktop, phone, and tablet,
   including rotation, safe areas, text scaling, visible focus, screen-reader
   semantics, and non-color highlight indication.
@@ -135,6 +139,18 @@ completion races, annotation reopen/update/delete, geometry bounds, and compact
 large-text action layout.  The unchecked relayout, responsive/screen-reader,
 lifecycle, multi-platform measurement, and physical-mobile exit gates remain
 explicitly unclaimed.
+
+The first relayout increment now recomputes PDF geometry at the active display
+scale and EPUB geometry at the active viewport, font size, and display scale,
+then atomically publishes the raster, selection surface, and resolved annotation
+snapshot.  Completer-controlled regressions cover superseded work at selection,
+render, decode, and annotation-list boundaries, deterministic handle release,
+queued layout changes during open, bounded/cancellable quote resolution, and
+exact/recovered/ambiguous/orphaned presentation.  This proves relayout for the
+same fingerprint (unchanged document bytes).  Recovery after changed document
+bytes remains deferred until the core has a stable document-association contract;
+path equality alone is intentionally not treated as identity, so the full
+relayout/recovery checklist item remains unchecked.
 
 *Exit*: highlighting works end to end in both formats on desktop and at least one
 physical mobile platform, and failures on any unvalidated target are recorded

@@ -10,16 +10,18 @@ use std::sync::{Arc, Mutex, OnceLock};
 use thiserror::Error;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
-#[cfg(test)]
-use crate::annotations::AnnotationPersistenceTestGate;
 use crate::annotations::{
-    ANNOTATION_SNAPSHOT_BASE_BYTES, Annotation, AnnotationId, AnnotationSnapshotLimit,
-    AnnotationStore, AnnotationTarget, DocumentFingerprint, EpubAnchor, HighlightColor,
-    MAX_ANNOTATION_SNAPSHOT_BYTES, NewAnnotation, PageRect, PdfAnchor, QuoteSelector,
+    ANNOTATION_SNAPSHOT_BASE_BYTES, Annotation, AnnotationId, AnnotationResolution,
+    AnnotationSnapshotLimit, AnnotationStore, AnnotationTarget, DocumentFingerprint, EpubAnchor,
+    HighlightColor, MAX_ANNOTATION_BODY_SCALARS, MAX_ANNOTATION_SNAPSHOT_BYTES,
+    MAX_TEXT_ANCHOR_RESOLUTION_WORK, NewAnnotation, PageRect, PdfAnchor, QuoteSelector,
+    TextAnchorResolutionError, TextAnchorResolver, TextScalarIndex,
 };
+#[cfg(test)]
+use crate::annotations::{AnnotationPersistenceTestGate, MAX_ANNOTATIONS_PER_SNAPSHOT};
 
 use crate::application::{DeviceFileLocator, OpenDocument, OpenDocumentError, OpenDocumentPlan};
-use crate::document::RenderedPage;
+use crate::document::{Document, RenderedPage};
 #[cfg(test)]
 use crate::epub::EpubLimits;
 use crate::epub::{
@@ -40,6 +42,12 @@ pub const MAX_BRIDGE_RETAINED_DOCUMENT_BYTES: usize = 3 * 1024 * 1024 * 1024;
 pub const MAX_BRIDGE_PROBE_BYTES: usize = 512 * 1024 * 1024;
 pub const MAX_BRIDGE_LOCAL_ID_BYTES: usize = 4 * 1024;
 pub const MAX_BRIDGE_PATH_KEY_BYTES: usize = 64 * 1024;
+// The resolver retains its usize/range indexes plus source/profile/normalized
+// text at peak. Limiting PDF text to 2 MiB keeps the conservative 144 MiB
+// reservation below the process-wide transient buffer budget on 64-bit hosts.
+const MAX_ANNOTATION_PDF_TEXT_BYTES: usize = 2 * 1024 * 1024;
+const ANNOTATION_RESOLUTION_WORKSPACE_BYTES: u32 = 144 * 1024 * 1024;
+const ANNOTATION_GEOMETRY_WORKSPACE_BYTES: u32 = 8 * 1024 * 1024;
 
 static NEXT_REGISTRY_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -172,6 +180,7 @@ pub struct SelectionSurface {
 pub struct BridgeAnnotation {
     pub id: String,
     pub unit: usize,
+    pub resolution: AnnotationResolution,
     /// Text-backed half-open range. Geometry-only PDF annotations have no range.
     pub text_range: Option<AnnotationTextRange>,
     /// Normalized exact quote when the source text mapping was complete.
@@ -194,6 +203,7 @@ pub struct CreateAnnotationRequest {
     pub unit: usize,
     pub start: usize,
     pub end: usize,
+    pub display_scale: f32,
     pub color: HighlightColor,
     pub body: Option<String>,
 }
@@ -367,6 +377,7 @@ struct BridgeAdmission {
     buffer_slots: Arc<Semaphore>,
     document_bytes: Arc<Semaphore>,
     probe_bytes: Arc<Semaphore>,
+    buffer_capacity: usize,
 }
 
 #[cfg(test)]
@@ -409,6 +420,7 @@ struct AnnotationTestHooks {
     before_acceptance: Option<Arc<TestPhaseGate>>,
     persistence: Option<Arc<AnnotationPersistenceTestGate>>,
     list: Option<Arc<AnnotationPersistenceTestGate>>,
+    fail_create_response: bool,
 }
 
 impl BridgeAdmission {
@@ -423,6 +435,7 @@ impl BridgeAdmission {
             buffer_slots: Arc::new(Semaphore::new(MAX_BRIDGE_BUFFERS)),
             document_bytes: Arc::new(Semaphore::new(MAX_BRIDGE_RETAINED_DOCUMENT_BYTES)),
             probe_bytes: Arc::new(Semaphore::new(MAX_BRIDGE_PROBE_BYTES)),
+            buffer_capacity: buffer_bytes,
         }
     }
 }
@@ -441,6 +454,8 @@ pub struct Bridge {
     selection_worker_barrier: Option<Arc<std::sync::Barrier>>,
     #[cfg(test)]
     selection_second_cancellation_barrier: Option<Arc<std::sync::Barrier>>,
+    #[cfg(test)]
+    annotation_resolution_worker_barrier: Option<Arc<std::sync::Barrier>>,
     #[cfg(test)]
     annotation_test_hooks: Option<Arc<AnnotationTestHooks>>,
 }
@@ -500,6 +515,8 @@ impl Bridge {
             selection_worker_barrier: None,
             #[cfg(test)]
             selection_second_cancellation_barrier: None,
+            #[cfg(test)]
+            annotation_resolution_worker_barrier: None,
             #[cfg(test)]
             annotation_test_hooks: None,
         }
@@ -670,6 +687,9 @@ impl Bridge {
                     self.annotation_test_hooks
                         .as_ref()
                         .and_then(|hooks| hooks.list.clone()),
+                    self.annotation_test_hooks
+                        .as_ref()
+                        .is_some_and(|hooks| hooks.fail_create_response),
                 ));
                 #[cfg(not(test))]
                 Ok(AnnotationStore::new(state.pool().clone()))
@@ -687,12 +707,19 @@ impl Bridge {
             unit,
             start,
             end,
+            display_scale,
             color,
             body,
         } = request;
+        validate_annotation_body(body.as_deref())?;
         if start >= end {
             return Err(BridgeError::InvalidRequest(
                 "annotation range must be non-empty".into(),
+            ));
+        }
+        if !display_scale.is_finite() || display_scale <= 0.0 {
+            return Err(BridgeError::InvalidRequest(
+                "annotation display scale must be finite and positive".into(),
             ));
         }
         let request_slot = try_acquire_slot(
@@ -705,12 +732,17 @@ impl Bridge {
             store = self.annotation_store() => store?,
             () = cancellation.cancelled() => return Err(BridgeError::Cancelled),
         };
+        let extraction_scale = if matches!(&retained.document, OpenDocument::Pdf(_)) {
+            display_scale
+        } else {
+            1.0
+        };
         let extracted = self
             .extract_selection(
                 document,
                 Arc::clone(&retained),
                 unit,
-                1.0,
+                extraction_scale,
                 680.0,
                 18.0,
                 false,
@@ -802,6 +834,40 @@ impl Bridge {
             provenance: None,
         };
         drop(chars);
+        let ExtractedSelection {
+            surface,
+            request_slot,
+            retained_bytes,
+        } = extracted;
+        drop(surface);
+        drop(retained_bytes);
+        let conversion_slot =
+            acquire_permits(Arc::clone(&self.admission.render_slots), 1, &cancellation).await?;
+        let pending = Annotation {
+            id: annotation.id.clone(),
+            book_id: annotation.book_id,
+            local_path: annotation.local_path.clone(),
+            fingerprint: annotation.fingerprint.clone(),
+            quote: annotation.quote.clone(),
+            target: annotation.target.clone(),
+            color: annotation.color,
+            body: annotation.body.clone(),
+            provenance: annotation.provenance.clone(),
+            created_at: String::new(),
+            modified_at: String::new(),
+            deleted_at: None,
+        };
+        let (mut prepared, response_guards) = self
+            .resolve_annotation_dtos(
+                Arc::clone(&retained),
+                vec![pending],
+                display_scale,
+                cancellation.clone(),
+                vec![request_slot, conversion_slot],
+                false,
+            )
+            .await?;
+        let prepared = prepared.remove(0);
         #[cfg(test)]
         if let Some(gate) = self
             .annotation_test_hooks
@@ -820,41 +886,25 @@ impl Bridge {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             check_cancelled(&cancellation)?;
         }
-        let created = store
+        store
             .create_async(&annotation)
             .await
             .map_err(annotation_storage_error)?;
-        let ExtractedSelection {
-            surface,
-            request_slot,
-            transient_bytes,
-        } = extracted;
-        drop(surface);
-        drop(transient_bytes);
-        // Persistence is the acceptance boundary. Once committed, finish the
-        // response even if the caller cancels, matching accepted-write semantics.
-        let accepted_conversion = Cancellation::new();
-        let conversion_slot = acquire_permits(
-            Arc::clone(&self.admission.render_slots),
-            1,
-            &accepted_conversion,
-        )
-        .await?;
-        self.resolve_annotation_dtos(
-            Arc::clone(&retained),
-            vec![created],
-            accepted_conversion,
-            vec![request_slot, conversion_slot],
-        )
-        .await
-        .map(|mut items| items.remove(0))
+        drop(response_guards);
+        Ok(prepared)
     }
 
     pub async fn list_annotations(
         &self,
         document: DocumentHandle,
+        scale: f32,
         cancellation: Cancellation,
     ) -> Result<Vec<BridgeAnnotation>, BridgeError> {
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(BridgeError::InvalidRequest(
+                "annotation display scale must be finite and positive".into(),
+            ));
+        }
         let request_slot = try_acquire_slot(
             Arc::clone(&self.admission.request_slots),
             BridgeError::RequestLimit,
@@ -886,32 +936,76 @@ impl Bridge {
         self.resolve_annotation_dtos(
             retained,
             items,
+            scale,
             cancellation,
             vec![request_slot, render_slot],
+            true,
         )
         .await
+        .map(|(items, _guards)| items)
     }
 
     async fn resolve_annotation_dtos(
         &self,
         retained: Arc<RetainedDocument>,
         annotations: Vec<Annotation>,
+        scale: f32,
         cancellation: Cancellation,
-        guards: Vec<OwnedSemaphorePermit>,
-    ) -> Result<Vec<BridgeAnnotation>, BridgeError> {
+        mut guards: Vec<OwnedSemaphorePermit>,
+        resolve_persisted_text: bool,
+    ) -> Result<(Vec<BridgeAnnotation>, Vec<OwnedSemaphorePermit>), BridgeError> {
+        if annotations.is_empty() {
+            return Ok((Vec::new(), guards));
+        }
+        let workspace_bytes = if resolve_persisted_text
+            && annotations.iter().any(|annotation| {
+                matches!(&annotation.target, AnnotationTarget::Epub(_))
+                    || matches!(
+                        &annotation.target,
+                        AnnotationTarget::Pdf(anchor) if anchor.character_range.is_some()
+                    )
+            }) {
+            ANNOTATION_RESOLUTION_WORKSPACE_BYTES
+        } else {
+            ANNOTATION_GEOMETRY_WORKSPACE_BYTES
+        };
+        if workspace_bytes as usize > self.admission.buffer_capacity {
+            return Err(BridgeError::BufferLimit);
+        }
+        if workspace_bytes != 0 {
+            guards.push(
+                acquire_permits(
+                    Arc::clone(&self.admission.buffer_bytes),
+                    workspace_bytes,
+                    &cancellation,
+                )
+                .await?,
+            );
+        }
         let worker_cancellation = cancellation.clone();
-        let (result, _guards) = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let worker_barrier = self.annotation_resolution_worker_barrier.clone();
+        let (result, guards) = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(barrier) = worker_barrier {
+                barrier.wait();
+                barrier.wait();
+            }
             let result = guarded(|| {
-                annotation_dtos(annotations, &retained.document, &|| {
-                    worker_cancellation.is_cancelled()
-                })
+                annotation_dtos(
+                    annotations,
+                    &retained.document,
+                    scale,
+                    resolve_persisted_text,
+                    &|| worker_cancellation.is_cancelled(),
+                )
             });
             (result, guards)
         })
         .await
         .map_err(|_| BridgeError::Worker)?;
         check_cancelled(&cancellation)?;
-        result
+        Ok((result?, guards))
     }
 
     pub async fn update_annotation(
@@ -921,6 +1015,11 @@ impl Bridge {
         color: HighlightColor,
         body: Option<String>,
     ) -> Result<bool, BridgeError> {
+        validate_annotation_body(body.as_deref())?;
+        let _request_slot = try_acquire_slot(
+            Arc::clone(&self.admission.request_slots),
+            BridgeError::RequestLimit,
+        )?;
         let retained = self.document(document)?;
         let id = AnnotationId::from_str(id)
             .map_err(|_| BridgeError::InvalidRequest("invalid annotation ID".into()))?;
@@ -942,6 +1041,10 @@ impl Bridge {
         document: DocumentHandle,
         id: &str,
     ) -> Result<bool, BridgeError> {
+        let _request_slot = try_acquire_slot(
+            Arc::clone(&self.admission.request_slots),
+            BridgeError::RequestLimit,
+        )?;
         let retained = self.document(document)?;
         let id = AnnotationId::from_str(id)
             .map_err(|_| BridgeError::InvalidRequest("invalid annotation ID".into()))?;
@@ -1155,7 +1258,7 @@ impl Bridge {
             handle,
             RetainedSelection {
                 _request_slot: extracted.request_slot,
-                _bytes: extracted.transient_bytes,
+                _bytes: extracted.retained_bytes,
             },
         );
         drop(registry);
@@ -1258,6 +1361,12 @@ impl Bridge {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         check_cancelled(cancellation)?;
         let mut extraction = extraction?;
+        let retained_len = selection_retained_byte_len(&extraction.surface)?;
+        let mut transient_bytes = transient_bytes;
+        let retained_bytes = transient_bytes
+            .split(retained_len)
+            .ok_or(BridgeError::BufferLimit)?;
+        drop(transient_bytes);
         if let Some(pixels) = extraction.raster.take() {
             extraction.surface.raster = Some(self.store_owned_buffer(
                 document_handle,
@@ -1272,7 +1381,7 @@ impl Bridge {
         Ok(ExtractedSelection {
             surface: extraction.surface,
             request_slot,
-            transient_bytes,
+            retained_bytes,
         })
     }
 
@@ -1711,7 +1820,7 @@ fn selection_surface(
             let raster_pixels = (raster_width as usize)
                 .checked_mul(raster_height as usize)
                 .ok_or(BridgeError::BufferLimit)?;
-            if raster_pixels > EPUB_TEXT_MAX_PIXELS {
+            if rasterize && raster_pixels > EPUB_TEXT_MAX_PIXELS {
                 return Err(BridgeError::BufferLimit);
             }
             let mut raster = if rasterize {
@@ -1863,7 +1972,43 @@ struct SelectionExtraction {
 struct ExtractedSelection {
     surface: SelectionSurface,
     request_slot: OwnedSemaphorePermit,
-    transient_bytes: OwnedSemaphorePermit,
+    retained_bytes: OwnedSemaphorePermit,
+}
+
+fn selection_retained_byte_len(surface: &SelectionSurface) -> Result<usize, BridgeError> {
+    let vectors = surface
+        .endpoints
+        .capacity()
+        .checked_mul(std::mem::size_of::<SelectionEndpoint>())
+        .and_then(|bytes| {
+            bytes.checked_add(surface.grapheme_boundaries.capacity() * std::mem::size_of::<usize>())
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(surface.word_boundaries.capacity() * std::mem::size_of::<usize>())
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(
+                surface.visual_lines.capacity() * std::mem::size_of::<SelectionVisualLine>(),
+            )
+        })
+        .and_then(|bytes| {
+            surface.visual_lines.iter().try_fold(bytes, |total, line| {
+                total.checked_add(line.carets.capacity() * std::mem::size_of::<SelectionCaret>())
+            })
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(
+                surface.page_rectangles.capacity() * std::mem::size_of::<SelectionPageRect>(),
+            )
+        })
+        .ok_or(BridgeError::BufferLimit)?;
+    std::mem::size_of::<SelectionSurface>()
+        .checked_add(surface.text.capacity())
+        .and_then(|bytes| {
+            bytes.checked_add(surface.resource_path.as_ref().map_or(0, String::capacity))
+        })
+        .and_then(|bytes| bytes.checked_add(vectors))
+        .ok_or(BridgeError::BufferLimit)
 }
 
 fn bounded_epub_selection_text(
@@ -1919,19 +2064,42 @@ fn selection_transient_byte_len(
             .selection_admission_byte_len(unit, scale)
             .map_err(map_preflight_error),
         OpenDocument::Epub(_) => {
-            let geometry = EPUB_TEXT_MAX_ENDPOINTS
+            let native_workspace = EPUB_TEXT_MAX_ENDPOINTS
                 .checked_mul(std::mem::size_of::<EpubTextEndpoint>())
                 // Chapter text, request runs, shaping text/control buffers, and
                 // scalar-boundary indexes coexist during native layout.
                 .and_then(|bytes| bytes.checked_add(EPUB_TEXT_MAX_SCALARS * 4 * 12))
+                .ok_or(BridgeError::BufferLimit)?;
+            // Bridge geometry is built while native layout remains live. Caret
+            // vectors may retain up to four slots for each endpoint because
+            // Vec's first growth allocates four elements; boundary vectors can
+            // retain the next power-of-two capacity above the scalar ceiling.
+            let bridge_geometry = EPUB_TEXT_MAX_ENDPOINTS
+                .checked_mul(std::mem::size_of::<SelectionEndpoint>())
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        EPUB_TEXT_MAX_ENDPOINTS * 4 * std::mem::size_of::<SelectionCaret>(),
+                    )
+                })
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        EPUB_TEXT_MAX_ENDPOINTS * std::mem::size_of::<SelectionVisualLine>(),
+                    )
+                })
+                .and_then(|bytes| {
+                    bytes.checked_add(EPUB_TEXT_MAX_SCALARS * 2 * 2 * std::mem::size_of::<usize>())
+                })
+                .and_then(|bytes| bytes.checked_add(EPUB_TEXT_MAX_SCALARS * 4))
+                .and_then(|bytes| bytes.checked_add(std::mem::size_of::<SelectionSurface>()))
                 .ok_or(BridgeError::BufferLimit)?;
             let rasters = if rasterize {
                 EPUB_TEXT_MAX_PIXELS * 4 * 2
             } else {
                 0
             };
-            geometry
-                .checked_add(rasters)
+            native_workspace
+                .checked_add(bridge_geometry)
+                .and_then(|bytes| bytes.checked_add(rasters))
                 .ok_or(BridgeError::BufferLimit)
         }
         OpenDocument::Cbz(_) => Err(BridgeError::UnsupportedOperation(BookFormat::Cbz)),
@@ -1983,44 +2151,195 @@ fn bounded_annotation_snapshot(
 fn annotation_dtos(
     annotations: Vec<Annotation>,
     document: &OpenDocument,
+    scale: f32,
+    resolve_persisted_text: bool,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<BridgeAnnotation>, BridgeError> {
+    let mut annotations_by_unit = HashMap::<usize, Vec<usize>>::new();
+    for (index, annotation) in annotations.iter().enumerate() {
+        if !resolve_persisted_text {
+            continue;
+        }
+        if is_cancelled() {
+            return Err(BridgeError::Cancelled);
+        }
+        let unit = match (&annotation.target, document) {
+            (AnnotationTarget::Epub(anchor), OpenDocument::Epub(document)) => {
+                let unit = anchor.spine_occurrence as usize;
+                if document
+                    .chapter(unit)
+                    .is_none_or(|chapter| chapter.path != anchor.resource_path.as_str())
+                {
+                    continue;
+                }
+                unit
+            }
+            (AnnotationTarget::Pdf(anchor), OpenDocument::Pdf(document))
+                if anchor.character_range.is_some()
+                    && (anchor.page as usize) < document.page_count() =>
+            {
+                anchor.page as usize
+            }
+            _ => continue,
+        };
+        annotations_by_unit.entry(unit).or_default().push(index);
+    }
+    let mut resolved_texts = if resolve_persisted_text {
+        vec![None; annotations.len()]
+    } else {
+        annotations
+            .iter()
+            .map(|annotation| {
+                let range = match &annotation.target {
+                    AnnotationTarget::Epub(anchor) => {
+                        Some(anchor.scalar_start as usize..anchor.scalar_end as usize)
+                    }
+                    AnnotationTarget::Pdf(anchor) => anchor
+                        .character_range
+                        .map(|(start, end)| start as usize..end as usize),
+                };
+                range.map(|range| crate::annotations::ResolvedTextAnchor {
+                    resolution: AnnotationResolution::Exact,
+                    range: Some(range),
+                })
+            })
+            .collect()
+    };
+    let mut remaining_work = MAX_TEXT_ANCHOR_RESOLUTION_WORK;
+    for (unit, indices) in annotations_by_unit {
+        let text = match document {
+            OpenDocument::Epub(document) => document
+                .presentation()
+                .chapter(unit)
+                .map(|chapter| bounded_epub_selection_text(chapter.search_text(), is_cancelled))
+                .transpose()?,
+            OpenDocument::Pdf(document) if unit < document.page_count() => Some(
+                document
+                    .page_text_bounded(unit, MAX_ANNOTATION_PDF_TEXT_BYTES, is_cancelled)
+                    .map_err(|error| match error {
+                        crate::pdf::BoundedPageTextError::Cancelled => BridgeError::Cancelled,
+                        crate::pdf::BoundedPageTextError::Limit { .. } => BridgeError::BufferLimit,
+                        crate::pdf::BoundedPageTextError::Document(error) => {
+                            map_render_error(error)
+                        }
+                    })?,
+            ),
+            OpenDocument::Pdf(_) => None,
+            OpenDocument::Cbz(_) => None,
+        };
+        let Some(text) = text else {
+            continue;
+        };
+        let scalar_index = TextScalarIndex::new(&text, &mut remaining_work, is_cancelled)
+            .map_err(map_text_anchor_resolution_error)?;
+        let mut unresolved = Vec::new();
+        for index in indices {
+            let (stored_range, quote) =
+                match (&annotations[index].target, &annotations[index].quote) {
+                    (AnnotationTarget::Epub(anchor), Some(quote)) => (
+                        anchor.scalar_start as usize..anchor.scalar_end as usize,
+                        quote,
+                    ),
+                    (AnnotationTarget::Pdf(anchor), Some(quote)) => {
+                        let Some((start, end)) = anchor.character_range else {
+                            continue;
+                        };
+                        (start as usize..end as usize, quote)
+                    }
+                    _ => continue,
+                };
+            if let Some(resolved) = scalar_index
+                .resolve_exact(stored_range, quote, &mut remaining_work, is_cancelled)
+                .map_err(map_text_anchor_resolution_error)?
+            {
+                resolved_texts[index] = Some(resolved);
+            } else {
+                unresolved.push(index);
+            }
+        }
+        if unresolved.is_empty() {
+            continue;
+        }
+        let resolver =
+            TextAnchorResolver::from_index(scalar_index, &mut remaining_work, is_cancelled)
+                .map_err(map_text_anchor_resolution_error)?;
+        for index in unresolved {
+            let (stored_range, quote) =
+                match (&annotations[index].target, &annotations[index].quote) {
+                    (AnnotationTarget::Epub(anchor), Some(quote)) => (
+                        anchor.scalar_start as usize..anchor.scalar_end as usize,
+                        quote,
+                    ),
+                    (AnnotationTarget::Pdf(anchor), Some(quote)) => {
+                        let Some((start, end)) = anchor.character_range else {
+                            continue;
+                        };
+                        (start as usize..end as usize, quote)
+                    }
+                    _ => continue,
+                };
+            resolved_texts[index] = Some(
+                resolver
+                    .resolve(stored_range, quote, &mut remaining_work, is_cancelled)
+                    .map_err(map_text_anchor_resolution_error)?,
+            );
+        }
+    }
     let batches = annotations
         .iter()
-        .filter_map(|annotation| match &annotation.target {
-            AnnotationTarget::Pdf(anchor) if anchor.character_range.is_none() => Some((
-                anchor.page as usize,
-                anchor
-                    .rectangles
-                    .iter()
-                    .map(|rect| (rect.left, rect.bottom, rect.right, rect.top))
-                    .collect(),
-            )),
-            AnnotationTarget::Pdf(_) | AnnotationTarget::Epub(_) => None,
+        .enumerate()
+        .filter_map(|(index, annotation)| match (&annotation.target, document) {
+            (AnnotationTarget::Pdf(anchor), OpenDocument::Pdf(pdf))
+                if anchor.character_range.is_none()
+                    && (anchor.page as usize) < pdf.page_count() =>
+            {
+                Some((
+                    index,
+                    (
+                        anchor.page as usize,
+                        anchor
+                            .rectangles
+                            .iter()
+                            .map(|rect| (rect.left, rect.bottom, rect.right, rect.top))
+                            .collect(),
+                    ),
+                ))
+            }
+            _ => None,
         })
         .collect::<Vec<_>>();
-    let mut resolved = if batches.is_empty() {
-        Vec::new().into_iter()
+    let mut resolved_rectangles = if batches.is_empty() {
+        HashMap::new()
     } else {
         let OpenDocument::Pdf(pdf) = document else {
-            return Err(BridgeError::InvalidRequest(
-                "PDF annotation does not match open document".into(),
-            ));
+            unreachable!("only matching PDF batches are collected");
         };
-        pdf.page_rectangle_batches_to_pixels(&batches, 1.0, is_cancelled)
+        let geometry = batches
+            .iter()
+            .map(|(_, batch)| batch.clone())
+            .collect::<Vec<_>>();
+        let converted = pdf
+            .page_rectangle_batches_to_pixels(&geometry, scale, is_cancelled)
             .map_err(map_render_error)?
+            .into_iter();
+        batches
             .into_iter()
+            .map(|(index, _)| index)
+            .zip(converted)
+            .collect()
     };
     annotations
         .into_iter()
-        .map(|annotation| {
-            let rectangles = matches!(
-                &annotation.target,
-                AnnotationTarget::Pdf(anchor) if anchor.character_range.is_none()
+        .enumerate()
+        .map(|(index, annotation)| {
+            if is_cancelled() {
+                return Err(BridgeError::Cancelled);
+            }
+            annotation_dto(
+                annotation,
+                resolved_rectangles.remove(&index),
+                resolved_texts[index].take(),
             )
-            .then(|| resolved.next())
-            .flatten();
-            annotation_dto(annotation, rectangles)
         })
         .collect()
 }
@@ -2028,33 +2347,51 @@ fn annotation_dtos(
 fn annotation_dto(
     annotation: Annotation,
     resolved_pdf_rectangles: Option<Vec<crate::pdf::PdfSelectionRect>>,
+    resolved_text: Option<crate::annotations::ResolvedTextAnchor>,
 ) -> Result<BridgeAnnotation, BridgeError> {
     let quote = annotation
         .quote
         .as_ref()
         .and_then(|quote| quote.original.clone());
+    let geometry_only = matches!(
+        &annotation.target,
+        AnnotationTarget::Pdf(anchor) if anchor.character_range.is_none()
+    );
+    let geometry_resolved = resolved_pdf_rectangles.is_some();
+    let resolution = resolved_text.as_ref().map_or_else(
+        || {
+            if geometry_only && geometry_resolved {
+                AnnotationResolution::Exact
+            } else {
+                AnnotationResolution::Orphaned
+            }
+        },
+        |resolved| resolved.resolution,
+    );
     let (unit, text_range, rectangles) = match annotation.target {
         AnnotationTarget::Epub(anchor) => (
             anchor.spine_occurrence as usize,
-            Some(AnnotationTextRange {
-                start: anchor.scalar_start as usize,
-                end: anchor.scalar_end as usize,
-            }),
+            resolved_text
+                .and_then(|resolved| resolved.range)
+                .map(|range| AnnotationTextRange {
+                    start: range.start,
+                    end: range.end,
+                }),
             Vec::new(),
         ),
         AnnotationTarget::Pdf(anchor) => {
-            let text_range = anchor
-                .character_range
-                .map(|(start, end)| AnnotationTextRange {
-                    start: start as usize,
-                    end: end as usize,
+            let text_range = resolved_text
+                .and_then(|resolved| resolved.range)
+                .map(|range| AnnotationTextRange {
+                    start: range.start,
+                    end: range.end,
                 });
             let page = anchor.page as usize;
             let rectangles = if anchor.character_range.is_some() {
                 Vec::new()
             } else {
                 resolved_pdf_rectangles
-                    .ok_or_else(|| BridgeError::Render("PDF rectangles were not resolved".into()))?
+                    .unwrap_or_default()
                     .into_iter()
                     .map(|rect| SelectionRect {
                         left: rect.left,
@@ -2070,12 +2407,35 @@ fn annotation_dto(
     Ok(BridgeAnnotation {
         id: annotation.id.to_string(),
         unit,
+        resolution,
         text_range,
         quote,
         rectangles,
         color: annotation.color,
         body: annotation.body,
     })
+}
+
+fn map_text_anchor_resolution_error(error: TextAnchorResolutionError) -> BridgeError {
+    match error {
+        TextAnchorResolutionError::InvalidSelector => {
+            BridgeError::InvalidRequest(error.to_string())
+        }
+        TextAnchorResolutionError::Cancelled => BridgeError::Cancelled,
+        TextAnchorResolutionError::WorkLimit => BridgeError::BufferLimit,
+    }
+}
+
+fn validate_annotation_body(body: Option<&str>) -> Result<(), BridgeError> {
+    if body.is_some_and(|body| {
+        body.chars().take(MAX_ANNOTATION_BODY_SCALARS + 1).count() > MAX_ANNOTATION_BODY_SCALARS
+    }) {
+        Err(BridgeError::InvalidRequest(format!(
+            "annotation body exceeds {MAX_ANNOTATION_BODY_SCALARS} Unicode scalars"
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 fn map_preflight_error(error: anyhow::Error) -> BridgeError {
@@ -2164,6 +2524,7 @@ mod tests {
             unit: 0,
             start: 0,
             end: 1,
+            display_scale: 1.0,
             color: HighlightColor::Yellow,
             body: None,
         }
@@ -2198,6 +2559,42 @@ mod tests {
             archive.write_all(contents).unwrap();
         }
         archive.finish().unwrap().into_inner()
+    }
+
+    fn selectable_pdf_with_media_box(width: u32, height: u32, text: &str) -> Vec<u8> {
+        let content = format!("BT /F1 200 Tf 1 0 0 1 100 {} Tm ({text}) Tj ET", height / 2);
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
+            ),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+            format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len() + 1
+            ),
+        ];
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
     }
 
     #[test]
@@ -2310,7 +2707,7 @@ mod tests {
             .unwrap()
             .page_rectangles(0, 1)[0]
             .1;
-        let expected = pdf.page_rectangles_to_pixels(0, 1.0, &[canonical]).unwrap()[0];
+        let expected = pdf.page_rectangles_to_pixels(0, 2.0, &[canonical]).unwrap()[0];
         let annotation = Annotation {
             id: AnnotationId::new(),
             book_id: None,
@@ -2335,8 +2732,16 @@ mod tests {
             deleted_at: None,
         };
 
-        let resolved = pdf.page_rectangles_to_pixels(0, 1.0, &[canonical]).unwrap();
-        let dto = annotation_dto(annotation, Some(resolved)).unwrap();
+        let dto = annotation_dtos(
+            vec![annotation],
+            &OpenDocument::Pdf(pdf.into()),
+            2.0,
+            true,
+            &|| false,
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(dto.resolution, AnnotationResolution::Exact);
         assert_eq!(dto.text_range, None);
         assert_eq!(dto.quote, None);
         assert_eq!(
@@ -2348,6 +2753,81 @@ mod tests {
                 bottom: expected.bottom,
             }]
         );
+    }
+
+    #[test]
+    fn missing_pdf_pages_orphan_only_the_affected_annotations() {
+        let pdf = crate::pdf::PdfDoc::open(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sample.pdf"
+        )))
+        .unwrap();
+        let fingerprint = DocumentFingerprint::new("sha256", 1, vec![7; 32]).unwrap();
+        let annotation = |target, quote| Annotation {
+            id: AnnotationId::new(),
+            book_id: None,
+            local_path: Some("sample.pdf".into()),
+            fingerprint: fingerprint.clone(),
+            quote,
+            target,
+            color: HighlightColor::Yellow,
+            body: None,
+            provenance: None,
+            created_at: "now".into(),
+            modified_at: "now".into(),
+            deleted_at: None,
+        };
+        let missing_page = u32::try_from(pdf.page_count()).unwrap();
+        let geometry = annotation(
+            AnnotationTarget::Pdf(
+                PdfAnchor::new(
+                    missing_page,
+                    None,
+                    vec![PageRect::new(0.0, 0.0, 1.0, 1.0).unwrap()],
+                )
+                .unwrap(),
+            ),
+            None,
+        );
+        let text = annotation(
+            AnnotationTarget::Pdf(
+                PdfAnchor::new(
+                    missing_page,
+                    Some((0, 1)),
+                    vec![PageRect::new(0.0, 0.0, 1.0, 1.0).unwrap()],
+                )
+                .unwrap(),
+            ),
+            Some(QuoteSelector::new("x", "", "").unwrap()),
+        );
+        let valid_geometry = annotation(
+            AnnotationTarget::Pdf(
+                PdfAnchor::new(0, None, vec![PageRect::new(0.0, 0.0, 1.0, 1.0).unwrap()]).unwrap(),
+            ),
+            None,
+        );
+        let incompatible = annotation(
+            AnnotationTarget::Epub(EpubAnchor::new(0, "missing.xhtml", 0, 1).unwrap()),
+            Some(QuoteSelector::new("x", "", "").unwrap()),
+        );
+
+        let resolved = annotation_dtos(
+            vec![geometry, text, valid_geometry, incompatible],
+            &OpenDocument::Pdf(pdf.into()),
+            1.0,
+            true,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(resolved.len(), 4);
+        assert!(resolved[..2].iter().all(|item| {
+            item.resolution == AnnotationResolution::Orphaned
+                && item.text_range.is_none()
+                && item.rectangles.is_empty()
+        }));
+        assert_eq!(resolved[2].resolution, AnnotationResolution::Exact);
+        assert!(!resolved[2].rectangles.is_empty());
+        assert_eq!(resolved[3].resolution, AnnotationResolution::Orphaned);
     }
 
     #[test]
@@ -2423,6 +2903,54 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error, BridgeError::RequestLimit);
+    }
+
+    #[tokio::test]
+    async fn annotation_mutations_share_request_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut admission = BridgeAdmission::new(MAX_BRIDGE_RETAINED_BUFFER_BYTES, 1);
+        admission.request_slots = Arc::new(Semaphore::new(1));
+        let admission = Arc::new(admission);
+        let bridge = Bridge::with_admission_database(
+            Arc::clone(&admission),
+            Some(Arc::new(directory.path().join("annotations.sqlite"))),
+        );
+        let document = bridge
+            .open_document(pdf_request(), Cancellation::new())
+            .await
+            .unwrap();
+        let id = AnnotationId::new().to_string();
+        let request = Arc::clone(&admission.request_slots)
+            .acquire_owned()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            bridge
+                .update_annotation(document.handle, &id, HighlightColor::Green, None,)
+                .await,
+            Err(BridgeError::RequestLimit)
+        );
+        assert_eq!(
+            bridge.delete_annotation(document.handle, &id).await,
+            Err(BridgeError::RequestLimit)
+        );
+
+        drop(request);
+        assert!(
+            !bridge
+                .update_annotation(document.handle, &id, HighlightColor::Green, None,)
+                .await
+                .unwrap()
+        );
+        assert_eq!(admission.request_slots.available_permits(), 1);
+        assert!(
+            !bridge
+                .delete_annotation(document.handle, &id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(admission.request_slots.available_permits(), 1);
     }
 
     #[tokio::test]
@@ -2631,6 +3159,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retained_pdf_selections_do_not_hold_transient_render_admission() {
+        let document = OpenDocument::open(&DeviceFileLocator::from_path(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sample.pdf"
+        )))
+        .unwrap();
+        let selection_peak = selection_transient_byte_len(&document, 0, 1.0, false).unwrap();
+        let probe_capacity = selection_peak * 2;
+        let mut admission = BridgeAdmission::new(MAX_BRIDGE_RETAINED_BUFFER_BYTES, 1);
+        admission.probe_bytes = Arc::new(Semaphore::new(probe_capacity));
+        let admission = Arc::new(admission);
+        let bridge = Bridge::with_admission(Arc::clone(&admission));
+        let document = bridge
+            .open_document(pdf_request(), Cancellation::new())
+            .await
+            .unwrap();
+        let first = bridge
+            .selection_surface(document.handle, 0, 1.0, 680.0, 18.0, Cancellation::new())
+            .await
+            .unwrap();
+        let second = bridge
+            .selection_surface(document.handle, 0, 1.0, 680.0, 18.0, Cancellation::new())
+            .await
+            .unwrap();
+
+        let rendered = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            bridge.render_page(
+                RenderRequest {
+                    document: document.handle,
+                    page: 0,
+                    scale: 1.0,
+                },
+                Cancellation::new(),
+            ),
+        )
+        .await
+        .expect("render admission must not depend on releasing retained selections")
+        .unwrap();
+        assert!(bridge.release_buffer(rendered.handle));
+        assert!(bridge.release_selection(first.handle));
+        assert!(bridge.release_selection(second.handle));
+        assert_eq!(admission.probe_bytes.available_permits(), probe_capacity);
+    }
+
+    #[tokio::test]
     async fn dropped_epub_selection_keeps_admission_until_worker_exits() {
         let mut admission = BridgeAdmission::new(MAX_BRIDGE_RETAINED_BUFFER_BYTES, 1);
         admission.request_slots = Arc::new(Semaphore::new(1));
@@ -2689,6 +3263,62 @@ mod tests {
         .expect("the detached blocking worker must release its admission");
         assert!(bridge.registry.lock().unwrap().buffers.is_empty());
         assert!(bridge.registry.lock().unwrap().selections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dropped_annotation_create_keeps_request_admission_until_worker_exits() {
+        let directory = tempfile::tempdir().unwrap();
+        let worker_barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut admission = BridgeAdmission::new(MAX_BRIDGE_RETAINED_BUFFER_BYTES, 1);
+        admission.request_slots = Arc::new(Semaphore::new(1));
+        let admission = Arc::new(admission);
+        let mut bridge = Bridge::with_admission_database(
+            Arc::clone(&admission),
+            Some(Arc::new(directory.path().join("annotations.sqlite"))),
+        );
+        bridge.annotation_resolution_worker_barrier = Some(Arc::clone(&worker_barrier));
+        let bridge = Arc::new(bridge);
+        let document = bridge
+            .open_document(pdf_request(), Cancellation::new())
+            .await
+            .unwrap();
+        let (drop_tx, drop_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::sync_channel(1);
+        let operation_bridge = Arc::clone(&bridge);
+        let operation = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    tokio::select! {
+                        _ = operation_bridge.create_annotation(
+                            annotation_request(document.handle),
+                            Cancellation::new(),
+                        ) => panic!("annotation create must remain blocked"),
+                        _ = drop_rx => {}
+                    }
+                    dropped_tx.send(()).unwrap();
+                });
+        });
+
+        worker_barrier.wait();
+        drop_tx.send(()).unwrap();
+        dropped_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("the outer annotation create future must be dropped");
+        assert_eq!(admission.request_slots.available_permits(), 0);
+
+        worker_barrier.wait();
+        operation.join().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while admission.request_slots.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached annotation conversion must release request admission");
+        assert_eq!(admission.request_slots.available_permits(), 1);
     }
 
     #[tokio::test]
@@ -2756,6 +3386,7 @@ mod tests {
                     unit: 0,
                     start: endpoint.range_start,
                     end: endpoint.range_end,
+                    display_scale: 2.0,
                     color: HighlightColor::Yellow,
                     body: None,
                 },
@@ -2785,6 +3416,456 @@ mod tests {
             Some((endpoint.range_start as u32, endpoint.range_end as u32))
         );
         assert!(!anchor.rectangles.is_empty());
+        let listed = bridge
+            .list_annotations(document.handle, 2.0, Cancellation::new())
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].resolution, AnnotationResolution::Exact);
+        assert_eq!(
+            listed[0].text_range,
+            Some(AnnotationTextRange {
+                start: endpoint.range_start,
+                end: endpoint.range_end,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn pdf_annotation_creation_uses_the_displayed_scale() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("large-page.pdf");
+        std::fs::write(&path, selectable_pdf_with_media_box(7_000, 7_000, "scale")).unwrap();
+        let bridge = Bridge::with_database_path(directory.path().join("annotations.sqlite"));
+        let document = bridge
+            .open_document(
+                OpenRequest {
+                    book_id: None,
+                    local_id: "large-page".into(),
+                    path_key: crate::path_key::path_key(&path),
+                    format_hint: Some(BookFormat::Pdf),
+                },
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        let retained = bridge.document(document.handle).unwrap();
+        assert!(matches!(
+            selection_transient_byte_len(&retained.document, 0, 1.0, false),
+            Err(BridgeError::BufferLimit)
+        ));
+        let surface = bridge
+            .selection_surface(document.handle, 0, 0.1, 680.0, 18.0, Cancellation::new())
+            .await
+            .unwrap();
+        let endpoint = surface
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.range_start < endpoint.range_end)
+            .copied()
+            .unwrap();
+        assert!(bridge.release_selection(surface.handle));
+
+        let created = bridge
+            .create_annotation(
+                CreateAnnotationRequest {
+                    document: document.handle,
+                    unit: 0,
+                    start: endpoint.range_start,
+                    end: endpoint.range_end,
+                    display_scale: 0.1,
+                    color: HighlightColor::Yellow,
+                    body: None,
+                },
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.resolution, AnnotationResolution::Exact);
+        assert_eq!(
+            bridge
+                .list_annotations(document.handle, 0.1, Cancellation::new())
+                .await
+                .unwrap(),
+            vec![created]
+        );
+    }
+
+    #[tokio::test]
+    async fn annotation_response_preparation_fails_before_persistence() {
+        let directory = tempfile::tempdir().unwrap();
+        let admission = Arc::new(BridgeAdmission::new(
+            ANNOTATION_GEOMETRY_WORKSPACE_BYTES as usize - 1,
+            1,
+        ));
+        let bridge = Bridge::with_admission_database(
+            admission,
+            Some(Arc::new(directory.path().join("annotations.sqlite"))),
+        );
+        let document = bridge
+            .open_document(pdf_request(), Cancellation::new())
+            .await
+            .unwrap();
+        let retained = bridge.document(document.handle).unwrap();
+
+        assert_eq!(
+            bridge
+                .create_annotation(annotation_request(document.handle), Cancellation::new())
+                .await,
+            Err(BridgeError::BufferLimit)
+        );
+        assert!(
+            bridge
+                .annotation_store()
+                .await
+                .unwrap()
+                .list_for_local_path_async(&retained.local_path)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn inserted_annotation_decode_failure_rolls_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut bridge = Bridge::with_database_path(directory.path().join("annotations.sqlite"));
+        bridge.annotation_test_hooks = Some(Arc::new(AnnotationTestHooks {
+            fail_create_response: true,
+            ..AnnotationTestHooks::default()
+        }));
+        let document = bridge
+            .open_document(pdf_request(), Cancellation::new())
+            .await
+            .unwrap();
+        let retained = bridge.document(document.handle).unwrap();
+
+        assert!(matches!(
+            bridge
+                .create_annotation(annotation_request(document.handle), Cancellation::new())
+                .await,
+            Err(BridgeError::Storage(message))
+                if message.contains("response preparation failure")
+        ));
+        assert!(
+            bridge
+                .annotation_store()
+                .await
+                .unwrap()
+                .list_for_local_path_async(&retained.local_path)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_annotation_bodies_fail_before_async_work() {
+        let bridge = Bridge::new();
+        let document = bridge
+            .open_document(pdf_request(), Cancellation::new())
+            .await
+            .unwrap();
+        let body = "x".repeat(MAX_ANNOTATION_BODY_SCALARS + 1);
+        let mut request = annotation_request(document.handle);
+        request.body = Some(body.clone());
+
+        assert!(matches!(
+            bridge.create_annotation(request, Cancellation::new()).await,
+            Err(BridgeError::InvalidRequest(message)) if message.contains("annotation body")
+        ));
+        assert!(bridge.annotation_store.get().is_none());
+        assert!(matches!(
+            bridge
+                .update_annotation(
+                    document.handle,
+                    &AnnotationId::new().to_string(),
+                    HighlightColor::Green,
+                    Some(body),
+                )
+                .await,
+            Err(BridgeError::InvalidRequest(message)) if message.contains("annotation body")
+        ));
+        assert!(bridge.annotation_store.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn exact_annotations_survive_oversized_graphemes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("oversized-grapheme.epub");
+        let body = format!("ordinary e{}", "\u{301}".repeat(1_025));
+        std::fs::write(&path, epub_with_body(&body)).unwrap();
+        let bridge = Bridge::with_database_path(directory.path().join("annotations.sqlite"));
+        let request = || OpenRequest {
+            book_id: None,
+            local_id: "oversized-grapheme".into(),
+            path_key: crate::path_key::path_key(&path),
+            format_hint: Some(BookFormat::Epub),
+        };
+        let document = bridge
+            .open_document(request(), Cancellation::new())
+            .await
+            .unwrap();
+        let surface = bridge
+            .selection_surface(document.handle, 0, 1.0, 680.0, 18.0, Cancellation::new())
+            .await
+            .unwrap();
+        let chars = surface.text.chars().collect::<Vec<_>>();
+        let start = chars
+            .windows("ordinary".len())
+            .position(|window| window.iter().collect::<String>() == "ordinary")
+            .unwrap();
+        let end = start + "ordinary".len();
+        assert!(bridge.release_selection(surface.handle));
+
+        let created = bridge
+            .create_annotation(
+                CreateAnnotationRequest {
+                    document: document.handle,
+                    unit: 0,
+                    start,
+                    end,
+                    display_scale: 1.0,
+                    color: HighlightColor::Yellow,
+                    body: None,
+                },
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.resolution, AnnotationResolution::Exact);
+        let oversized_start = chars
+            .iter()
+            .rposition(|character| *character == 'e')
+            .unwrap();
+        let oversized = bridge
+            .create_annotation(
+                CreateAnnotationRequest {
+                    document: document.handle,
+                    unit: 0,
+                    start: oversized_start,
+                    end: chars.len(),
+                    display_scale: 1.0,
+                    color: HighlightColor::Green,
+                    body: None,
+                },
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(oversized.resolution, AnnotationResolution::Exact);
+        let listed = bridge
+            .list_annotations(document.handle, 1.0, Cancellation::new())
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.contains(&created));
+        assert!(listed.contains(&oversized));
+
+        assert!(bridge.release_document(document.handle));
+        let reopened = bridge
+            .open_document(request(), Cancellation::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            bridge
+                .list_annotations(reopened.handle, 1.0, Cancellation::new())
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn epub_annotation_measurement_ignores_unused_raster_limits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tall-layout.epub");
+        let body = "x".repeat(20);
+        std::fs::write(&path, epub_with_body(&body)).unwrap();
+        let bridge = Bridge::with_database_path(directory.path().join("annotations.sqlite"));
+        let document = bridge
+            .open_document(
+                OpenRequest {
+                    book_id: None,
+                    local_id: "tall-layout".into(),
+                    path_key: crate::path_key::path_key(&path),
+                    format_hint: Some(BookFormat::Epub),
+                },
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        let retained = bridge.document(document.handle).unwrap();
+        match selection_surface(&retained.document, 0, 1.0, 680.0, 1024.0, true, &|| false) {
+            Err(BridgeError::BufferLimit) => {}
+            Err(BridgeError::Render(message))
+                if message.contains("16777216-pixel per-call ceiling") => {}
+            Err(error) => panic!("unexpected raster failure: {error:?}"),
+            Ok(extraction) => panic!(
+                "default raster unexpectedly fit: {}x{}, text={}, lines={}",
+                extraction.raster_width,
+                extraction.raster_height,
+                extraction.surface.text.chars().count(),
+                extraction.surface.visual_lines.len(),
+            ),
+        }
+        let measurement =
+            selection_surface(&retained.document, 0, 1.0, 680.0, 1024.0, false, &|| false);
+        if let Err(error) = measurement {
+            panic!("measurement failed: {error:?}");
+        }
+        let surface = bridge
+            .selection_surface(document.handle, 0, 0.1, 680.0, 18.0, Cancellation::new())
+            .await
+            .unwrap();
+        let endpoint = surface
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.range_start < endpoint.range_end)
+            .copied()
+            .unwrap();
+        assert!(bridge.release_buffer(surface.raster.unwrap().handle));
+        assert!(bridge.release_selection(surface.handle));
+
+        let created = bridge
+            .create_annotation(
+                CreateAnnotationRequest {
+                    document: document.handle,
+                    unit: 0,
+                    start: endpoint.range_start,
+                    end: endpoint.range_end,
+                    display_scale: 0.1,
+                    color: HighlightColor::Yellow,
+                    body: None,
+                },
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.resolution, AnnotationResolution::Exact);
+        assert_eq!(
+            bridge
+                .list_annotations(document.handle, 0.1, Cancellation::new())
+                .await
+                .unwrap(),
+            vec![created]
+        );
+    }
+
+    #[tokio::test]
+    async fn epub_annotation_admits_retained_caret_capacity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("many-caret-lines.epub");
+        let body = format!("<p>{}</p>", "i".repeat(65)).repeat(496);
+        std::fs::write(&path, epub_with_body(&body)).unwrap();
+        let admission = Arc::new(BridgeAdmission::new(
+            MAX_BRIDGE_RETAINED_BUFFER_BYTES,
+            MAX_BRIDGE_RENDER_WORKERS,
+        ));
+        let bridge = Bridge::with_admission_database(
+            Arc::clone(&admission),
+            Some(Arc::new(directory.path().join("annotations.sqlite"))),
+        );
+        let document = bridge
+            .open_document(
+                OpenRequest {
+                    book_id: None,
+                    local_id: "many-caret-lines".into(),
+                    path_key: crate::path_key::path_key(&path),
+                    format_hint: Some(BookFormat::Epub),
+                },
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        let initial_probe_bytes = admission.probe_bytes.available_permits();
+        let surface = bridge
+            .selection_surface(document.handle, 0, 1.0, 680.0, 18.0, Cancellation::new())
+            .await
+            .unwrap();
+        let endpoint = surface
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.range_start < endpoint.range_end)
+            .copied()
+            .unwrap();
+        assert!(bridge.release_buffer(surface.raster.unwrap().handle));
+        assert!(bridge.release_selection(surface.handle));
+        assert_eq!(
+            admission.probe_bytes.available_permits(),
+            initial_probe_bytes
+        );
+
+        let created = bridge
+            .create_annotation(
+                CreateAnnotationRequest {
+                    document: document.handle,
+                    unit: 0,
+                    start: endpoint.range_start,
+                    end: endpoint.range_end,
+                    display_scale: 1.0,
+                    color: HighlightColor::Yellow,
+                    body: None,
+                },
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            created.text_range,
+            Some(AnnotationTextRange {
+                start: endpoint.range_start,
+                end: endpoint.range_end,
+            })
+        );
+        assert_eq!(
+            bridge
+                .list_annotations(document.handle, 1.0, Cancellation::new())
+                .await
+                .unwrap(),
+            vec![created]
+        );
+        assert_eq!(
+            admission.probe_bytes.available_permits(),
+            initial_probe_bytes
+        );
+    }
+
+    #[test]
+    fn exact_snapshot_reuses_its_scalar_index() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("exact-snapshot.epub");
+        let body = "e\u{301}".repeat(32_767);
+        std::fs::write(&path, epub_with_body(&body)).unwrap();
+        let document = OpenDocument::open(&DeviceFileLocator::from_path(&path)).unwrap();
+        let quote = QuoteSelector::new("e\u{301}", "", "").unwrap();
+        let annotations = (0..MAX_ANNOTATIONS_PER_SNAPSHOT)
+            .map(|_| Annotation {
+                id: AnnotationId::new(),
+                book_id: None,
+                local_path: Some(path.to_string_lossy().into_owned()),
+                fingerprint: DocumentFingerprint::new("sha256", 1, vec![7; 32]).unwrap(),
+                quote: Some(quote.clone()),
+                target: AnnotationTarget::Epub(
+                    EpubAnchor::new(0, "OPS/chapter.xhtml", 65_532, 65_534).unwrap(),
+                ),
+                color: HighlightColor::Yellow,
+                body: None,
+                provenance: None,
+                created_at: "now".into(),
+                modified_at: "now".into(),
+                deleted_at: None,
+            })
+            .collect();
+
+        let resolved = annotation_dtos(annotations, &document, 1.0, true, &|| false).unwrap();
+        assert_eq!(resolved.len(), MAX_ANNOTATIONS_PER_SNAPSHOT);
+        assert!(
+            resolved
+                .iter()
+                .all(|annotation| annotation.resolution == AnnotationResolution::Exact)
+        );
     }
 
     #[tokio::test]
@@ -2832,7 +3913,7 @@ mod tests {
         gate.release();
         assert!(
             bridge
-                .list_annotations(document.handle, Cancellation::new())
+                .list_annotations(document.handle, 1.0, Cancellation::new())
                 .await
                 .unwrap()
                 .is_empty()
@@ -2876,7 +3957,10 @@ mod tests {
             bridge.admission.request_slots.available_permits(),
             MAX_BRIDGE_REQUESTS - 1
         );
-        assert!(bridge.admission.probe_bytes.available_permits() < MAX_BRIDGE_PROBE_BYTES);
+        assert_eq!(
+            bridge.admission.probe_bytes.available_permits(),
+            MAX_BRIDGE_PROBE_BYTES
+        );
         cancellation.cancel();
         gate.release();
         assert_eq!(operation.await.unwrap(), Err(BridgeError::Cancelled));
@@ -2890,7 +3974,7 @@ mod tests {
         );
         assert!(
             bridge
-                .list_annotations(document.handle, Cancellation::new())
+                .list_annotations(document.handle, 1.0, Cancellation::new())
                 .await
                 .unwrap()
                 .is_empty()
@@ -2928,7 +4012,7 @@ mod tests {
         operation.await.unwrap().unwrap();
         assert_eq!(
             bridge
-                .list_annotations(document.handle, Cancellation::new())
+                .list_annotations(document.handle, 1.0, Cancellation::new())
                 .await
                 .unwrap()
                 .len(),
@@ -2937,7 +4021,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepted_annotation_drops_probe_bytes_before_reacquiring_render_slot() {
+    async fn annotation_preparation_releases_probe_bytes_before_persistence() {
         let directory = tempfile::tempdir().unwrap();
         let gate = Arc::new(AnnotationPersistenceTestGate::new());
         let document = OpenDocument::open(&DeviceFileLocator::from_path(concat!(
@@ -2970,7 +4054,7 @@ mod tests {
                 .await
         });
         gate.wait_until_entered().await;
-        assert_eq!(admission.probe_bytes.available_permits(), 0);
+        assert_eq!(admission.probe_bytes.available_permits(), probe_bytes);
 
         let selection_bridge = Arc::clone(&bridge);
         let selection = tokio::spawn(async move {
@@ -3015,7 +4099,7 @@ mod tests {
         let list_cancellation = cancellation.clone();
         let list = tokio::spawn(async move {
             list_bridge
-                .list_annotations(summary.handle, list_cancellation)
+                .list_annotations(summary.handle, 1.0, list_cancellation)
                 .await
         });
 
@@ -3070,7 +4154,10 @@ mod tests {
 
             gate.wait_until_entered().await;
             assert_eq!(admission.request_slots.available_permits(), 0);
-            assert!(admission.probe_bytes.available_permits() < MAX_BRIDGE_PROBE_BYTES);
+            assert_eq!(
+                admission.probe_bytes.available_permits(),
+                MAX_BRIDGE_PROBE_BYTES
+            );
             gate.release();
             let result = operation.await.unwrap();
             if fail {
@@ -3493,6 +4580,52 @@ mod tests {
         assert_eq!(bridge.admission.buffer_bytes.available_permits(), 0);
         assert!(bridge.release_buffer(buffer.handle));
         assert_eq!(bridge.admission.buffer_bytes.available_permits(), 8);
+    }
+
+    #[tokio::test]
+    async fn annotation_resolution_workspace_caps_peak_concurrency() {
+        const INDEX_AND_TEXT_BYTES_PER_INPUT_BYTE: usize = 64;
+        const NORMALIZATION_AND_MATCHER_OVERHEAD: usize = 16 * 1024 * 1024;
+        assert!(
+            MAX_ANNOTATION_PDF_TEXT_BYTES * INDEX_AND_TEXT_BYTES_PER_INPUT_BYTE
+                + NORMALIZATION_AND_MATCHER_OVERHEAD
+                <= ANNOTATION_RESOLUTION_WORKSPACE_BYTES as usize
+        );
+        assert!(ANNOTATION_RESOLUTION_WORKSPACE_BYTES as usize <= MAX_BRIDGE_BUFFER_BYTES);
+
+        let admission = BridgeAdmission::new(MAX_BRIDGE_RETAINED_BUFFER_BYTES, 3);
+        let cancellation = Cancellation::new();
+        let first = acquire_permits(
+            Arc::clone(&admission.buffer_bytes),
+            ANNOTATION_RESOLUTION_WORKSPACE_BYTES,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+        let second = acquire_permits(
+            Arc::clone(&admission.buffer_bytes),
+            ANNOTATION_RESOLUTION_WORKSPACE_BYTES,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+        let third = acquire_permits(
+            Arc::clone(&admission.buffer_bytes),
+            ANNOTATION_RESOLUTION_WORKSPACE_BYTES,
+            &cancellation,
+        );
+        tokio::pin!(third);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut third)
+                .await
+                .is_err()
+        );
+        drop(first);
+        let _third = tokio::time::timeout(std::time::Duration::from_secs(1), third)
+            .await
+            .expect("a third workspace must be admitted after one completes")
+            .unwrap();
+        drop(second);
     }
 
     #[tokio::test]

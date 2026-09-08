@@ -88,6 +88,7 @@ abstract class RustLibApi extends BaseApi {
     required BigInt unit,
     required BigInt start,
     required BigInt end,
+    required double displayScale,
     required FlutterHighlightColor color,
     String? body,
     required BigInt cancellationId,
@@ -106,6 +107,7 @@ abstract class RustLibApi extends BaseApi {
   Future<List<FlutterAnnotation>> crateApiFlutterBridgeListAnnotations({
     required FlutterBridge that,
     required FlutterDocumentHandle document,
+    required double scale,
     required BigInt cancellationId,
   });
 
@@ -231,6 +233,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required BigInt unit,
     required BigInt start,
     required BigInt end,
+    required double displayScale,
     required FlutterHighlightColor color,
     String? body,
     required BigInt cancellationId,
@@ -246,9 +249,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           var arg2 = cst_encode_usize(unit);
           var arg3 = cst_encode_usize(start);
           var arg4 = cst_encode_usize(end);
-          var arg5 = cst_encode_flutter_highlight_color(color);
-          var arg6 = cst_encode_opt_String(body);
-          var arg7 = cst_encode_u_64(cancellationId);
+          var arg5 = cst_encode_f_32(displayScale);
+          var arg6 = cst_encode_flutter_highlight_color(color);
+          var arg7 = cst_encode_opt_String(body);
+          var arg8 = cst_encode_u_64(cancellationId);
           return wire.wire__crate__api__FlutterBridge_create_annotation(
             port_,
             arg0,
@@ -259,6 +263,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             arg5,
             arg6,
             arg7,
+            arg8,
           );
         },
         codec: DcoCodec(
@@ -272,6 +277,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           unit,
           start,
           end,
+          displayScale,
           color,
           body,
           cancellationId,
@@ -290,6 +296,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "unit",
           "start",
           "end",
+          "displayScale",
           "color",
           "body",
           "cancellationId",
@@ -391,6 +398,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Future<List<FlutterAnnotation>> crateApiFlutterBridgeListAnnotations({
     required FlutterBridge that,
     required FlutterDocumentHandle document,
+    required double scale,
     required BigInt cancellationId,
   }) {
     return handler.executeNormal(
@@ -401,12 +409,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
                 that,
               );
           var arg1 = cst_encode_box_autoadd_flutter_document_handle(document);
-          var arg2 = cst_encode_u_64(cancellationId);
+          var arg2 = cst_encode_f_32(scale);
+          var arg3 = cst_encode_u_64(cancellationId);
           return wire.wire__crate__api__FlutterBridge_list_annotations(
             port_,
             arg0,
             arg1,
             arg2,
+            arg3,
           );
         },
         codec: DcoCodec(
@@ -414,7 +424,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: dco_decode_flutter_bridge_error,
         ),
         constMeta: kCrateApiFlutterBridgeListAnnotationsConstMeta,
-        argValues: [that, document, cancellationId],
+        argValues: [that, document, scale, cancellationId],
         apiImpl: this,
       ),
     );
@@ -423,7 +433,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiFlutterBridgeListAnnotationsConstMeta =>
       const TaskConstMeta(
         debugName: "FlutterBridge_list_annotations",
-        argNames: ["that", "document", "cancellationId"],
+        argNames: ["that", "document", "scale", "cancellationId"],
       );
 
   @override
@@ -973,19 +983,28 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   FlutterAnnotation dco_decode_flutter_annotation(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 7)
-      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
     return FlutterAnnotation(
       id: dco_decode_String(arr[0]),
       unit: dco_decode_usize(arr[1]),
+      resolution: dco_decode_flutter_annotation_resolution(arr[2]),
       textRange: dco_decode_opt_box_autoadd_flutter_annotation_text_range(
-        arr[2],
+        arr[3],
       ),
-      quote: dco_decode_opt_String(arr[3]),
-      rectangles: dco_decode_opt_list_flutter_selection_rect(arr[4]),
-      color: dco_decode_flutter_highlight_color(arr[5]),
-      body: dco_decode_opt_String(arr[6]),
+      quote: dco_decode_opt_String(arr[4]),
+      rectangles: dco_decode_opt_list_flutter_selection_rect(arr[5]),
+      color: dco_decode_flutter_highlight_color(arr[6]),
+      body: dco_decode_opt_String(arr[7]),
     );
+  }
+
+  @protected
+  FlutterAnnotationResolution dco_decode_flutter_annotation_resolution(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return FlutterAnnotationResolution.values[raw as int];
   }
 
   @protected
@@ -1440,6 +1459,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_id = sse_decode_String(deserializer);
     var var_unit = sse_decode_usize(deserializer);
+    var var_resolution = sse_decode_flutter_annotation_resolution(deserializer);
     var var_textRange =
         sse_decode_opt_box_autoadd_flutter_annotation_text_range(deserializer);
     var var_quote = sse_decode_opt_String(deserializer);
@@ -1451,12 +1471,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     return FlutterAnnotation(
       id: var_id,
       unit: var_unit,
+      resolution: var_resolution,
       textRange: var_textRange,
       quote: var_quote,
       rectangles: var_rectangles,
       color: var_color,
       body: var_body,
     );
+  }
+
+  @protected
+  FlutterAnnotationResolution sse_decode_flutter_annotation_resolution(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return FlutterAnnotationResolution.values[inner];
   }
 
   @protected
@@ -1915,6 +1945,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  int cst_encode_flutter_annotation_resolution(
+    FlutterAnnotationResolution raw,
+  ) {
+    // Codec=Cst (C-struct based), see doc to use other codecs
+    return cst_encode_i_32(raw.index);
+  }
+
+  @protected
   int cst_encode_flutter_book_format(FlutterBookFormat raw) {
     // Codec=Cst (C-struct based), see doc to use other codecs
     return cst_encode_i_32(raw.index);
@@ -2084,6 +2122,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.id, serializer);
     sse_encode_usize(self.unit, serializer);
+    sse_encode_flutter_annotation_resolution(self.resolution, serializer);
     sse_encode_opt_box_autoadd_flutter_annotation_text_range(
       self.textRange,
       serializer,
@@ -2092,6 +2131,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_list_flutter_selection_rect(self.rectangles, serializer);
     sse_encode_flutter_highlight_color(self.color, serializer);
     sse_encode_opt_String(self.body, serializer);
+  }
+
+  @protected
+  void sse_encode_flutter_annotation_resolution(
+    FlutterAnnotationResolution self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 
   @protected
@@ -2477,6 +2525,7 @@ class FlutterBridgeImpl extends RustOpaque implements FlutterBridge {
     required BigInt unit,
     required BigInt start,
     required BigInt end,
+    required double displayScale,
     required FlutterHighlightColor color,
     String? body,
     required BigInt cancellationId,
@@ -2486,6 +2535,7 @@ class FlutterBridgeImpl extends RustOpaque implements FlutterBridge {
     unit: unit,
     start: start,
     end: end,
+    displayScale: displayScale,
     color: color,
     body: body,
     cancellationId: cancellationId,
@@ -2505,10 +2555,12 @@ class FlutterBridgeImpl extends RustOpaque implements FlutterBridge {
 
   Future<List<FlutterAnnotation>> listAnnotations({
     required FlutterDocumentHandle document,
+    required double scale,
     required BigInt cancellationId,
   }) => RustLib.instance.api.crateApiFlutterBridgeListAnnotations(
     that: this,
     document: document,
+    scale: scale,
     cancellationId: cancellationId,
   );
 

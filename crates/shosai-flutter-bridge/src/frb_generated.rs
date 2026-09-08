@@ -94,6 +94,7 @@ fn wire__crate__api__FlutterBridge_create_annotation_impl(
     unit: impl CstDecode<usize>,
     start: impl CstDecode<usize>,
     end: impl CstDecode<usize>,
+    display_scale: impl CstDecode<f32>,
     color: impl CstDecode<crate::api::FlutterHighlightColor>,
     body: impl CstDecode<Option<String>>,
     cancellation_id: impl CstDecode<u64>,
@@ -110,6 +111,7 @@ fn wire__crate__api__FlutterBridge_create_annotation_impl(
             let api_unit = unit.cst_decode();
             let api_start = start.cst_decode();
             let api_end = end.cst_decode();
+            let api_display_scale = display_scale.cst_decode();
             let api_color = color.cst_decode();
             let api_body = body.cst_decode();
             let api_cancellation_id = cancellation_id.cst_decode();
@@ -139,6 +141,7 @@ fn wire__crate__api__FlutterBridge_create_annotation_impl(
                             api_unit,
                             api_start,
                             api_end,
+                            api_display_scale,
                             api_color,
                             api_body,
                             api_cancellation_id,
@@ -263,6 +266,7 @@ fn wire__crate__api__FlutterBridge_list_annotations_impl(
         RustOpaqueNom<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FlutterBridge>>,
     >,
     document: impl CstDecode<crate::api::FlutterDocumentHandle>,
+    scale: impl CstDecode<f32>,
     cancellation_id: impl CstDecode<u64>,
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::DcoCodec, _, _, _>(
@@ -274,6 +278,7 @@ fn wire__crate__api__FlutterBridge_list_annotations_impl(
         move || {
             let api_that = that.cst_decode();
             let api_document = document.cst_decode();
+            let api_scale = scale.cst_decode();
             let api_cancellation_id = cancellation_id.cst_decode();
             move |context| async move {
                 transform_result_dco::<_, _, crate::api::FlutterBridgeError>(
@@ -298,6 +303,7 @@ fn wire__crate__api__FlutterBridge_list_annotations_impl(
                         let output_ok = crate::api::FlutterBridge::list_annotations(
                             &*api_that_guard,
                             api_document,
+                            api_scale,
                             api_cancellation_id,
                         )
                         .await?;
@@ -803,6 +809,18 @@ impl CstDecode<f32> for f32 {
         self
     }
 }
+impl CstDecode<crate::api::FlutterAnnotationResolution> for i32 {
+    // Codec=Cst (C-struct based), see doc to use other codecs
+    fn cst_decode(self) -> crate::api::FlutterAnnotationResolution {
+        match self {
+            0 => crate::api::FlutterAnnotationResolution::Exact,
+            1 => crate::api::FlutterAnnotationResolution::Recovered,
+            2 => crate::api::FlutterAnnotationResolution::Ambiguous,
+            3 => crate::api::FlutterAnnotationResolution::Orphaned,
+            _ => unreachable!("Invalid variant for FlutterAnnotationResolution: {}", self),
+        }
+    }
+}
 impl CstDecode<crate::api::FlutterBookFormat> for i32 {
     // Codec=Cst (C-struct based), see doc to use other codecs
     fn cst_decode(self) -> crate::api::FlutterBookFormat {
@@ -921,6 +939,8 @@ impl SseDecode for crate::api::FlutterAnnotation {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_id = <String>::sse_decode(deserializer);
         let mut var_unit = <usize>::sse_decode(deserializer);
+        let mut var_resolution =
+            <crate::api::FlutterAnnotationResolution>::sse_decode(deserializer);
         let mut var_textRange =
             <Option<crate::api::FlutterAnnotationTextRange>>::sse_decode(deserializer);
         let mut var_quote = <Option<String>>::sse_decode(deserializer);
@@ -931,11 +951,26 @@ impl SseDecode for crate::api::FlutterAnnotation {
         return crate::api::FlutterAnnotation {
             id: var_id,
             unit: var_unit,
+            resolution: var_resolution,
             text_range: var_textRange,
             quote: var_quote,
             rectangles: var_rectangles,
             color: var_color,
             body: var_body,
+        };
+    }
+}
+
+impl SseDecode for crate::api::FlutterAnnotationResolution {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::FlutterAnnotationResolution::Exact,
+            1 => crate::api::FlutterAnnotationResolution::Recovered,
+            2 => crate::api::FlutterAnnotationResolution::Ambiguous,
+            3 => crate::api::FlutterAnnotationResolution::Orphaned,
+            _ => unreachable!("Invalid variant for FlutterAnnotationResolution: {}", inner),
         };
     }
 }
@@ -1424,6 +1459,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::FlutterAnnotation {
         [
             self.id.into_into_dart().into_dart(),
             self.unit.into_into_dart().into_dart(),
+            self.resolution.into_into_dart().into_dart(),
             self.text_range.into_into_dart().into_dart(),
             self.quote.into_into_dart().into_dart(),
             self.rectangles.into_into_dart().into_dart(),
@@ -1438,6 +1474,29 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::FlutterAnnotation>
     for crate::api::FlutterAnnotation
 {
     fn into_into_dart(self) -> crate::api::FlutterAnnotation {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::FlutterAnnotationResolution {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Exact => 0.into_dart(),
+            Self::Recovered => 1.into_dart(),
+            Self::Ambiguous => 2.into_dart(),
+            Self::Orphaned => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::FlutterAnnotationResolution
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::FlutterAnnotationResolution>
+    for crate::api::FlutterAnnotationResolution
+{
+    fn into_into_dart(self) -> crate::api::FlutterAnnotationResolution {
         self
     }
 }
@@ -1848,11 +1907,30 @@ impl SseEncode for crate::api::FlutterAnnotation {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.id, serializer);
         <usize>::sse_encode(self.unit, serializer);
+        <crate::api::FlutterAnnotationResolution>::sse_encode(self.resolution, serializer);
         <Option<crate::api::FlutterAnnotationTextRange>>::sse_encode(self.text_range, serializer);
         <Option<String>>::sse_encode(self.quote, serializer);
         <Option<Vec<crate::api::FlutterSelectionRect>>>::sse_encode(self.rectangles, serializer);
         <crate::api::FlutterHighlightColor>::sse_encode(self.color, serializer);
         <Option<String>>::sse_encode(self.body, serializer);
+    }
+}
+
+impl SseEncode for crate::api::FlutterAnnotationResolution {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::FlutterAnnotationResolution::Exact => 0,
+                crate::api::FlutterAnnotationResolution::Recovered => 1,
+                crate::api::FlutterAnnotationResolution::Ambiguous => 2,
+                crate::api::FlutterAnnotationResolution::Orphaned => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 
@@ -2313,6 +2391,7 @@ mod io {
             crate::api::FlutterAnnotation {
                 id: self.id.cst_decode(),
                 unit: self.unit.cst_decode(),
+                resolution: self.resolution.cst_decode(),
                 text_range: self.text_range.cst_decode(),
                 quote: self.quote.cst_decode(),
                 rectangles: self.rectangles.cst_decode(),
@@ -2540,6 +2619,7 @@ mod io {
             Self {
                 id: core::ptr::null_mut(),
                 unit: Default::default(),
+                resolution: Default::default(),
                 text_range: core::ptr::null_mut(),
                 quote: core::ptr::null_mut(),
                 rectangles: core::ptr::null_mut(),
@@ -2760,6 +2840,7 @@ mod io {
         unit: usize,
         start: usize,
         end: usize,
+        display_scale: f32,
         color: i32,
         body: *mut wire_cst_list_prim_u_8_strict,
         cancellation_id: u64,
@@ -2771,6 +2852,7 @@ mod io {
             unit,
             start,
             end,
+            display_scale,
             color,
             body,
             cancellation_id,
@@ -2804,12 +2886,14 @@ mod io {
         port_: i64,
         that: usize,
         document: *mut wire_cst_flutter_document_handle,
+        scale: f32,
         cancellation_id: u64,
     ) {
         wire__crate__api__FlutterBridge_list_annotations_impl(
             port_,
             that,
             document,
+            scale,
             cancellation_id,
         )
     }
@@ -3108,6 +3192,7 @@ mod io {
     pub struct wire_cst_flutter_annotation {
         id: *mut wire_cst_list_prim_u_8_strict,
         unit: usize,
+        resolution: i32,
         text_range: *mut wire_cst_flutter_annotation_text_range,
         quote: *mut wire_cst_list_prim_u_8_strict,
         rectangles: *mut wire_cst_list_flutter_selection_rect,
