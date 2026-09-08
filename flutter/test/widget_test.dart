@@ -1948,6 +1948,27 @@ void main() {
     await bridge.disposed.future;
   });
 
+  test('replacement open keeps the latest pending layout', () async {
+    final bridge = _ControlledBridge(immediateLists: true);
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/book.epub');
+    final pendingLayout = Completer<FlutterSelectionSurface>();
+    bridge.selectionCompleters.add(pendingLayout);
+    const desired = ReaderLayout(scale: 2, width: 300, fontSize: 20);
+    controller.dispatch(const ReaderLayoutChanged(desired));
+    await _waitUntil(() => controller.model.relayoutBusy);
+
+    controller.dispatch(const ReaderOpenRequested('/tmp/replacement.epub'));
+    await _waitUntil(() => bridge.selectionCalls == 3);
+
+    expect(controller.model.layout, desired);
+    expect(bridge.selectionLayouts.last, desired);
+    pendingLayout.complete(_surface(BigInt.from(20), raster: true));
+    await bridge.waitForOp(3);
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
   test('queued CBZ layout changes do not start EPUB selection work', () async {
     final bridge = _ControlledBridge(
       format: FlutterBookFormat.cbz,
@@ -2514,6 +2535,47 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await bridge.disposed.future;
   });
+
+  testWidgets(
+    'returning to the displayed viewport during an annotation write skips relayout',
+    (tester) async {
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final bridge = _ControlledBridge(
+        initialAnnotations: [_annotation('one')],
+        immediateLists: true,
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ReaderScreen(
+            bridge: bridge,
+            decoder: (pixels, {required width, required height}) =>
+                _testImage(),
+          ),
+        ),
+      );
+      await tester.enterText(find.byType(TextField), '/tmp/a.epub');
+      await tester.tap(find.text('Open document'));
+      await tester.pumpAndSettle();
+      final displayedScale = tester.view.devicePixelRatio;
+      final selectionCalls = bridge.selectionCalls;
+      bridge.updateCompleter = Completer<bool>();
+      await tester.tap(find.byTooltip('Change color'));
+      await tester.pump();
+
+      tester.view.devicePixelRatio = displayedScale == 2 ? 3 : 2;
+      await tester.pump();
+      await tester.pump();
+      tester.view.devicePixelRatio = displayedScale;
+      await tester.pump();
+      await tester.pump();
+      bridge.updateCompleter!.complete(true);
+      await tester.pumpAndSettle();
+
+      expect(bridge.selectionCalls, selectionCalls);
+      await tester.pumpWidget(const SizedBox());
+      await bridge.disposed.future;
+    },
+  );
 
   for (final failure in ['selection', 'annotations']) {
     testWidgets('PDF $failure failure keeps the decoded page visible', (
