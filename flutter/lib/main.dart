@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -17,15 +18,26 @@ export 'package:shosai_flutter/reader_controller.dart'
         ReaderAnnotationNavigated,
         ReaderAnnotationNoteRequested,
         ReaderAnnotationUpdated,
+        ReaderFocusTarget,
         ReaderMessage,
         ReaderModel,
         ReaderOpenRequested,
         ReaderSelection,
+        ReaderSelectionActionsRequested,
         ReaderSelectionCancelled,
         ReaderSelectionCommitted,
+        ReaderSelectionCopyRequested,
         ReaderSelectionEnded,
         ReaderSelectionExtended,
+        ReaderSelectionKeyboardExtended,
+        ReaderSelectionMovement,
+        ReaderSelectionNoteRequested,
         ReaderSelectionPhase,
+        ReaderSelectionPointerCancelled,
+        ReaderSelectionPointerEnded,
+        ReaderSelectionPointerMoved,
+        ReaderSelectionPointerPressedOutside,
+        ReaderSelectionPointerStarted,
         ReaderContentState,
         ReaderSelectionStarted,
         premultiplyRgba;
@@ -89,6 +101,8 @@ class ReaderScreen extends StatefulWidget {
 
 class _ReaderScreenState extends State<ReaderScreen> {
   final TextEditingController _path = TextEditingController();
+  final FocusNode _readerFocus = FocusNode(debugLabel: 'reader surface');
+  final FocusNode _actionFocus = FocusNode(debugLabel: 'selection actions');
   late final ReaderController _controller;
 
   @override
@@ -102,6 +116,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
         context: context,
         builder: (context) => _NoteDialog(initialValue: initialValue),
       ),
+      focusAdapter: (target) => switch (target) {
+        ReaderFocusTarget.surface => _readerFocus.requestFocus(),
+        ReaderFocusTarget.actions => _actionFocus.requestFocus(),
+      },
+      selectionCopier: (text) => Clipboard.setData(ClipboardData(text: text)),
     )..addListener(_modelChanged);
   }
 
@@ -112,6 +131,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _controller.removeListener(_modelChanged);
     _controller.dispose();
     _path.dispose();
+    _readerFocus.dispose();
+    _actionFocus.dispose();
     super.dispose();
   }
 
@@ -165,9 +186,26 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 ),
               ],
               if (model.selectionError != null && model.document != null)
-                Text('Selection unavailable: ${model.selectionError}'),
+                Semantics(
+                  liveRegion: true,
+                  child: Text('Selection unavailable: ${model.selectionError}'),
+                ),
+              if (model.selectionActionError != null && model.document != null)
+                Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    'Selection action failed: ${model.selectionActionError}',
+                  ),
+                ),
               if (model.annotationError != null && model.document != null)
-                Text('Highlights unavailable: ${model.annotationError}'),
+                Semantics(
+                  liveRegion: true,
+                  child: Text(
+                    model.annotationsReady
+                        ? 'Highlight action failed: ${model.annotationError}'
+                        : 'Highlights unavailable: ${model.annotationError}',
+                  ),
+                ),
               const SizedBox(height: 20),
               Expanded(
                 child: document == null
@@ -177,6 +215,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         image: model.pageImage,
                         model: model,
                         dispatch: _controller.dispatch,
+                        readerFocus: _readerFocus,
+                        actionFocus: _actionFocus,
                       ),
               ),
             ],
@@ -207,12 +247,16 @@ class _DocumentView extends StatelessWidget {
     required this.image,
     required this.model,
     required this.dispatch,
+    required this.readerFocus,
+    required this.actionFocus,
   });
 
   final FlutterDocumentSummary document;
   final ui.Image? image;
   final ReaderModel model;
   final void Function(ReaderMessage) dispatch;
+  final FocusNode readerFocus;
+  final FocusNode actionFocus;
 
   @override
   Widget build(BuildContext context) {
@@ -238,117 +282,394 @@ class _DocumentView extends StatelessWidget {
       label: document.format == FlutterBookFormat.epub
           ? '$title, EPUB chapter 1 of ${document.logicalUnitCount}. Selectable text.'
           : '$title, page 1 of ${document.logicalUnitCount}. Selectable text.',
-      child: Column(
-        children: [
-          Expanded(
-            child: CallbackShortcuts(
-              bindings: {
-                const SingleActivator(LogicalKeyboardKey.escape): () =>
-                    dispatch(const ReaderSelectionCancelled()),
-                const SingleActivator(LogicalKeyboardKey.enter): () =>
-                    dispatch(const ReaderSelectionCommitted()),
-              },
-              child: Focus(
-                autofocus: true,
-                child: _SelectableSurface(
-                  surface: surface,
-                  image: page,
-                  model: model,
-                  dispatch: dispatch,
+      child: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.escape): () =>
+              dispatch(const ReaderSelectionCancelled()),
+          const SingleActivator(LogicalKeyboardKey.keyC, control: true): () =>
+              dispatch(const ReaderSelectionCopyRequested()),
+          const SingleActivator(LogicalKeyboardKey.keyC, meta: true): () =>
+              dispatch(const ReaderSelectionCopyRequested()),
+        },
+        child: Column(
+          children: [
+            Expanded(
+              child: TapRegion(
+                onTapOutside: (event) => dispatch(
+                  ReaderSelectionPointerPressedOutside(event.pointer),
                 ),
-              ),
-            ),
-          ),
-          if (model.selectionPhase == ReaderSelectionPhase.selected)
-            Semantics(
-              label: 'Selection actions',
-              child: Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Wrap(
-                  spacing: 8,
-                  children: [
-                    FilledButton.icon(
-                      onPressed:
-                          model.busy ||
-                              !model.annotationsReady ||
-                              model.annotationOperations.isNotEmpty
-                          ? null
-                          : () => dispatch(const ReaderSelectionCommitted()),
-                      icon: const Icon(Icons.highlight),
-                      label: const Text('Save highlight'),
-                    ),
-                    TextButton(
-                      onPressed: () =>
-                          dispatch(const ReaderSelectionCancelled()),
-                      child: const Text('Cancel'),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          if (model.annotations.isNotEmpty)
-            SizedBox(
-              height: 64,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                children: model.annotations
-                    .map(
-                      (annotation) => Card(
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            TextButton(
-                              onPressed: () => dispatch(
-                                ReaderAnnotationNavigated(annotation.id),
-                              ),
-                              child: Text(
-                                'Highlight ${annotation.unit.toInt() + 1}',
+                child: LayoutBuilder(
+                  builder: (context, constraints) => Stack(
+                    children: [
+                      Positioned.fill(
+                        child: CallbackShortcuts(
+                          bindings: {
+                            const SingleActivator(
+                              LogicalKeyboardKey.escape,
+                            ): () =>
+                                dispatch(const ReaderSelectionCancelled()),
+                            const SingleActivator(
+                              LogicalKeyboardKey.enter,
+                            ): () =>
+                                dispatch(const ReaderSelectionCommitted()),
+                            const SingleActivator(
+                              LogicalKeyboardKey.arrowLeft,
+                              shift: true,
+                            ): () => dispatch(
+                              const ReaderSelectionKeyboardExtended(
+                                ReaderSelectionMovement.visualLeft,
                               ),
                             ),
-                            IconButton(
-                              tooltip: 'Change color',
-                              onPressed: model.annotationOperations.isNotEmpty
-                                  ? null
-                                  : () => dispatch(
-                                      ReaderAnnotationUpdated(
-                                        annotation.id,
-                                        _nextColor(annotation.color),
-                                        annotation.body,
-                                      ),
-                                    ),
-                              icon: const Icon(Icons.palette_outlined),
+                            const SingleActivator(
+                              LogicalKeyboardKey.arrowRight,
+                              shift: true,
+                            ): () => dispatch(
+                              const ReaderSelectionKeyboardExtended(
+                                ReaderSelectionMovement.visualRight,
+                              ),
                             ),
-                            IconButton(
-                              tooltip: 'Edit note',
-                              onPressed: model.annotationOperations.isNotEmpty
-                                  ? null
-                                  : () => dispatch(
-                                      ReaderAnnotationNoteRequested(
-                                        annotation.id,
-                                      ),
-                                    ),
-                              icon: const Icon(Icons.note_alt_outlined),
+                            const SingleActivator(
+                              LogicalKeyboardKey.arrowLeft,
+                              shift: true,
+                              control: true,
+                            ): () => dispatch(
+                              const ReaderSelectionKeyboardExtended(
+                                ReaderSelectionMovement.previousWord,
+                              ),
                             ),
-                            IconButton(
-                              tooltip: 'Delete highlight',
-                              onPressed: model.annotationOperations.isNotEmpty
-                                  ? null
-                                  : () => dispatch(
-                                      ReaderAnnotationDeleted(annotation.id),
-                                    ),
-                              icon: const Icon(Icons.delete_outline),
+                            const SingleActivator(
+                              LogicalKeyboardKey.arrowRight,
+                              shift: true,
+                              control: true,
+                            ): () => dispatch(
+                              const ReaderSelectionKeyboardExtended(
+                                ReaderSelectionMovement.nextWord,
+                              ),
                             ),
-                          ],
+                            const SingleActivator(
+                              LogicalKeyboardKey.arrowLeft,
+                              shift: true,
+                              alt: true,
+                            ): () => dispatch(
+                              const ReaderSelectionKeyboardExtended(
+                                ReaderSelectionMovement.previousWord,
+                              ),
+                            ),
+                            const SingleActivator(
+                              LogicalKeyboardKey.arrowRight,
+                              shift: true,
+                              alt: true,
+                            ): () => dispatch(
+                              const ReaderSelectionKeyboardExtended(
+                                ReaderSelectionMovement.nextWord,
+                              ),
+                            ),
+                            const SingleActivator(
+                              LogicalKeyboardKey.arrowUp,
+                              shift: true,
+                            ): () => dispatch(
+                              const ReaderSelectionKeyboardExtended(
+                                ReaderSelectionMovement.previousLine,
+                              ),
+                            ),
+                            const SingleActivator(
+                              LogicalKeyboardKey.arrowDown,
+                              shift: true,
+                            ): () => dispatch(
+                              const ReaderSelectionKeyboardExtended(
+                                ReaderSelectionMovement.nextLine,
+                              ),
+                            ),
+                            const SingleActivator(
+                              LogicalKeyboardKey.home,
+                              shift: true,
+                            ): () => dispatch(
+                              const ReaderSelectionKeyboardExtended(
+                                ReaderSelectionMovement.lineStart,
+                              ),
+                            ),
+                            const SingleActivator(
+                              LogicalKeyboardKey.end,
+                              shift: true,
+                            ): () => dispatch(
+                              const ReaderSelectionKeyboardExtended(
+                                ReaderSelectionMovement.lineEnd,
+                              ),
+                            ),
+                            const SingleActivator(
+                              LogicalKeyboardKey.arrowLeft,
+                              shift: true,
+                              meta: true,
+                            ): () => dispatch(
+                              const ReaderSelectionKeyboardExtended(
+                                ReaderSelectionMovement.lineStart,
+                              ),
+                            ),
+                            const SingleActivator(
+                              LogicalKeyboardKey.arrowRight,
+                              shift: true,
+                              meta: true,
+                            ): () => dispatch(
+                              const ReaderSelectionKeyboardExtended(
+                                ReaderSelectionMovement.lineEnd,
+                              ),
+                            ),
+                            const SingleActivator(
+                              LogicalKeyboardKey.contextMenu,
+                            ): () => dispatch(
+                              const ReaderSelectionActionsRequested(),
+                            ),
+                            const SingleActivator(
+                              LogicalKeyboardKey.f10,
+                              shift: true,
+                            ): () => dispatch(
+                              const ReaderSelectionActionsRequested(),
+                            ),
+                          },
+                          child: Focus(
+                            key: const ValueKey('reader-selection-focus'),
+                            focusNode: readerFocus,
+                            autofocus: true,
+                            child: _SelectableSurface(
+                              surface: surface,
+                              image: page,
+                              model: model,
+                              dispatch: dispatch,
+                            ),
+                          ),
                         ),
                       ),
-                    )
-                    .toList(),
+                      if (model.selectionPhase == ReaderSelectionPhase.selected)
+                        Positioned.fill(
+                          child: CustomSingleChildLayout(
+                            delegate: _SelectionActionsLayout(
+                              target: _selectionActionTarget(
+                                surface,
+                                model,
+                                constraints.biggest,
+                              ),
+                            ),
+                            child: _SelectionActions(
+                              model: model,
+                              dispatch: dispatch,
+                              focusNode: actionFocus,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
               ),
             ),
-        ],
+            if (model.annotations.isNotEmpty)
+              SizedBox(
+                height: 64,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  children: model.annotations
+                      .map(
+                        (annotation) => Card(
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              TextButton(
+                                onPressed: () => dispatch(
+                                  ReaderAnnotationNavigated(annotation.id),
+                                ),
+                                child: Text(
+                                  'Highlight ${annotation.unit.toInt() + 1}',
+                                ),
+                              ),
+                              IconButton(
+                                tooltip: 'Change color',
+                                onPressed: model.annotationOperations.isNotEmpty
+                                    ? null
+                                    : () => dispatch(
+                                        ReaderAnnotationUpdated(
+                                          annotation.id,
+                                          _nextColor(annotation.color),
+                                          annotation.body,
+                                        ),
+                                      ),
+                                icon: const Icon(Icons.palette_outlined),
+                              ),
+                              IconButton(
+                                tooltip: 'Edit note',
+                                onPressed: model.annotationOperations.isNotEmpty
+                                    ? null
+                                    : () => dispatch(
+                                        ReaderAnnotationNoteRequested(
+                                          annotation.id,
+                                        ),
+                                      ),
+                                icon: const Icon(Icons.note_alt_outlined),
+                              ),
+                              IconButton(
+                                tooltip: 'Delete highlight',
+                                onPressed: model.annotationOperations.isNotEmpty
+                                    ? null
+                                    : () => dispatch(
+                                        ReaderAnnotationDeleted(annotation.id),
+                                      ),
+                                icon: const Icon(Icons.delete_outline),
+                              ),
+                            ],
+                          ),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
+}
+
+class _SelectionActions extends StatelessWidget {
+  const _SelectionActions({
+    required this.model,
+    required this.dispatch,
+    required this.focusNode,
+  });
+
+  final ReaderModel model;
+  final void Function(ReaderMessage) dispatch;
+  final FocusNode focusNode;
+
+  @override
+  Widget build(BuildContext context) {
+    final copyEnabled = model.selectedText != null;
+    final persistenceEnabled =
+        !model.busy &&
+        model.annotationsReady &&
+        model.annotationOperations.isEmpty;
+    return Semantics(
+      key: const ValueKey('selection-actions'),
+      label: 'Selection actions',
+      container: true,
+      child: Material(
+        elevation: 4,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.all(8),
+          child: SingleChildScrollView(
+            child: Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                TextButton(
+                  focusNode: copyEnabled ? focusNode : null,
+                  onPressed: !copyEnabled
+                      ? null
+                      : () => dispatch(const ReaderSelectionCopyRequested()),
+                  child: const Text('Copy'),
+                ),
+                for (final color in FlutterHighlightColor.values)
+                  FilledButton(
+                    focusNode:
+                        !copyEnabled &&
+                            persistenceEnabled &&
+                            color == FlutterHighlightColor.yellow
+                        ? focusNode
+                        : null,
+                    onPressed: !persistenceEnabled
+                        ? null
+                        : () =>
+                              dispatch(ReaderSelectionCommitted(color: color)),
+                    child: Text(_colorName(color)),
+                  ),
+                TextButton(
+                  onPressed: !persistenceEnabled
+                      ? null
+                      : () => dispatch(const ReaderSelectionNoteRequested()),
+                  child: const Text('Add note'),
+                ),
+                TextButton(
+                  focusNode: !copyEnabled && !persistenceEnabled
+                      ? focusNode
+                      : null,
+                  onPressed: () => dispatch(const ReaderSelectionCancelled()),
+                  child: const Text('Cancel'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+Rect _selectionActionTarget(
+  FlutterSelectionSurface surface,
+  ReaderModel model,
+  Size viewport,
+) {
+  final first = model.anchor!;
+  final second = model.focus!;
+  final start = first < second ? first : second;
+  final end = first < second ? second : first;
+  Rect? selected;
+  for (final endpoint in surface.endpoints) {
+    final rangeStart = endpoint.rangeStart.toInt();
+    final rangeEnd = endpoint.rangeEnd.toInt();
+    final focusedOffset = second == end ? end - 1 : start;
+    final include = model.keyboardActionInvocation
+        ? rangeStart <= focusedOffset && focusedOffset < rangeEnd
+        : rangeStart < end && start < rangeEnd;
+    if (!include) {
+      continue;
+    }
+    final rect = endpoint.rect;
+    final area = Rect.fromLTRB(rect.left, rect.top, rect.right, rect.bottom);
+    selected = selected?.expandToInclude(area) ?? area;
+  }
+  if (selected == null) return Offset.zero & Size.zero;
+  final fitted = applyBoxFit(
+    BoxFit.contain,
+    Size(surface.width, surface.height),
+    viewport,
+  ).destination;
+  final destination = Alignment.center.inscribe(fitted, Offset.zero & viewport);
+  final scale = fitted.width / surface.width;
+  return Rect.fromLTRB(
+    destination.left + selected.left * scale,
+    destination.top + selected.top * scale,
+    destination.left + selected.right * scale,
+    destination.top + selected.bottom * scale,
+  );
+}
+
+class _SelectionActionsLayout extends SingleChildLayoutDelegate {
+  const _SelectionActionsLayout({required this.target});
+
+  static const _gap = 8.0;
+  final Rect target;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
+      BoxConstraints(
+        maxWidth: math.max(0, constraints.maxWidth - _gap * 2),
+        maxHeight: math.max(0, constraints.maxHeight - _gap * 2),
+      );
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    final maxLeft = math.max(_gap, size.width - childSize.width - _gap);
+    final left = (target.center.dx - childSize.width / 2).clamp(_gap, maxLeft);
+    final above = target.top - childSize.height - _gap;
+    final below = target.bottom + _gap;
+    final maxTop = math.max(_gap, size.height - childSize.height - _gap);
+    final top = above >= _gap ? above : below.clamp(_gap, maxTop);
+    return Offset(left, top);
+  }
+
+  @override
+  bool shouldRelayout(_SelectionActionsLayout oldDelegate) =>
+      target != oldDelegate.target;
 }
 
 class _NoteDialog extends StatefulWidget {
@@ -394,6 +715,14 @@ FlutterHighlightColor _nextColor(FlutterHighlightColor color) =>
       FlutterHighlightColor.purple => FlutterHighlightColor.yellow,
     };
 
+String _colorName(FlutterHighlightColor color) => switch (color) {
+  FlutterHighlightColor.yellow => 'Yellow',
+  FlutterHighlightColor.green => 'Green',
+  FlutterHighlightColor.blue => 'Blue',
+  FlutterHighlightColor.pink => 'Pink',
+  FlutterHighlightColor.purple => 'Purple',
+};
+
 class _SelectableSurface extends StatelessWidget {
   const _SelectableSurface({
     required this.surface,
@@ -420,16 +749,20 @@ class _SelectableSurface extends StatelessWidget {
           fitted,
           Offset.zero & constraints.biggest,
         );
-        int? endpoint(Offset position) {
-          if (!destination.contains(position)) return null;
-          final source = Offset(
-            (position.dx - destination.left) *
-                surface.width /
-                destination.width,
-            (position.dy - destination.top) *
-                surface.height /
-                destination.height,
-          );
+        Offset sourcePosition(Offset position) => Offset(
+          ((position.dx - destination.left) * surface.width / destination.width)
+              .clamp(0, surface.width),
+          ((position.dy - destination.top) *
+                  surface.height /
+                  destination.height)
+              .clamp(0, surface.height),
+        );
+        FlutterSelectionEndpoint? endpoint(
+          Offset position, {
+          bool nearest = false,
+        }) {
+          if (!nearest && !destination.contains(position)) return null;
+          final source = sourcePosition(position);
           for (final endpoint in surface.endpoints) {
             final rect = endpoint.rect;
             if (Rect.fromLTRB(
@@ -438,24 +771,68 @@ class _SelectableSurface extends StatelessWidget {
               rect.right,
               rect.bottom,
             ).contains(source)) {
-              return endpoint.offset.toInt();
+              return endpoint;
             }
           }
-          return null;
+          if (!nearest || surface.endpoints.isEmpty) return null;
+          FlutterSelectionEndpoint? closest;
+          double? distance;
+          for (final endpoint in surface.endpoints) {
+            final rect = endpoint.rect;
+            final dx = source.dx.clamp(rect.left, rect.right) - source.dx;
+            final dy = source.dy.clamp(rect.top, rect.bottom) - source.dy;
+            final candidate = dx * dx + dy * dy;
+            if (distance == null || candidate < distance) {
+              closest = endpoint;
+              distance = candidate;
+            }
+          }
+          return closest;
         }
 
-        return GestureDetector(
+        return Listener(
           key: const ValueKey('reader-selection-surface'),
           behavior: HitTestBehavior.opaque,
-          onPanStart: (details) {
-            final value = endpoint(details.localPosition);
-            if (value != null) dispatch(ReaderSelectionStarted(value));
+          onPointerDown: (event) {
+            final primary =
+                event.kind != ui.PointerDeviceKind.mouse ||
+                (event.buttons & 1) != 0;
+            if (!primary) return;
+            final value = endpoint(event.localPosition);
+            if (value == null) {
+              dispatch(ReaderSelectionPointerPressedOutside(event.pointer));
+            } else {
+              final source = sourcePosition(event.localPosition);
+              dispatch(
+                ReaderSelectionPointerStarted(
+                  event.pointer,
+                  value.offset.toInt(),
+                  rangeStart: value.rangeStart.toInt(),
+                  rangeEnd: value.rangeEnd.toInt(),
+                  x: source.dx,
+                  y: source.dy,
+                ),
+              );
+            }
           },
-          onPanUpdate: (details) {
-            final value = endpoint(details.localPosition);
-            if (value != null) dispatch(ReaderSelectionExtended(value));
+          onPointerMove: (event) {
+            final value = endpoint(event.localPosition, nearest: true);
+            if (value != null) {
+              final source = sourcePosition(event.localPosition);
+              dispatch(
+                ReaderSelectionPointerMoved(
+                  event.pointer,
+                  value.offset.toInt(),
+                  x: source.dx,
+                  y: source.dy,
+                ),
+              );
+            }
           },
-          onPanEnd: (_) => dispatch(const ReaderSelectionEnded()),
+          onPointerUp: (event) =>
+              dispatch(ReaderSelectionPointerEnded(event.pointer)),
+          onPointerCancel: (event) =>
+              dispatch(ReaderSelectionPointerCancelled(event.pointer)),
           child: RepaintBoundary(
             key: const ValueKey('reader-page-paint'),
             child: CustomPaint(
@@ -472,6 +849,7 @@ class _SelectableSurface extends StatelessWidget {
                 anchor: model.anchor,
                 focus: model.focus,
                 savedSelections: model.savedSelections,
+                annotations: model.annotations,
               ),
               child: const SizedBox.expand(),
             ),
@@ -492,6 +870,7 @@ class PagePainter extends CustomPainter {
     required this.anchor,
     required this.focus,
     required this.savedSelections,
+    required this.annotations,
   });
 
   final ui.Image? image;
@@ -502,6 +881,7 @@ class PagePainter extends CustomPainter {
   final int? anchor;
   final int? focus;
   final List<ReaderSelection> savedSelections;
+  final List<FlutterAnnotation> annotations;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -540,6 +920,16 @@ class PagePainter extends CustomPainter {
         true,
       );
     }
+    for (final annotation in annotations) {
+      if (annotation.unit != BigInt.zero || annotation.textRange != null) {
+        continue;
+      }
+      _paintRectangles(
+        canvas,
+        annotation.rectangles ?? const [],
+        _highlightColor(annotation.color),
+      );
+    }
     if (anchor != null && focus != null) {
       _paintRange(
         canvas,
@@ -571,6 +961,25 @@ class PagePainter extends CustomPainter {
     }
   }
 
+  void _paintRectangles(
+    Canvas canvas,
+    List<FlutterSelectionRect> rectangles,
+    Color color,
+  ) {
+    final fill = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
+    final border = Paint()
+      ..color = color.withAlpha(220)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    for (final rect in rectangles) {
+      final area = Rect.fromLTRB(rect.left, rect.top, rect.right, rect.bottom);
+      canvas.drawRect(area, fill);
+      canvas.drawLine(area.bottomLeft, area.bottomRight, border);
+    }
+  }
+
   @override
   bool shouldRepaint(PagePainter oldDelegate) =>
       oldDelegate.image != image ||
@@ -579,7 +988,8 @@ class PagePainter extends CustomPainter {
       oldDelegate.recolorImage != recolorImage ||
       oldDelegate.anchor != anchor ||
       oldDelegate.focus != focus ||
-      oldDelegate.savedSelections != savedSelections;
+      oldDelegate.savedSelections != savedSelections ||
+      oldDelegate.annotations != annotations;
 }
 
 ({Color background, Color foreground}) pageColors(ColorScheme scheme) =>

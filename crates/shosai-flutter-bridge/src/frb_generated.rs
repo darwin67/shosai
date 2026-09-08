@@ -263,6 +263,7 @@ fn wire__crate__api__FlutterBridge_list_annotations_impl(
         RustOpaqueNom<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FlutterBridge>>,
     >,
     document: impl CstDecode<crate::api::FlutterDocumentHandle>,
+    cancellation_id: impl CstDecode<u64>,
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::DcoCodec, _, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
@@ -273,6 +274,7 @@ fn wire__crate__api__FlutterBridge_list_annotations_impl(
         move || {
             let api_that = that.cst_decode();
             let api_document = document.cst_decode();
+            let api_cancellation_id = cancellation_id.cst_decode();
             move |context| async move {
                 transform_result_dco::<_, _, crate::api::FlutterBridgeError>(
                     (move || async move {
@@ -296,6 +298,7 @@ fn wire__crate__api__FlutterBridge_list_annotations_impl(
                         let output_ok = crate::api::FlutterBridge::list_annotations(
                             &*api_that_guard,
                             api_document,
+                            api_cancellation_id,
                         )
                         .await?;
                         Ok(output_ok)
@@ -918,17 +921,33 @@ impl SseDecode for crate::api::FlutterAnnotation {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_id = <String>::sse_decode(deserializer);
         let mut var_unit = <usize>::sse_decode(deserializer);
-        let mut var_start = <usize>::sse_decode(deserializer);
-        let mut var_end = <usize>::sse_decode(deserializer);
+        let mut var_textRange =
+            <Option<crate::api::FlutterAnnotationTextRange>>::sse_decode(deserializer);
+        let mut var_quote = <Option<String>>::sse_decode(deserializer);
+        let mut var_rectangles =
+            <Option<Vec<crate::api::FlutterSelectionRect>>>::sse_decode(deserializer);
         let mut var_color = <crate::api::FlutterHighlightColor>::sse_decode(deserializer);
         let mut var_body = <Option<String>>::sse_decode(deserializer);
         return crate::api::FlutterAnnotation {
             id: var_id,
             unit: var_unit,
-            start: var_start,
-            end: var_end,
+            text_range: var_textRange,
+            quote: var_quote,
+            rectangles: var_rectangles,
             color: var_color,
             body: var_body,
+        };
+    }
+}
+
+impl SseDecode for crate::api::FlutterAnnotationTextRange {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_start = <usize>::sse_decode(deserializer);
+        let mut var_end = <usize>::sse_decode(deserializer);
+        return crate::api::FlutterAnnotationTextRange {
+            start: var_start,
+            end: var_end,
         };
     }
 }
@@ -1062,6 +1081,26 @@ impl SseDecode for crate::api::FlutterRenderedBuffer {
     }
 }
 
+impl SseDecode for crate::api::FlutterSelectionCaret {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_offset = <usize>::sse_decode(deserializer);
+        let mut var_x = <f32>::sse_decode(deserializer);
+        let mut var_alongLine = <f32>::sse_decode(deserializer);
+        let mut var_vertical = <bool>::sse_decode(deserializer);
+        let mut var_top = <f32>::sse_decode(deserializer);
+        let mut var_bottom = <f32>::sse_decode(deserializer);
+        return crate::api::FlutterSelectionCaret {
+            offset: var_offset,
+            x: var_x,
+            along_line: var_alongLine,
+            vertical: var_vertical,
+            top: var_top,
+            bottom: var_bottom,
+        };
+    }
+}
+
 impl SseDecode for crate::api::FlutterSelectionEndpoint {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1113,19 +1152,36 @@ impl SseDecode for crate::api::FlutterSelectionSurface {
         let mut var_width = <f32>::sse_decode(deserializer);
         let mut var_height = <f32>::sse_decode(deserializer);
         let mut var_text = <String>::sse_decode(deserializer);
+        let mut var_copyEligible = <bool>::sse_decode(deserializer);
         let mut var_resourcePath = <Option<String>>::sse_decode(deserializer);
         let mut var_raster = <Option<crate::api::FlutterRenderedBuffer>>::sse_decode(deserializer);
         let mut var_endpoints =
             <Vec<crate::api::FlutterSelectionEndpoint>>::sse_decode(deserializer);
+        let mut var_graphemeBoundaries = <Vec<u32>>::sse_decode(deserializer);
+        let mut var_wordBoundaries = <Vec<u32>>::sse_decode(deserializer);
+        let mut var_visualLines =
+            <Vec<crate::api::FlutterSelectionVisualLine>>::sse_decode(deserializer);
         return crate::api::FlutterSelectionSurface {
             handle: var_handle,
             width: var_width,
             height: var_height,
             text: var_text,
+            copy_eligible: var_copyEligible,
             resource_path: var_resourcePath,
             raster: var_raster,
             endpoints: var_endpoints,
+            grapheme_boundaries: var_graphemeBoundaries,
+            word_boundaries: var_wordBoundaries,
+            visual_lines: var_visualLines,
         };
+    }
+}
+
+impl SseDecode for crate::api::FlutterSelectionVisualLine {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_carets = <Vec<crate::api::FlutterSelectionCaret>>::sse_decode(deserializer);
+        return crate::api::FlutterSelectionVisualLine { carets: var_carets };
     }
 }
 
@@ -1148,6 +1204,20 @@ impl SseDecode for Vec<crate::api::FlutterAnnotation> {
     }
 }
 
+impl SseDecode for Vec<crate::api::FlutterSelectionCaret> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::FlutterSelectionCaret>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::FlutterSelectionEndpoint> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1157,6 +1227,44 @@ impl SseDecode for Vec<crate::api::FlutterSelectionEndpoint> {
             ans_.push(<crate::api::FlutterSelectionEndpoint>::sse_decode(
                 deserializer,
             ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::FlutterSelectionRect> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::FlutterSelectionRect>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::FlutterSelectionVisualLine> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::FlutterSelectionVisualLine>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<u32>::sse_decode(deserializer));
         }
         return ans_;
     }
@@ -1185,6 +1293,19 @@ impl SseDecode for Option<String> {
     }
 }
 
+impl SseDecode for Option<crate::api::FlutterAnnotationTextRange> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::FlutterAnnotationTextRange>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<crate::api::FlutterBookFormat> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1201,6 +1322,19 @@ impl SseDecode for Option<crate::api::FlutterRenderedBuffer> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::FlutterRenderedBuffer>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<Vec<crate::api::FlutterSelectionRect>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<Vec<crate::api::FlutterSelectionRect>>::sse_decode(
                 deserializer,
             ));
         } else {
@@ -1290,8 +1424,9 @@ impl flutter_rust_bridge::IntoDart for crate::api::FlutterAnnotation {
         [
             self.id.into_into_dart().into_dart(),
             self.unit.into_into_dart().into_dart(),
-            self.start.into_into_dart().into_dart(),
-            self.end.into_into_dart().into_dart(),
+            self.text_range.into_into_dart().into_dart(),
+            self.quote.into_into_dart().into_dart(),
+            self.rectangles.into_into_dart().into_dart(),
             self.color.into_into_dart().into_dart(),
             self.body.into_into_dart().into_dart(),
         ]
@@ -1303,6 +1438,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::FlutterAnnotation>
     for crate::api::FlutterAnnotation
 {
     fn into_into_dart(self) -> crate::api::FlutterAnnotation {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::FlutterAnnotationTextRange {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.start.into_into_dart().into_dart(),
+            self.end.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::FlutterAnnotationTextRange
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::FlutterAnnotationTextRange>
+    for crate::api::FlutterAnnotationTextRange
+{
+    fn into_into_dart(self) -> crate::api::FlutterAnnotationTextRange {
         self
     }
 }
@@ -1509,6 +1665,31 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::FlutterRenderedBuffer>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::FlutterSelectionCaret {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.offset.into_into_dart().into_dart(),
+            self.x.into_into_dart().into_dart(),
+            self.along_line.into_into_dart().into_dart(),
+            self.vertical.into_into_dart().into_dart(),
+            self.top.into_into_dart().into_dart(),
+            self.bottom.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::FlutterSelectionCaret
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::FlutterSelectionCaret>
+    for crate::api::FlutterSelectionCaret
+{
+    fn into_into_dart(self) -> crate::api::FlutterSelectionCaret {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::FlutterSelectionEndpoint {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -1583,9 +1764,13 @@ impl flutter_rust_bridge::IntoDart for crate::api::FlutterSelectionSurface {
             self.width.into_into_dart().into_dart(),
             self.height.into_into_dart().into_dart(),
             self.text.into_into_dart().into_dart(),
+            self.copy_eligible.into_into_dart().into_dart(),
             self.resource_path.into_into_dart().into_dart(),
             self.raster.into_into_dart().into_dart(),
             self.endpoints.into_into_dart().into_dart(),
+            self.grapheme_boundaries.into_into_dart().into_dart(),
+            self.word_boundaries.into_into_dart().into_dart(),
+            self.visual_lines.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1598,6 +1783,23 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::FlutterSelectionSurface>
     for crate::api::FlutterSelectionSurface
 {
     fn into_into_dart(self) -> crate::api::FlutterSelectionSurface {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::FlutterSelectionVisualLine {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [self.carets.into_into_dart().into_dart()].into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::FlutterSelectionVisualLine
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::FlutterSelectionVisualLine>
+    for crate::api::FlutterSelectionVisualLine
+{
+    fn into_into_dart(self) -> crate::api::FlutterSelectionVisualLine {
         self
     }
 }
@@ -1646,10 +1848,19 @@ impl SseEncode for crate::api::FlutterAnnotation {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <String>::sse_encode(self.id, serializer);
         <usize>::sse_encode(self.unit, serializer);
-        <usize>::sse_encode(self.start, serializer);
-        <usize>::sse_encode(self.end, serializer);
+        <Option<crate::api::FlutterAnnotationTextRange>>::sse_encode(self.text_range, serializer);
+        <Option<String>>::sse_encode(self.quote, serializer);
+        <Option<Vec<crate::api::FlutterSelectionRect>>>::sse_encode(self.rectangles, serializer);
         <crate::api::FlutterHighlightColor>::sse_encode(self.color, serializer);
         <Option<String>>::sse_encode(self.body, serializer);
+    }
+}
+
+impl SseEncode for crate::api::FlutterAnnotationTextRange {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <usize>::sse_encode(self.start, serializer);
+        <usize>::sse_encode(self.end, serializer);
     }
 }
 
@@ -1765,6 +1976,18 @@ impl SseEncode for crate::api::FlutterRenderedBuffer {
     }
 }
 
+impl SseEncode for crate::api::FlutterSelectionCaret {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <usize>::sse_encode(self.offset, serializer);
+        <f32>::sse_encode(self.x, serializer);
+        <f32>::sse_encode(self.along_line, serializer);
+        <bool>::sse_encode(self.vertical, serializer);
+        <f32>::sse_encode(self.top, serializer);
+        <f32>::sse_encode(self.bottom, serializer);
+    }
+}
+
 impl SseEncode for crate::api::FlutterSelectionEndpoint {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1800,9 +2023,20 @@ impl SseEncode for crate::api::FlutterSelectionSurface {
         <f32>::sse_encode(self.width, serializer);
         <f32>::sse_encode(self.height, serializer);
         <String>::sse_encode(self.text, serializer);
+        <bool>::sse_encode(self.copy_eligible, serializer);
         <Option<String>>::sse_encode(self.resource_path, serializer);
         <Option<crate::api::FlutterRenderedBuffer>>::sse_encode(self.raster, serializer);
         <Vec<crate::api::FlutterSelectionEndpoint>>::sse_encode(self.endpoints, serializer);
+        <Vec<u32>>::sse_encode(self.grapheme_boundaries, serializer);
+        <Vec<u32>>::sse_encode(self.word_boundaries, serializer);
+        <Vec<crate::api::FlutterSelectionVisualLine>>::sse_encode(self.visual_lines, serializer);
+    }
+}
+
+impl SseEncode for crate::api::FlutterSelectionVisualLine {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Vec<crate::api::FlutterSelectionCaret>>::sse_encode(self.carets, serializer);
     }
 }
 
@@ -1823,12 +2057,52 @@ impl SseEncode for Vec<crate::api::FlutterAnnotation> {
     }
 }
 
+impl SseEncode for Vec<crate::api::FlutterSelectionCaret> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::FlutterSelectionCaret>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<crate::api::FlutterSelectionEndpoint> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::FlutterSelectionEndpoint>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::FlutterSelectionRect> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::FlutterSelectionRect>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::FlutterSelectionVisualLine> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::FlutterSelectionVisualLine>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<u32> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <u32>::sse_encode(item, serializer);
         }
     }
 }
@@ -1853,6 +2127,16 @@ impl SseEncode for Option<String> {
     }
 }
 
+impl SseEncode for Option<crate::api::FlutterAnnotationTextRange> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::FlutterAnnotationTextRange>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<crate::api::FlutterBookFormat> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1869,6 +2153,16 @@ impl SseEncode for Option<crate::api::FlutterRenderedBuffer> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::FlutterRenderedBuffer>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<Vec<crate::api::FlutterSelectionRect>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <Vec<crate::api::FlutterSelectionRect>>::sse_encode(value, serializer);
         }
     }
 }
@@ -1962,6 +2256,15 @@ mod io {
             String::from_utf8(vec).unwrap()
         }
     }
+    impl CstDecode<crate::api::FlutterAnnotationTextRange>
+        for *mut wire_cst_flutter_annotation_text_range
+    {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> crate::api::FlutterAnnotationTextRange {
+            let wrap = unsafe { flutter_rust_bridge::for_generated::box_from_leak_ptr(self) };
+            CstDecode::<crate::api::FlutterAnnotationTextRange>::cst_decode(*wrap).into()
+        }
+    }
     impl CstDecode<crate::api::FlutterBookFormat> for *mut i32 {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> crate::api::FlutterBookFormat {
@@ -2010,10 +2313,20 @@ mod io {
             crate::api::FlutterAnnotation {
                 id: self.id.cst_decode(),
                 unit: self.unit.cst_decode(),
-                start: self.start.cst_decode(),
-                end: self.end.cst_decode(),
+                text_range: self.text_range.cst_decode(),
+                quote: self.quote.cst_decode(),
+                rectangles: self.rectangles.cst_decode(),
                 color: self.color.cst_decode(),
                 body: self.body.cst_decode(),
+            }
+        }
+    }
+    impl CstDecode<crate::api::FlutterAnnotationTextRange> for wire_cst_flutter_annotation_text_range {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> crate::api::FlutterAnnotationTextRange {
+            crate::api::FlutterAnnotationTextRange {
+                start: self.start.cst_decode(),
+                end: self.end.cst_decode(),
             }
         }
     }
@@ -2076,6 +2389,19 @@ mod io {
             }
         }
     }
+    impl CstDecode<crate::api::FlutterSelectionCaret> for wire_cst_flutter_selection_caret {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> crate::api::FlutterSelectionCaret {
+            crate::api::FlutterSelectionCaret {
+                offset: self.offset.cst_decode(),
+                x: self.x.cst_decode(),
+                along_line: self.along_line.cst_decode(),
+                vertical: self.vertical.cst_decode(),
+                top: self.top.cst_decode(),
+                bottom: self.bottom.cst_decode(),
+            }
+        }
+    }
     impl CstDecode<crate::api::FlutterSelectionEndpoint> for wire_cst_flutter_selection_endpoint {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> crate::api::FlutterSelectionEndpoint {
@@ -2115,15 +2441,39 @@ mod io {
                 width: self.width.cst_decode(),
                 height: self.height.cst_decode(),
                 text: self.text.cst_decode(),
+                copy_eligible: self.copy_eligible.cst_decode(),
                 resource_path: self.resource_path.cst_decode(),
                 raster: self.raster.cst_decode(),
                 endpoints: self.endpoints.cst_decode(),
+                grapheme_boundaries: self.grapheme_boundaries.cst_decode(),
+                word_boundaries: self.word_boundaries.cst_decode(),
+                visual_lines: self.visual_lines.cst_decode(),
+            }
+        }
+    }
+    impl CstDecode<crate::api::FlutterSelectionVisualLine> for wire_cst_flutter_selection_visual_line {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> crate::api::FlutterSelectionVisualLine {
+            crate::api::FlutterSelectionVisualLine {
+                carets: self.carets.cst_decode(),
             }
         }
     }
     impl CstDecode<Vec<crate::api::FlutterAnnotation>> for *mut wire_cst_list_flutter_annotation {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> Vec<crate::api::FlutterAnnotation> {
+            let vec = unsafe {
+                let wrap = flutter_rust_bridge::for_generated::box_from_leak_ptr(self);
+                flutter_rust_bridge::for_generated::vec_from_leak_ptr(wrap.ptr, wrap.len)
+            };
+            vec.into_iter().map(CstDecode::cst_decode).collect()
+        }
+    }
+    impl CstDecode<Vec<crate::api::FlutterSelectionCaret>>
+        for *mut wire_cst_list_flutter_selection_caret
+    {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> Vec<crate::api::FlutterSelectionCaret> {
             let vec = unsafe {
                 let wrap = flutter_rust_bridge::for_generated::box_from_leak_ptr(self);
                 flutter_rust_bridge::for_generated::vec_from_leak_ptr(wrap.ptr, wrap.len)
@@ -2143,6 +2493,39 @@ mod io {
             vec.into_iter().map(CstDecode::cst_decode).collect()
         }
     }
+    impl CstDecode<Vec<crate::api::FlutterSelectionRect>>
+        for *mut wire_cst_list_flutter_selection_rect
+    {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> Vec<crate::api::FlutterSelectionRect> {
+            let vec = unsafe {
+                let wrap = flutter_rust_bridge::for_generated::box_from_leak_ptr(self);
+                flutter_rust_bridge::for_generated::vec_from_leak_ptr(wrap.ptr, wrap.len)
+            };
+            vec.into_iter().map(CstDecode::cst_decode).collect()
+        }
+    }
+    impl CstDecode<Vec<crate::api::FlutterSelectionVisualLine>>
+        for *mut wire_cst_list_flutter_selection_visual_line
+    {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> Vec<crate::api::FlutterSelectionVisualLine> {
+            let vec = unsafe {
+                let wrap = flutter_rust_bridge::for_generated::box_from_leak_ptr(self);
+                flutter_rust_bridge::for_generated::vec_from_leak_ptr(wrap.ptr, wrap.len)
+            };
+            vec.into_iter().map(CstDecode::cst_decode).collect()
+        }
+    }
+    impl CstDecode<Vec<u32>> for *mut wire_cst_list_prim_u_32_strict {
+        // Codec=Cst (C-struct based), see doc to use other codecs
+        fn cst_decode(self) -> Vec<u32> {
+            unsafe {
+                let wrap = flutter_rust_bridge::for_generated::box_from_leak_ptr(self);
+                flutter_rust_bridge::for_generated::vec_from_leak_ptr(wrap.ptr, wrap.len)
+            }
+        }
+    }
     impl CstDecode<Vec<u8>> for *mut wire_cst_list_prim_u_8_strict {
         // Codec=Cst (C-struct based), see doc to use other codecs
         fn cst_decode(self) -> Vec<u8> {
@@ -2157,14 +2540,28 @@ mod io {
             Self {
                 id: core::ptr::null_mut(),
                 unit: Default::default(),
-                start: Default::default(),
-                end: Default::default(),
+                text_range: core::ptr::null_mut(),
+                quote: core::ptr::null_mut(),
+                rectangles: core::ptr::null_mut(),
                 color: Default::default(),
                 body: core::ptr::null_mut(),
             }
         }
     }
     impl Default for wire_cst_flutter_annotation {
+        fn default() -> Self {
+            Self::new_with_null_ptr()
+        }
+    }
+    impl NewWithNullPtr for wire_cst_flutter_annotation_text_range {
+        fn new_with_null_ptr() -> Self {
+            Self {
+                start: Default::default(),
+                end: Default::default(),
+            }
+        }
+    }
+    impl Default for wire_cst_flutter_annotation_text_range {
         fn default() -> Self {
             Self::new_with_null_ptr()
         }
@@ -2252,6 +2649,23 @@ mod io {
             Self::new_with_null_ptr()
         }
     }
+    impl NewWithNullPtr for wire_cst_flutter_selection_caret {
+        fn new_with_null_ptr() -> Self {
+            Self {
+                offset: Default::default(),
+                x: Default::default(),
+                along_line: Default::default(),
+                vertical: Default::default(),
+                top: Default::default(),
+                bottom: Default::default(),
+            }
+        }
+    }
+    impl Default for wire_cst_flutter_selection_caret {
+        fn default() -> Self {
+            Self::new_with_null_ptr()
+        }
+    }
     impl NewWithNullPtr for wire_cst_flutter_selection_endpoint {
         fn new_with_null_ptr() -> Self {
             Self {
@@ -2302,13 +2716,29 @@ mod io {
                 width: Default::default(),
                 height: Default::default(),
                 text: core::ptr::null_mut(),
+                copy_eligible: Default::default(),
                 resource_path: core::ptr::null_mut(),
                 raster: core::ptr::null_mut(),
                 endpoints: core::ptr::null_mut(),
+                grapheme_boundaries: core::ptr::null_mut(),
+                word_boundaries: core::ptr::null_mut(),
+                visual_lines: core::ptr::null_mut(),
             }
         }
     }
     impl Default for wire_cst_flutter_selection_surface {
+        fn default() -> Self {
+            Self::new_with_null_ptr()
+        }
+    }
+    impl NewWithNullPtr for wire_cst_flutter_selection_visual_line {
+        fn new_with_null_ptr() -> Self {
+            Self {
+                carets: core::ptr::null_mut(),
+            }
+        }
+    }
+    impl Default for wire_cst_flutter_selection_visual_line {
         fn default() -> Self {
             Self::new_with_null_ptr()
         }
@@ -2374,8 +2804,14 @@ mod io {
         port_: i64,
         that: usize,
         document: *mut wire_cst_flutter_document_handle,
+        cancellation_id: u64,
     ) {
-        wire__crate__api__FlutterBridge_list_annotations_impl(port_, that, document)
+        wire__crate__api__FlutterBridge_list_annotations_impl(
+            port_,
+            that,
+            document,
+            cancellation_id,
+        )
     }
 
     #[unsafe(no_mangle)]
@@ -2521,6 +2957,14 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_shosai_flutter_cst_new_box_autoadd_flutter_annotation_text_range()
+    -> *mut wire_cst_flutter_annotation_text_range {
+        flutter_rust_bridge::for_generated::new_leak_box_ptr(
+            wire_cst_flutter_annotation_text_range::new_with_null_ptr(),
+        )
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_shosai_flutter_cst_new_box_autoadd_flutter_book_format(
         value: i32,
     ) -> *mut i32 {
@@ -2582,6 +3026,20 @@ mod io {
     }
 
     #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_shosai_flutter_cst_new_list_flutter_selection_caret(
+        len: i32,
+    ) -> *mut wire_cst_list_flutter_selection_caret {
+        let wrap = wire_cst_list_flutter_selection_caret {
+            ptr: flutter_rust_bridge::for_generated::new_leak_vec_ptr(
+                <wire_cst_flutter_selection_caret>::new_with_null_ptr(),
+                len,
+            ),
+            len,
+        };
+        flutter_rust_bridge::for_generated::new_leak_box_ptr(wrap)
+    }
+
+    #[unsafe(no_mangle)]
     pub extern "C" fn frbgen_shosai_flutter_cst_new_list_flutter_selection_endpoint(
         len: i32,
     ) -> *mut wire_cst_list_flutter_selection_endpoint {
@@ -2593,6 +3051,45 @@ mod io {
             len,
         };
         flutter_rust_bridge::for_generated::new_leak_box_ptr(wrap)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_shosai_flutter_cst_new_list_flutter_selection_rect(
+        len: i32,
+    ) -> *mut wire_cst_list_flutter_selection_rect {
+        let wrap = wire_cst_list_flutter_selection_rect {
+            ptr: flutter_rust_bridge::for_generated::new_leak_vec_ptr(
+                <wire_cst_flutter_selection_rect>::new_with_null_ptr(),
+                len,
+            ),
+            len,
+        };
+        flutter_rust_bridge::for_generated::new_leak_box_ptr(wrap)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_shosai_flutter_cst_new_list_flutter_selection_visual_line(
+        len: i32,
+    ) -> *mut wire_cst_list_flutter_selection_visual_line {
+        let wrap = wire_cst_list_flutter_selection_visual_line {
+            ptr: flutter_rust_bridge::for_generated::new_leak_vec_ptr(
+                <wire_cst_flutter_selection_visual_line>::new_with_null_ptr(),
+                len,
+            ),
+            len,
+        };
+        flutter_rust_bridge::for_generated::new_leak_box_ptr(wrap)
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn frbgen_shosai_flutter_cst_new_list_prim_u_32_strict(
+        len: i32,
+    ) -> *mut wire_cst_list_prim_u_32_strict {
+        let ans = wire_cst_list_prim_u_32_strict {
+            ptr: flutter_rust_bridge::for_generated::new_leak_vec_ptr(Default::default(), len),
+            len,
+        };
+        flutter_rust_bridge::for_generated::new_leak_box_ptr(ans)
     }
 
     #[unsafe(no_mangle)]
@@ -2611,10 +3108,17 @@ mod io {
     pub struct wire_cst_flutter_annotation {
         id: *mut wire_cst_list_prim_u_8_strict,
         unit: usize,
-        start: usize,
-        end: usize,
+        text_range: *mut wire_cst_flutter_annotation_text_range,
+        quote: *mut wire_cst_list_prim_u_8_strict,
+        rectangles: *mut wire_cst_list_flutter_selection_rect,
         color: i32,
         body: *mut wire_cst_list_prim_u_8_strict,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct wire_cst_flutter_annotation_text_range {
+        start: usize,
+        end: usize,
     }
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -2659,6 +3163,16 @@ mod io {
     }
     #[repr(C)]
     #[derive(Clone, Copy)]
+    pub struct wire_cst_flutter_selection_caret {
+        offset: usize,
+        x: f32,
+        along_line: f32,
+        vertical: bool,
+        top: f32,
+        bottom: f32,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
     pub struct wire_cst_flutter_selection_endpoint {
         offset: usize,
         range_start: usize,
@@ -2686,9 +3200,18 @@ mod io {
         width: f32,
         height: f32,
         text: *mut wire_cst_list_prim_u_8_strict,
+        copy_eligible: bool,
         resource_path: *mut wire_cst_list_prim_u_8_strict,
         raster: *mut wire_cst_flutter_rendered_buffer,
         endpoints: *mut wire_cst_list_flutter_selection_endpoint,
+        grapheme_boundaries: *mut wire_cst_list_prim_u_32_strict,
+        word_boundaries: *mut wire_cst_list_prim_u_32_strict,
+        visual_lines: *mut wire_cst_list_flutter_selection_visual_line,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct wire_cst_flutter_selection_visual_line {
+        carets: *mut wire_cst_list_flutter_selection_caret,
     }
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -2698,8 +3221,32 @@ mod io {
     }
     #[repr(C)]
     #[derive(Clone, Copy)]
+    pub struct wire_cst_list_flutter_selection_caret {
+        ptr: *mut wire_cst_flutter_selection_caret,
+        len: i32,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
     pub struct wire_cst_list_flutter_selection_endpoint {
         ptr: *mut wire_cst_flutter_selection_endpoint,
+        len: i32,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct wire_cst_list_flutter_selection_rect {
+        ptr: *mut wire_cst_flutter_selection_rect,
+        len: i32,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct wire_cst_list_flutter_selection_visual_line {
+        ptr: *mut wire_cst_flutter_selection_visual_line,
+        len: i32,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct wire_cst_list_prim_u_32_strict {
+        ptr: *mut u32,
         len: i32,
     }
     #[repr(C)]

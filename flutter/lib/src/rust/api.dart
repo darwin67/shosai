@@ -7,7 +7,7 @@ import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `cancellation`, `from_bridge`, `invalid_request`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
 // Rust type: RustOpaqueNom<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<FlutterBridge>>
 abstract class FlutterBridge implements RustOpaqueInterface {
@@ -35,6 +35,7 @@ abstract class FlutterBridge implements RustOpaqueInterface {
 
   Future<List<FlutterAnnotation>> listAnnotations({
     required FlutterDocumentHandle document,
+    required BigInt cancellationId,
   });
 
   factory FlutterBridge() => RustLib.instance.api.crateApiFlutterBridgeNew();
@@ -87,16 +88,18 @@ abstract class FlutterBridge implements RustOpaqueInterface {
 class FlutterAnnotation {
   final String id;
   final BigInt unit;
-  final BigInt start;
-  final BigInt end;
+  final FlutterAnnotationTextRange? textRange;
+  final String? quote;
+  final List<FlutterSelectionRect>? rectangles;
   final FlutterHighlightColor color;
   final String? body;
 
   const FlutterAnnotation({
     required this.id,
     required this.unit,
-    required this.start,
-    required this.end,
+    this.textRange,
+    this.quote,
+    this.rectangles,
     required this.color,
     this.body,
   });
@@ -105,8 +108,9 @@ class FlutterAnnotation {
   int get hashCode =>
       id.hashCode ^
       unit.hashCode ^
-      start.hashCode ^
-      end.hashCode ^
+      textRange.hashCode ^
+      quote.hashCode ^
+      rectangles.hashCode ^
       color.hashCode ^
       body.hashCode;
 
@@ -117,10 +121,29 @@ class FlutterAnnotation {
           runtimeType == other.runtimeType &&
           id == other.id &&
           unit == other.unit &&
-          start == other.start &&
-          end == other.end &&
+          textRange == other.textRange &&
+          quote == other.quote &&
+          rectangles == other.rectangles &&
           color == other.color &&
           body == other.body;
+}
+
+class FlutterAnnotationTextRange {
+  final BigInt start;
+  final BigInt end;
+
+  const FlutterAnnotationTextRange({required this.start, required this.end});
+
+  @override
+  int get hashCode => start.hashCode ^ end.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FlutterAnnotationTextRange &&
+          runtimeType == other.runtimeType &&
+          start == other.start &&
+          end == other.end;
 }
 
 enum FlutterBookFormat { pdf, epub, cbz }
@@ -276,6 +299,45 @@ class FlutterRenderedBuffer {
           byteLen == other.byteLen;
 }
 
+class FlutterSelectionCaret {
+  final BigInt offset;
+  final double x;
+  final double alongLine;
+  final bool vertical;
+  final double top;
+  final double bottom;
+
+  const FlutterSelectionCaret({
+    required this.offset,
+    required this.x,
+    required this.alongLine,
+    required this.vertical,
+    required this.top,
+    required this.bottom,
+  });
+
+  @override
+  int get hashCode =>
+      offset.hashCode ^
+      x.hashCode ^
+      alongLine.hashCode ^
+      vertical.hashCode ^
+      top.hashCode ^
+      bottom.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FlutterSelectionCaret &&
+          runtimeType == other.runtimeType &&
+          offset == other.offset &&
+          x == other.x &&
+          alongLine == other.alongLine &&
+          vertical == other.vertical &&
+          top == other.top &&
+          bottom == other.bottom;
+}
+
 class FlutterSelectionEndpoint {
   final BigInt offset;
   final BigInt rangeStart;
@@ -355,18 +417,26 @@ class FlutterSelectionSurface {
   final double width;
   final double height;
   final String text;
+  final bool copyEligible;
   final String? resourcePath;
   final FlutterRenderedBuffer? raster;
   final List<FlutterSelectionEndpoint> endpoints;
+  final Uint32List graphemeBoundaries;
+  final Uint32List wordBoundaries;
+  final List<FlutterSelectionVisualLine> visualLines;
 
   const FlutterSelectionSurface({
     required this.handle,
     required this.width,
     required this.height,
     required this.text,
+    required this.copyEligible,
     this.resourcePath,
     this.raster,
     required this.endpoints,
+    required this.graphemeBoundaries,
+    required this.wordBoundaries,
+    required this.visualLines,
   });
 
   @override
@@ -375,9 +445,13 @@ class FlutterSelectionSurface {
       width.hashCode ^
       height.hashCode ^
       text.hashCode ^
+      copyEligible.hashCode ^
       resourcePath.hashCode ^
       raster.hashCode ^
-      endpoints.hashCode;
+      endpoints.hashCode ^
+      graphemeBoundaries.hashCode ^
+      wordBoundaries.hashCode ^
+      visualLines.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -388,7 +462,27 @@ class FlutterSelectionSurface {
           width == other.width &&
           height == other.height &&
           text == other.text &&
+          copyEligible == other.copyEligible &&
           resourcePath == other.resourcePath &&
           raster == other.raster &&
-          endpoints == other.endpoints;
+          endpoints == other.endpoints &&
+          graphemeBoundaries == other.graphemeBoundaries &&
+          wordBoundaries == other.wordBoundaries &&
+          visualLines == other.visualLines;
+}
+
+class FlutterSelectionVisualLine {
+  final List<FlutterSelectionCaret> carets;
+
+  const FlutterSelectionVisualLine({required this.carets});
+
+  @override
+  int get hashCode => carets.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FlutterSelectionVisualLine &&
+          runtimeType == other.runtimeType &&
+          carets == other.carets;
 }
