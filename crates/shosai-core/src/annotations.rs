@@ -340,11 +340,14 @@ impl<'a> TextAnchorResolver<'a> {
         text: &'a str,
         is_cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, TextAnchorResolutionError> {
-        let scalar_bytes = text
-            .char_indices()
-            .map(|(byte, _)| byte)
-            .chain(std::iter::once(text.len()))
-            .collect::<Vec<_>>();
+        let mut scalar_bytes = Vec::new();
+        for (index, (byte, _)) in text.char_indices().enumerate() {
+            if index % 1024 == 0 && is_cancelled() {
+                return Err(TextAnchorResolutionError::Cancelled);
+            }
+            scalar_bytes.push(byte);
+        }
+        scalar_bytes.push(text.len());
         let normalized = mapped_normalized_quote_text(text, is_cancelled)?;
         Ok(Self {
             text,

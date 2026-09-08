@@ -43,6 +43,7 @@ pub const MAX_BRIDGE_LOCAL_ID_BYTES: usize = 4 * 1024;
 pub const MAX_BRIDGE_PATH_KEY_BYTES: usize = 64 * 1024;
 const MAX_ANNOTATION_PDF_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const ANNOTATION_RESOLUTION_WORKSPACE_BYTES: u32 = 112 * 1024 * 1024;
+const ANNOTATION_GEOMETRY_WORKSPACE_BYTES: u32 = 8 * 1024 * 1024;
 
 static NEXT_REGISTRY_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -372,6 +373,7 @@ struct BridgeAdmission {
     buffer_slots: Arc<Semaphore>,
     document_bytes: Arc<Semaphore>,
     probe_bytes: Arc<Semaphore>,
+    buffer_capacity: usize,
 }
 
 #[cfg(test)]
@@ -428,6 +430,7 @@ impl BridgeAdmission {
             buffer_slots: Arc::new(Semaphore::new(MAX_BRIDGE_BUFFERS)),
             document_bytes: Arc::new(Semaphore::new(MAX_BRIDGE_RETAINED_DOCUMENT_BYTES)),
             probe_bytes: Arc::new(Semaphore::new(MAX_BRIDGE_PROBE_BYTES)),
+            buffer_capacity: buffer_bytes,
         }
     }
 }
@@ -919,10 +922,27 @@ impl Bridge {
         cancellation: Cancellation,
         mut guards: Vec<OwnedSemaphorePermit>,
     ) -> Result<Vec<BridgeAnnotation>, BridgeError> {
+        if annotations.is_empty() {
+            return Ok(Vec::new());
+        }
+        let workspace_bytes = if annotations.iter().any(|annotation| {
+            matches!(&annotation.target, AnnotationTarget::Epub(_))
+                || matches!(
+                    &annotation.target,
+                    AnnotationTarget::Pdf(anchor) if anchor.character_range.is_some()
+                )
+        }) {
+            ANNOTATION_RESOLUTION_WORKSPACE_BYTES
+        } else {
+            ANNOTATION_GEOMETRY_WORKSPACE_BYTES
+        };
+        if workspace_bytes as usize > self.admission.buffer_capacity {
+            return Err(BridgeError::BufferLimit);
+        }
         guards.push(
             acquire_permits(
                 Arc::clone(&self.admission.buffer_bytes),
-                ANNOTATION_RESOLUTION_WORKSPACE_BYTES,
+                workspace_bytes,
                 &cancellation,
             )
             .await?,
