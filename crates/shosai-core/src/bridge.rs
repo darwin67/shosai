@@ -832,10 +832,10 @@ impl Bridge {
         let ExtractedSelection {
             surface,
             request_slot,
-            transient_bytes,
+            retained_bytes,
         } = extracted;
         drop(surface);
-        drop(transient_bytes);
+        drop(retained_bytes);
         let conversion_slot =
             acquire_permits(Arc::clone(&self.admission.render_slots), 1, &cancellation).await?;
         let pending = Annotation {
@@ -1253,7 +1253,7 @@ impl Bridge {
             handle,
             RetainedSelection {
                 _request_slot: extracted.request_slot,
-                _bytes: extracted.transient_bytes,
+                _bytes: extracted.retained_bytes,
             },
         );
         drop(registry);
@@ -1356,6 +1356,12 @@ impl Bridge {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         check_cancelled(cancellation)?;
         let mut extraction = extraction?;
+        let retained_len = selection_retained_byte_len(&extraction.surface)?;
+        let mut transient_bytes = transient_bytes;
+        let retained_bytes = transient_bytes
+            .split(retained_len)
+            .ok_or(BridgeError::BufferLimit)?;
+        drop(transient_bytes);
         if let Some(pixels) = extraction.raster.take() {
             extraction.surface.raster = Some(self.store_owned_buffer(
                 document_handle,
@@ -1370,7 +1376,7 @@ impl Bridge {
         Ok(ExtractedSelection {
             surface: extraction.surface,
             request_slot,
-            transient_bytes,
+            retained_bytes,
         })
     }
 
@@ -1961,7 +1967,43 @@ struct SelectionExtraction {
 struct ExtractedSelection {
     surface: SelectionSurface,
     request_slot: OwnedSemaphorePermit,
-    transient_bytes: OwnedSemaphorePermit,
+    retained_bytes: OwnedSemaphorePermit,
+}
+
+fn selection_retained_byte_len(surface: &SelectionSurface) -> Result<usize, BridgeError> {
+    let vectors = surface
+        .endpoints
+        .capacity()
+        .checked_mul(std::mem::size_of::<SelectionEndpoint>())
+        .and_then(|bytes| {
+            bytes.checked_add(surface.grapheme_boundaries.capacity() * std::mem::size_of::<usize>())
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(surface.word_boundaries.capacity() * std::mem::size_of::<usize>())
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(
+                surface.visual_lines.capacity() * std::mem::size_of::<SelectionVisualLine>(),
+            )
+        })
+        .and_then(|bytes| {
+            surface.visual_lines.iter().try_fold(bytes, |total, line| {
+                total.checked_add(line.carets.capacity() * std::mem::size_of::<SelectionCaret>())
+            })
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(
+                surface.page_rectangles.capacity() * std::mem::size_of::<SelectionPageRect>(),
+            )
+        })
+        .ok_or(BridgeError::BufferLimit)?;
+    std::mem::size_of::<SelectionSurface>()
+        .checked_add(surface.text.capacity())
+        .and_then(|bytes| {
+            bytes.checked_add(surface.resource_path.as_ref().map_or(0, String::capacity))
+        })
+        .and_then(|bytes| bytes.checked_add(vectors))
+        .ok_or(BridgeError::BufferLimit)
 }
 
 fn bounded_epub_selection_text(
@@ -3046,6 +3088,52 @@ mod tests {
             .unwrap();
         assert!(bridge.release_selection(second.handle));
         assert_eq!(admission.request_slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn retained_pdf_selections_do_not_hold_transient_render_admission() {
+        let document = OpenDocument::open(&DeviceFileLocator::from_path(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sample.pdf"
+        )))
+        .unwrap();
+        let selection_peak = selection_transient_byte_len(&document, 0, 1.0, false).unwrap();
+        let probe_capacity = selection_peak * 2;
+        let mut admission = BridgeAdmission::new(MAX_BRIDGE_RETAINED_BUFFER_BYTES, 1);
+        admission.probe_bytes = Arc::new(Semaphore::new(probe_capacity));
+        let admission = Arc::new(admission);
+        let bridge = Bridge::with_admission(Arc::clone(&admission));
+        let document = bridge
+            .open_document(pdf_request(), Cancellation::new())
+            .await
+            .unwrap();
+        let first = bridge
+            .selection_surface(document.handle, 0, 1.0, 680.0, 18.0, Cancellation::new())
+            .await
+            .unwrap();
+        let second = bridge
+            .selection_surface(document.handle, 0, 1.0, 680.0, 18.0, Cancellation::new())
+            .await
+            .unwrap();
+
+        let rendered = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            bridge.render_page(
+                RenderRequest {
+                    document: document.handle,
+                    page: 0,
+                    scale: 1.0,
+                },
+                Cancellation::new(),
+            ),
+        )
+        .await
+        .expect("render admission must not depend on releasing retained selections")
+        .unwrap();
+        assert!(bridge.release_buffer(rendered.handle));
+        assert!(bridge.release_selection(first.handle));
+        assert!(bridge.release_selection(second.handle));
+        assert_eq!(admission.probe_bytes.available_permits(), probe_capacity);
     }
 
     #[tokio::test]
