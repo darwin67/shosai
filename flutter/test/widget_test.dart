@@ -2845,6 +2845,107 @@ void main() {
     },
   );
 
+  testWidgets('reader composition adapts across rotation and device classes', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge(immediateLists: true);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey('reader-composition-compact')),
+      findsOneWidget,
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    expect(bridge.selectionLayouts.last.width, 342);
+
+    tester.view.physicalSize = const Size(844, 390);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('reader-composition-medium')),
+      findsOneWidget,
+    );
+    expect(bridge.selectionLayouts.last.width, 796);
+
+    tester.view.physicalSize = const Size(800, 1100);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('reader-composition-medium')),
+      findsOneWidget,
+    );
+    expect(bridge.selectionLayouts.last.width, 752);
+
+    tester.view.physicalSize = const Size(1180, 800);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('reader-composition-expanded')),
+      findsOneWidget,
+    );
+    expect(bridge.selectionLayouts.last.width, 788);
+
+    tester.view.physicalSize = const Size(1440, 900);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('reader-composition-expanded')),
+      findsOneWidget,
+    );
+    expect(bridge.selectionLayouts.last.width, 1048);
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('safe insets constrain the reported reader viewport', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge(immediateLists: true);
+    await tester.pumpWidget(
+      MaterialApp(
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(
+            context,
+          ).copyWith(padding: const EdgeInsets.only(left: 20, right: 30)),
+          child: child!,
+        ),
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+
+    final composition = tester.getRect(
+      find.byKey(const ValueKey('reader-composition-compact')),
+    );
+    expect(composition.left, 20);
+    expect(composition.right, 360);
+    expect(bridge.selectionLayouts.single.width, 292);
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
   for (final format in [FlutterBookFormat.pdf, FlutterBookFormat.epub]) {
     for (final device in [
       ui.PointerDeviceKind.mouse,

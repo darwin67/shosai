@@ -143,98 +143,213 @@ class _ReaderScreenState extends State<ReaderScreen> {
   @override
   Widget build(BuildContext context) {
     final model = _controller.model;
-    final document = model.document;
-    return _ReaderLayoutReporter(
-      model: model,
-      dispatch: _controller.dispatch,
-      child: Scaffold(
-        appBar: AppBar(title: const Text('Shōsai Flutter feasibility slice')),
-        body: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Semantics(
-                  textField: true,
-                  label: 'Document path',
-                  child: TextField(
-                    controller: _path,
-                    enabled: !model.busy,
-                    onSubmitted: (_) => _open(),
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      hintText: '/path/to/book.pdf',
-                      labelText: 'PDF, EPUB, or CBZ path',
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: FilledButton.icon(
-                    onPressed: model.busy ? null : _open,
-                    icon: const Icon(Icons.menu_book),
-                    label: Text(model.busy ? 'Opening…' : 'Open document'),
-                  ),
-                ),
-                if (model.error != null) ...[
-                  const SizedBox(height: 12),
-                  Semantics(
-                    liveRegion: true,
-                    child: Text(
-                      model.error!,
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.error,
-                      ),
-                    ),
-                  ),
-                ],
-                if (model.selectionError != null && model.document != null)
-                  Semantics(
-                    liveRegion: true,
-                    child: Text(
-                      'Selection unavailable: ${model.selectionError}',
-                    ),
-                  ),
-                if (model.selectionActionError != null &&
-                    model.document != null)
-                  Semantics(
-                    liveRegion: true,
-                    child: Text(
-                      'Selection action failed: ${model.selectionActionError}',
-                    ),
-                  ),
-                if (model.annotationError != null && model.document != null)
-                  Semantics(
-                    liveRegion: true,
-                    child: Text(
-                      model.annotationsReady
-                          ? 'Highlight action failed: ${model.annotationError}'
-                          : 'Highlights unavailable: ${model.annotationError}',
-                    ),
-                  ),
-                if (model.relayoutBusy) const LinearProgressIndicator(),
-                const SizedBox(height: 20),
-                Expanded(
-                  child: document == null
-                      ? const WelcomePanel()
-                      : _DocumentView(
-                          document: document,
-                          image: model.pageImage,
-                          model: model,
-                          dispatch: _controller.dispatch,
-                          readerFocus: _readerFocus,
-                          actionFocus: _actionFocus,
-                        ),
-                ),
-              ],
-            ),
-          ),
+    final compact = MediaQuery.sizeOf(context).width < 600;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(compact ? 'Shōsai' : 'Shōsai Flutter feasibility slice'),
+      ),
+      body: SafeArea(
+        child: _ResponsiveReaderBody(
+          model: model,
+          path: _path,
+          open: _open,
+          dispatch: _controller.dispatch,
+          readerFocus: _readerFocus,
+          actionFocus: _actionFocus,
         ),
       ),
     );
   }
+}
+
+enum _ReaderComposition { compact, medium, expanded }
+
+class _ResponsiveReaderBody extends StatelessWidget {
+  const _ResponsiveReaderBody({
+    required this.model,
+    required this.path,
+    required this.open,
+    required this.dispatch,
+    required this.readerFocus,
+    required this.actionFocus,
+  });
+
+  final ReaderModel model;
+  final TextEditingController path;
+  final VoidCallback open;
+  final void Function(ReaderMessage) dispatch;
+  final FocusNode readerFocus;
+  final FocusNode actionFocus;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final composition = constraints.maxWidth >= 1024
+          ? _ReaderComposition.expanded
+          : constraints.maxWidth >= 600
+          ? _ReaderComposition.medium
+          : _ReaderComposition.compact;
+      final controls = _ReaderControls(
+        model: model,
+        path: path,
+        open: open,
+        horizontal: composition == _ReaderComposition.medium,
+      );
+      final content = _ReaderContentPane(
+        model: model,
+        dispatch: dispatch,
+        readerFocus: readerFocus,
+        actionFocus: actionFocus,
+      );
+      final key = ValueKey('reader-composition-${composition.name}');
+      if (composition == _ReaderComposition.expanded) {
+        return Padding(
+          key: key,
+          padding: const EdgeInsets.all(24),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                width: 320,
+                child: SingleChildScrollView(child: controls),
+              ),
+              const SizedBox(width: 24),
+              Expanded(child: content),
+            ],
+          ),
+        );
+      }
+      return Padding(
+        key: key,
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            controls,
+            const SizedBox(height: 20),
+            Expanded(child: content),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+class _ReaderControls extends StatelessWidget {
+  const _ReaderControls({
+    required this.model,
+    required this.path,
+    required this.open,
+    required this.horizontal,
+  });
+
+  final ReaderModel model;
+  final TextEditingController path;
+  final VoidCallback open;
+  final bool horizontal;
+
+  @override
+  Widget build(BuildContext context) {
+    final field = Semantics(
+      textField: true,
+      label: 'Document path',
+      child: TextField(
+        controller: path,
+        enabled: !model.busy,
+        onSubmitted: (_) => open(),
+        decoration: const InputDecoration(
+          border: OutlineInputBorder(),
+          hintText: '/path/to/book.pdf',
+          labelText: 'PDF, EPUB, or CBZ path',
+        ),
+      ),
+    );
+    final button = FilledButton.icon(
+      onPressed: model.busy ? null : open,
+      icon: const Icon(Icons.menu_book),
+      label: Text(model.busy ? 'Opening…' : 'Open document'),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (horizontal)
+          Row(
+            children: [
+              Expanded(child: field),
+              const SizedBox(width: 12),
+              button,
+            ],
+          )
+        else ...[
+          field,
+          const SizedBox(height: 12),
+          Align(alignment: Alignment.centerLeft, child: button),
+        ],
+        if (model.error != null) ...[
+          const SizedBox(height: 12),
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              model.error!,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ),
+        ],
+        if (model.selectionError != null && model.document != null)
+          Semantics(
+            liveRegion: true,
+            child: Text('Selection unavailable: ${model.selectionError}'),
+          ),
+        if (model.selectionActionError != null && model.document != null)
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              'Selection action failed: ${model.selectionActionError}',
+            ),
+          ),
+        if (model.annotationError != null && model.document != null)
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              model.annotationsReady
+                  ? 'Highlight action failed: ${model.annotationError}'
+                  : 'Highlights unavailable: ${model.annotationError}',
+            ),
+          ),
+        if (model.relayoutBusy) const LinearProgressIndicator(),
+      ],
+    );
+  }
+}
+
+class _ReaderContentPane extends StatelessWidget {
+  const _ReaderContentPane({
+    required this.model,
+    required this.dispatch,
+    required this.readerFocus,
+    required this.actionFocus,
+  });
+
+  final ReaderModel model;
+  final void Function(ReaderMessage) dispatch;
+  final FocusNode readerFocus;
+  final FocusNode actionFocus;
+
+  @override
+  Widget build(BuildContext context) => _ReaderLayoutReporter(
+    model: model,
+    dispatch: dispatch,
+    child: model.document == null
+        ? const WelcomePanel()
+        : _DocumentView(
+            document: model.document!,
+            image: model.pageImage,
+            model: model,
+            dispatch: dispatch,
+            readerFocus: readerFocus,
+            actionFocus: actionFocus,
+          ),
+  );
 }
 
 class _ReaderLayoutReporter extends StatefulWidget {
@@ -261,7 +376,7 @@ class _ReaderLayoutReporterState extends State<_ReaderLayoutReporter> {
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
       final availableWidth = constraints.maxWidth.isFinite
-          ? math.max(1.0, constraints.maxWidth - 48).roundToDouble()
+          ? math.max(1.0, constraints.maxWidth).roundToDouble()
           : widget.model.layout.width;
       final layout = ReaderLayout(
         scale: MediaQuery.devicePixelRatioOf(context),
