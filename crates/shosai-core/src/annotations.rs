@@ -610,24 +610,14 @@ pub fn resolve_text_anchor(
         .validate()
         .map_err(|_| TextAnchorResolutionError::InvalidSelector)?;
     let mut remaining_work = MAX_TEXT_ANCHOR_RESOLUTION_WORK;
-    TextAnchorResolver::new(text, &mut remaining_work, &|| false)
+    let index = TextScalarIndex::new(text, &mut remaining_work, &|| false)?;
+    if let Some(exact) =
+        index.resolve_exact(stored_range.clone(), quote, &mut remaining_work, &|| false)?
+    {
+        return Ok(exact);
+    }
+    TextAnchorResolver::from_index(index, &mut remaining_work, &|| false)
         .and_then(|resolver| resolver.resolve(stored_range, quote, &mut remaining_work, &|| false))
-}
-
-#[cfg(test)]
-fn resolve_exact_text_anchor(
-    text: &str,
-    stored_range: Range<usize>,
-    quote: &QuoteSelector,
-    remaining_work: &mut usize,
-    is_cancelled: &dyn Fn() -> bool,
-) -> Result<Option<ResolvedTextAnchor>, TextAnchorResolutionError> {
-    TextScalarIndex::new(text, remaining_work, is_cancelled)?.resolve_exact(
-        stored_range,
-        quote,
-        remaining_work,
-        is_cancelled,
-    )
 }
 
 fn exact_text_anchor(
@@ -1905,13 +1895,22 @@ mod tests {
     fn exact_text_anchor_does_not_scan_unrelated_graphemes() {
         let text = format!("ordinary e{}", "\u{301}".repeat(1_025));
         let quote = QuoteSelector::new("ordinary", "", "").unwrap();
-        let mut work = MAX_TEXT_ANCHOR_RESOLUTION_WORK;
         assert_eq!(
-            resolve_exact_text_anchor(&text, 0..8, &quote, &mut work, &|| false).unwrap(),
-            Some(ResolvedTextAnchor {
+            resolve_text_anchor(&text, 0..8, &quote).unwrap(),
+            ResolvedTextAnchor {
                 resolution: AnnotationResolution::Exact,
                 range: Some(0..8),
-            })
+            }
+        );
+
+        let oversized = format!("e{}", "\u{301}".repeat(1_025));
+        let quote = QuoteSelector::new(&oversized, "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor(&text, 9..1_035, &quote).unwrap(),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Exact,
+                range: Some(9..1_035),
+            }
         );
     }
 

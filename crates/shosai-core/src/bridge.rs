@@ -455,6 +455,8 @@ pub struct Bridge {
     #[cfg(test)]
     selection_second_cancellation_barrier: Option<Arc<std::sync::Barrier>>,
     #[cfg(test)]
+    annotation_resolution_worker_barrier: Option<Arc<std::sync::Barrier>>,
+    #[cfg(test)]
     annotation_test_hooks: Option<Arc<AnnotationTestHooks>>,
 }
 
@@ -513,6 +515,8 @@ impl Bridge {
             selection_worker_barrier: None,
             #[cfg(test)]
             selection_second_cancellation_barrier: None,
+            #[cfg(test)]
+            annotation_resolution_worker_barrier: None,
             #[cfg(test)]
             annotation_test_hooks: None,
         }
@@ -848,17 +852,17 @@ impl Bridge {
             modified_at: String::new(),
             deleted_at: None,
         };
-        let prepared = self
+        let (mut prepared, response_guards) = self
             .resolve_annotation_dtos(
                 Arc::clone(&retained),
                 vec![pending],
                 display_scale,
                 cancellation.clone(),
-                vec![conversion_slot],
+                vec![request_slot, conversion_slot],
                 false,
             )
-            .await?
-            .remove(0);
+            .await?;
+        let prepared = prepared.remove(0);
         #[cfg(test)]
         if let Some(gate) = self
             .annotation_test_hooks
@@ -881,7 +885,7 @@ impl Bridge {
             .create_async(&annotation)
             .await
             .map_err(annotation_storage_error)?;
-        drop(request_slot);
+        drop(response_guards);
         Ok(prepared)
     }
 
@@ -933,6 +937,7 @@ impl Bridge {
             true,
         )
         .await
+        .map(|(items, _guards)| items)
     }
 
     async fn resolve_annotation_dtos(
@@ -943,9 +948,9 @@ impl Bridge {
         cancellation: Cancellation,
         mut guards: Vec<OwnedSemaphorePermit>,
         resolve_persisted_text: bool,
-    ) -> Result<Vec<BridgeAnnotation>, BridgeError> {
+    ) -> Result<(Vec<BridgeAnnotation>, Vec<OwnedSemaphorePermit>), BridgeError> {
         if annotations.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), guards));
         }
         let workspace_bytes = if resolve_persisted_text
             && annotations.iter().any(|annotation| {
@@ -973,7 +978,14 @@ impl Bridge {
             );
         }
         let worker_cancellation = cancellation.clone();
-        let (result, _guards) = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let worker_barrier = self.annotation_resolution_worker_barrier.clone();
+        let (result, guards) = tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(barrier) = worker_barrier {
+                barrier.wait();
+                barrier.wait();
+            }
             let result = guarded(|| {
                 annotation_dtos(
                     annotations,
@@ -988,7 +1000,7 @@ impl Bridge {
         .await
         .map_err(|_| BridgeError::Worker)?;
         check_cancelled(&cancellation)?;
-        result
+        Ok((result?, guards))
     }
 
     pub async fn update_annotation(
@@ -3095,6 +3107,58 @@ mod tests {
         .expect("the detached blocking worker must release its admission");
         assert!(bridge.registry.lock().unwrap().buffers.is_empty());
         assert!(bridge.registry.lock().unwrap().selections.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dropped_annotation_create_keeps_request_admission_until_worker_exits() {
+        let worker_barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut admission = BridgeAdmission::new(MAX_BRIDGE_RETAINED_BUFFER_BYTES, 1);
+        admission.request_slots = Arc::new(Semaphore::new(1));
+        let admission = Arc::new(admission);
+        let mut bridge = Bridge::with_admission(Arc::clone(&admission));
+        bridge.annotation_resolution_worker_barrier = Some(Arc::clone(&worker_barrier));
+        let bridge = Arc::new(bridge);
+        let document = bridge
+            .open_document(pdf_request(), Cancellation::new())
+            .await
+            .unwrap();
+        let (drop_tx, drop_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::sync_channel(1);
+        let operation_bridge = Arc::clone(&bridge);
+        let operation = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    tokio::select! {
+                        _ = operation_bridge.create_annotation(
+                            annotation_request(document.handle),
+                            Cancellation::new(),
+                        ) => panic!("annotation create must remain blocked"),
+                        _ = drop_rx => {}
+                    }
+                    dropped_tx.send(()).unwrap();
+                });
+        });
+
+        worker_barrier.wait();
+        drop_tx.send(()).unwrap();
+        dropped_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("the outer annotation create future must be dropped");
+        assert_eq!(admission.request_slots.available_permits(), 0);
+
+        worker_barrier.wait();
+        operation.join().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while admission.request_slots.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached annotation conversion must release request admission");
+        assert_eq!(admission.request_slots.available_permits(), 1);
     }
 
     #[tokio::test]
