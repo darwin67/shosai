@@ -128,6 +128,53 @@ void main() {
     },
   );
 
+  test('temporary selection has a non-color outline', () async {
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    PagePainter(
+      image: null,
+      surface: FlutterSelectionSurface(
+        handle: FlutterSelectionHandle(registry: BigInt.one, id: BigInt.one),
+        width: 40,
+        height: 40,
+        text: 'x',
+        copyEligible: true,
+        endpoints: [
+          FlutterSelectionEndpoint(
+            offset: BigInt.zero,
+            rangeStart: BigInt.zero,
+            rangeEnd: BigInt.one,
+            rect: const FlutterSelectionRect(
+              left: 10,
+              top: 10,
+              right: 30,
+              bottom: 30,
+            ),
+          ),
+        ],
+        graphemeBoundaries: Uint32List.fromList([0, 1]),
+        wordBoundaries: Uint32List.fromList([0, 1]),
+        visualLines: const [],
+      ),
+      backgroundColor: Colors.white,
+      foregroundColor: Colors.black,
+      recolorImage: false,
+      anchor: 0,
+      focus: 1,
+      savedSelections: const [],
+      annotations: const [],
+    ).paint(canvas, const Size(40, 40));
+    final image = await recorder.endRecording().toImage(40, 40);
+    final bytes = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+    expect(bytes, isNotNull);
+    List<int> pixel(int x, int y) => [
+      for (var channel = 0; channel < 3; channel += 1)
+        bytes!.getUint8((y * 40 + x) * 4 + channel),
+    ];
+    expect(pixel(10, 20), isNot(pixel(20, 20)));
+    image.dispose();
+  });
+
   test('reader model recursively freezes collection inputs and copies', () {
     final endpoints = <FlutterSelectionEndpoint>[
       FlutterSelectionEndpoint(
@@ -3129,6 +3176,67 @@ void main() {
 
     await tester.pumpWidget(const SizedBox());
     await bridge.disposed.future;
+  });
+
+  testWidgets('reader exposes text, selection, and visible keyboard focus', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    final bridge = _ControlledBridge(format: FlutterBookFormat.epub);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+
+    final semanticsFinder = find.byKey(
+      const ValueKey('reader-content-semantics'),
+    );
+    var data = tester.getSemantics(semanticsFinder).getSemanticsData();
+    expect(data.label, 'Document text: Selectable fixture text');
+    expect(data.value, 'No text selected');
+    BoxDecoration focusDecoration() =>
+        tester
+                .widget<DecoratedBox>(
+                  find.byKey(const ValueKey('reader-focus-indicator')),
+                )
+                .decoration
+            as BoxDecoration;
+    for (
+      var tabs = 0;
+      tabs < 5 && focusDecoration().border == null;
+      tabs += 1
+    ) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+    }
+    final focusBorder = focusDecoration().border! as Border;
+    expect(
+      focusBorder.top.color,
+      Theme.of(tester.element(semanticsFinder)).colorScheme.primary,
+    );
+    expect(focusBorder.top.width, 3);
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pump();
+    data = tester.getSemantics(semanticsFinder).getSemanticsData();
+    expect(data.value, 'Selected text: e');
+
+    await tester.tap(find.byType(TextField));
+    await tester.pump();
+    expect(focusDecoration().border, isNull);
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+    semantics.dispose();
   });
 
   for (final format in [FlutterBookFormat.pdf, FlutterBookFormat.epub]) {

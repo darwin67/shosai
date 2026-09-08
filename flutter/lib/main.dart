@@ -478,6 +478,8 @@ class _DocumentView extends StatelessWidget {
       );
     }
     return Semantics(
+      container: true,
+      explicitChildNodes: true,
       label: document.format == FlutterBookFormat.epub
           ? '$title, EPUB chapter 1 of ${document.logicalUnitCount}. Selectable text.'
           : '$title, page 1 of ${document.logicalUnitCount}. Selectable text.',
@@ -629,11 +631,41 @@ class _DocumentView extends StatelessWidget {
                             key: const ValueKey('reader-selection-focus'),
                             focusNode: readerFocus,
                             autofocus: true,
-                            child: _SelectableSurface(
-                              surface: surface,
-                              image: page,
-                              model: model,
-                              dispatch: dispatch,
+                            child: AnimatedBuilder(
+                              animation: readerFocus,
+                              builder: (context, child) => Semantics(
+                                key: const ValueKey('reader-content-semantics'),
+                                container: true,
+                                focusable: true,
+                                focused: readerFocus.hasFocus,
+                                readOnly: true,
+                                liveRegion:
+                                    model.selectionPhase !=
+                                    ReaderSelectionPhase.idle,
+                                label: 'Document text: ${surface.text}',
+                                value: _selectionSemanticsValue(model),
+                                child: DecoratedBox(
+                                  key: const ValueKey('reader-focus-indicator'),
+                                  position: DecorationPosition.foreground,
+                                  decoration: BoxDecoration(
+                                    border: readerFocus.hasFocus
+                                        ? Border.all(
+                                            color: Theme.of(
+                                              context,
+                                            ).colorScheme.primary,
+                                            width: 3,
+                                          )
+                                        : null,
+                                  ),
+                                  child: child,
+                                ),
+                              ),
+                              child: _SelectableSurface(
+                                surface: surface,
+                                image: page,
+                                model: model,
+                                dispatch: dispatch,
+                              ),
                             ),
                           ),
                         ),
@@ -938,6 +970,18 @@ String _colorName(FlutterHighlightColor color) => switch (color) {
   FlutterHighlightColor.purple => 'Purple',
 };
 
+String _selectionSemanticsValue(ReaderModel model) {
+  final selected = model.selectedText;
+  return switch (model.selectionPhase) {
+    ReaderSelectionPhase.idle => 'No text selected',
+    ReaderSelectionPhase.selecting =>
+      selected == null ? 'Selecting text' : 'Selecting text: $selected',
+    ReaderSelectionPhase.selected =>
+      selected == null ? 'Text selection ready' : 'Selected text: $selected',
+    ReaderSelectionPhase.committing => 'Saving selected text',
+  };
+}
+
 class _SelectableSurface extends StatelessWidget {
   const _SelectableSurface({
     required this.surface,
@@ -1172,7 +1216,11 @@ class PagePainter extends CustomPainter {
       final rect = endpoint.rect;
       final area = Rect.fromLTRB(rect.left, rect.top, rect.right, rect.bottom);
       canvas.drawRect(area, paint);
-      if (saved) canvas.drawLine(area.bottomLeft, area.bottomRight, border);
+      if (saved) {
+        canvas.drawLine(area.bottomLeft, area.bottomRight, border);
+      } else {
+        canvas.drawRect(area, border);
+      }
     }
   }
 
