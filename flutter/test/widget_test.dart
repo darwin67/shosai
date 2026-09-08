@@ -2477,6 +2477,44 @@ void main() {
     await bridge.disposed.future;
   });
 
+  testWidgets('viewport changes wait for an annotation write then relayout', (
+    tester,
+  ) async {
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge(
+      initialAnnotations: [_annotation('one')],
+      immediateLists: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/a.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    final selectionCalls = bridge.selectionCalls;
+    bridge.updateCompleter = Completer<bool>();
+    await tester.tap(find.byTooltip('Change color'));
+    await tester.pump();
+
+    final desiredScale = tester.view.devicePixelRatio == 2 ? 3.0 : 2.0;
+    tester.view.devicePixelRatio = desiredScale;
+    await tester.pump();
+    await tester.pump();
+    expect(bridge.selectionCalls, selectionCalls);
+
+    bridge.updateCompleter!.complete(true);
+    await tester.pumpAndSettle();
+    expect(bridge.selectionCalls, selectionCalls + 1);
+    expect(bridge.selectionLayouts.last.scale, desiredScale);
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
   for (final failure in ['selection', 'annotations']) {
     testWidgets('PDF $failure failure keeps the decoded page visible', (
       tester,
