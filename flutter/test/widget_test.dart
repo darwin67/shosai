@@ -3001,6 +3001,46 @@ void main() {
     await bridge.disposed.future;
   });
 
+  testWidgets('open button focus survives responsive breakpoint transitions', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+    await tester.pump();
+    final openFocus = tester
+        .widget<FilledButton>(find.byType(FilledButton))
+        .focusNode!;
+    expect(FocusManager.instance.primaryFocus, same(openFocus));
+
+    tester.view.physicalSize = const Size(844, 390);
+    await tester.pumpAndSettle();
+    expect(FocusManager.instance.primaryFocus, same(openFocus));
+
+    tester.view.physicalSize = const Size(1180, 800);
+    await tester.pumpAndSettle();
+    expect(FocusManager.instance.primaryFocus, same(openFocus));
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pump();
+    expect(bridge.openCalls, 1);
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
   for (final format in [FlutterBookFormat.pdf, FlutterBookFormat.epub]) {
     for (final device in [
       ui.PointerDeviceKind.mouse,

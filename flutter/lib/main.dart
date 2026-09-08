@@ -104,6 +104,7 @@ class ReaderScreen extends StatefulWidget {
 class _ReaderScreenState extends State<ReaderScreen> {
   final TextEditingController _path = TextEditingController();
   final GlobalKey _pathFieldKey = GlobalKey(debugLabel: 'document path');
+  final FocusNode _openFocus = FocusNode(debugLabel: 'open document');
   final FocusNode _readerFocus = FocusNode(debugLabel: 'reader surface');
   final FocusNode _actionFocus = FocusNode(debugLabel: 'selection actions');
   late final ReaderController _controller;
@@ -134,6 +135,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _controller.removeListener(_modelChanged);
     _controller.dispose();
     _path.dispose();
+    _openFocus.dispose();
     _readerFocus.dispose();
     _actionFocus.dispose();
     super.dispose();
@@ -154,6 +156,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
           model: model,
           path: _path,
           pathFieldKey: _pathFieldKey,
+          openFocus: _openFocus,
           open: _open,
           dispatch: _controller.dispatch,
           readerFocus: _readerFocus,
@@ -171,6 +174,7 @@ class _ResponsiveReaderBody extends StatelessWidget {
     required this.model,
     required this.path,
     required this.pathFieldKey,
+    required this.openFocus,
     required this.open,
     required this.dispatch,
     required this.readerFocus,
@@ -180,6 +184,7 @@ class _ResponsiveReaderBody extends StatelessWidget {
   final ReaderModel model;
   final TextEditingController path;
   final GlobalKey pathFieldKey;
+  final FocusNode openFocus;
   final VoidCallback open;
   final void Function(ReaderMessage) dispatch;
   final FocusNode readerFocus;
@@ -197,6 +202,7 @@ class _ResponsiveReaderBody extends StatelessWidget {
         model: model,
         path: path,
         pathFieldKey: pathFieldKey,
+        openFocus: openFocus,
         open: open,
         horizontal: composition == _ReaderComposition.medium,
       );
@@ -245,6 +251,7 @@ class _ReaderControls extends StatelessWidget {
     required this.model,
     required this.path,
     required this.pathFieldKey,
+    required this.openFocus,
     required this.open,
     required this.horizontal,
   });
@@ -252,6 +259,7 @@ class _ReaderControls extends StatelessWidget {
   final ReaderModel model;
   final TextEditingController path;
   final GlobalKey pathFieldKey;
+  final FocusNode openFocus;
   final VoidCallback open;
   final bool horizontal;
 
@@ -273,6 +281,7 @@ class _ReaderControls extends StatelessWidget {
       ),
     );
     final button = FilledButton.icon(
+      focusNode: openFocus,
       onPressed: model.busy ? null : open,
       icon: const Icon(Icons.menu_book),
       label: Text(model.busy ? 'Opening…' : 'Open document'),
