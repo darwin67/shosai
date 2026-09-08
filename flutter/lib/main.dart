@@ -478,6 +478,7 @@ class _DocumentView extends StatelessWidget {
       );
     }
     return Semantics(
+      key: const ValueKey('reader-document-semantics'),
       container: true,
       explicitChildNodes: true,
       label: document.format == FlutterBookFormat.epub
@@ -635,29 +636,40 @@ class _DocumentView extends StatelessWidget {
                               animation: readerFocus,
                               builder: (context, child) => Semantics(
                                 key: const ValueKey('reader-content-semantics'),
-                                container: true,
-                                focusable: true,
-                                focused: readerFocus.hasFocus,
                                 readOnly: true,
-                                liveRegion:
-                                    model.selectionPhase !=
-                                    ReaderSelectionPhase.idle,
                                 label: 'Document text: ${surface.text}',
-                                value: _selectionSemanticsValue(model),
-                                child: DecoratedBox(
-                                  key: const ValueKey('reader-focus-indicator'),
-                                  position: DecorationPosition.foreground,
-                                  decoration: BoxDecoration(
-                                    border: readerFocus.hasFocus
-                                        ? Border.all(
-                                            color: Theme.of(
-                                              context,
-                                            ).colorScheme.primary,
-                                            width: 3,
-                                          )
-                                        : null,
-                                  ),
-                                  child: child,
+                                child: Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    DecoratedBox(
+                                      key: const ValueKey(
+                                        'reader-focus-indicator',
+                                      ),
+                                      position: DecorationPosition.foreground,
+                                      decoration: BoxDecoration(
+                                        border: readerFocus.hasFocus
+                                            ? Border.all(
+                                                color: Theme.of(
+                                                  context,
+                                                ).colorScheme.primary,
+                                                width: 3,
+                                              )
+                                            : null,
+                                      ),
+                                      child: child,
+                                    ),
+                                    Semantics(
+                                      key: const ValueKey(
+                                        'reader-selection-status',
+                                      ),
+                                      container: true,
+                                      liveRegion:
+                                          model.selectionPhase !=
+                                          ReaderSelectionPhase.idle,
+                                      label: _selectionSemanticsValue(model),
+                                      child: const SizedBox.shrink(),
+                                    ),
+                                  ],
                                 ),
                               ),
                               child: _SelectableSurface(

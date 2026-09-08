@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shosai_flutter/main.dart';
@@ -164,15 +165,25 @@ void main() {
       savedSelections: const [],
       annotations: const [],
     ).paint(canvas, const Size(40, 40));
-    final image = await recorder.endRecording().toImage(40, 40);
-    final bytes = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
-    expect(bytes, isNotNull);
-    List<int> pixel(int x, int y) => [
-      for (var channel = 0; channel < 3; channel += 1)
-        bytes!.getUint8((y * 40 + x) * 4 + channel),
-    ];
-    expect(pixel(10, 20), isNot(pixel(20, 20)));
-    image.dispose();
+    final picture = recorder.endRecording();
+    try {
+      final image = await picture.toImage(40, 40);
+      try {
+        final bytes = await image.toByteData(
+          format: ui.ImageByteFormat.rawRgba,
+        );
+        expect(bytes, isNotNull);
+        List<int> pixel(int x, int y) => [
+          for (var channel = 0; channel < 3; channel += 1)
+            bytes!.getUint8((y * 40 + x) * 4 + channel),
+        ];
+        expect(pixel(10, 20), isNot(pixel(20, 20)));
+      } finally {
+        image.dispose();
+      }
+    } finally {
+      picture.dispose();
+    }
   });
 
   test('reader model recursively freezes collection inputs and copies', () {
@@ -3182,61 +3193,94 @@ void main() {
     tester,
   ) async {
     final semantics = tester.ensureSemantics();
-    final bridge = _ControlledBridge(format: FlutterBookFormat.epub);
-    await tester.pumpWidget(
-      MaterialApp(
-        home: ReaderScreen(
-          bridge: bridge,
-          decoder: (pixels, {required width, required height}) => _testImage(),
+    try {
+      final bridge = _ControlledBridge(format: FlutterBookFormat.epub);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ReaderScreen(
+            bridge: bridge,
+            decoder: (pixels, {required width, required height}) =>
+                _testImage(),
+          ),
         ),
-      ),
-    );
-    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
-    await tester.tap(find.text('Open document'));
-    await tester.pumpAndSettle();
+      );
+      await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+      await tester.tap(find.text('Open document'));
+      await tester.pumpAndSettle();
 
-    final semanticsFinder = find.byKey(
-      const ValueKey('reader-content-semantics'),
-    );
-    var data = tester.getSemantics(semanticsFinder).getSemanticsData();
-    expect(data.label, 'Document text: Selectable fixture text');
-    expect(data.value, 'No text selected');
-    BoxDecoration focusDecoration() =>
-        tester
-                .widget<DecoratedBox>(
-                  find.byKey(const ValueKey('reader-focus-indicator')),
-                )
-                .decoration
-            as BoxDecoration;
-    for (
-      var tabs = 0;
-      tabs < 5 && focusDecoration().border == null;
-      tabs += 1
-    ) {
-      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      final contentFinder = find.byKey(
+        const ValueKey('reader-content-semantics'),
+      );
+      var content = tester.getSemantics(contentFinder);
+      var data = content.getSemanticsData();
+      expect(data.label, 'Document text: Selectable fixture text');
+      expect(data.flagsCollection.isLiveRegion, isFalse);
+      final statusFinder = find.byKey(
+        const ValueKey('reader-selection-status'),
+      );
+      var status = tester.getSemantics(statusFinder).getSemanticsData();
+      expect(status.label, 'No text selected');
+      expect(status.flagsCollection.isLiveRegion, isFalse);
+      BoxDecoration focusDecoration() =>
+          tester
+                  .widget<DecoratedBox>(
+                    find.byKey(const ValueKey('reader-focus-indicator')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      for (
+        var tabs = 0;
+        tabs < 5 && focusDecoration().border == null;
+        tabs += 1
+      ) {
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pump();
+      }
+      content = tester.getSemantics(contentFinder);
+      data = content.getSemanticsData();
+      expect(data.hasAction(ui.SemanticsAction.focus), isTrue);
+      final focusedNodes = <SemanticsNode>[];
+      void collectFocused(SemanticsNode node) {
+        if (node.getSemanticsData().flagsCollection.isFocused ==
+            ui.Tristate.isTrue) {
+          focusedNodes.add(node);
+        }
+        node.visitChildren((child) {
+          collectFocused(child);
+          return true;
+        });
+      }
+
+      collectFocused(
+        tester.getSemantics(
+          find.byKey(const ValueKey('reader-document-semantics')),
+        ),
+      );
+      expect(focusedNodes, [same(content)]);
+      final focusBorder = focusDecoration().border! as Border;
+      expect(
+        focusBorder.top.color,
+        Theme.of(tester.element(contentFinder)).colorScheme.primary,
+      );
+      expect(focusBorder.top.width, 3);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
       await tester.pump();
+      status = tester.getSemantics(statusFinder).getSemanticsData();
+      expect(status.label, 'Selected text: e');
+      expect(status.flagsCollection.isLiveRegion, isTrue);
+
+      await tester.tap(find.byType(TextField));
+      await tester.pump();
+      expect(focusDecoration().border, isNull);
+
+      await tester.pumpWidget(const SizedBox());
+      await bridge.disposed.future;
+    } finally {
+      semantics.dispose();
     }
-    final focusBorder = focusDecoration().border! as Border;
-    expect(
-      focusBorder.top.color,
-      Theme.of(tester.element(semanticsFinder)).colorScheme.primary,
-    );
-    expect(focusBorder.top.width, 3);
-
-    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
-    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
-    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
-    await tester.pump();
-    data = tester.getSemantics(semanticsFinder).getSemanticsData();
-    expect(data.value, 'Selected text: e');
-
-    await tester.tap(find.byType(TextField));
-    await tester.pump();
-    expect(focusDecoration().border, isNull);
-
-    await tester.pumpWidget(const SizedBox());
-    await bridge.disposed.future;
-    semantics.dispose();
   });
 
   for (final format in [FlutterBookFormat.pdf, FlutterBookFormat.epub]) {
