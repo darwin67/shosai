@@ -254,6 +254,8 @@ class _ReaderLayoutReporter extends StatefulWidget {
 
 class _ReaderLayoutReporterState extends State<_ReaderLayoutReporter> {
   bool _scheduled = false;
+  ReaderLayout? _observedLayout;
+  ReaderLayout? _pendingLayout;
 
   @override
   Widget build(BuildContext context) => LayoutBuilder(
@@ -266,11 +268,25 @@ class _ReaderLayoutReporterState extends State<_ReaderLayoutReporter> {
         width: availableWidth,
         fontSize: MediaQuery.textScalerOf(context).scale(18),
       );
-      if (layout != widget.model.layout && !_scheduled) {
+      if (layout != _observedLayout) {
+        _observedLayout = layout;
+        if (layout != widget.model.layout ||
+            widget.model.busy ||
+            widget.model.relayoutBusy) {
+          _pendingLayout = layout;
+        } else {
+          _pendingLayout = null;
+        }
+      }
+      if (_pendingLayout != null && !_scheduled) {
         _scheduled = true;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           _scheduled = false;
-          if (mounted) widget.dispatch(ReaderLayoutChanged(layout));
+          final pending = _pendingLayout;
+          _pendingLayout = null;
+          if (mounted && pending != null) {
+            widget.dispatch(ReaderLayoutChanged(pending));
+          }
         });
       }
       return widget.child;

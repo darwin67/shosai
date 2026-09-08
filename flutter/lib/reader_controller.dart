@@ -1024,6 +1024,16 @@ final class ReaderController implements Listenable {
       _emit(_model.copyWith(layout: layout));
       return;
     }
+    if (layout == _model.layout && _relayoutCancellations.isNotEmpty) {
+      _requestedLayout = layout;
+      _failedLayout = null;
+      _layoutRevision += 1;
+      for (final active in _relayoutCancellations) {
+        _bridge.cancel(id: active);
+      }
+      _emit(_model.copyWith(relayoutBusy: false, selectionError: null));
+      return;
+    }
     if (layout == _requestedLayout ||
         layout == _failedLayout ||
         _model.annotationOperations.isNotEmpty ||
@@ -1173,7 +1183,9 @@ final class ReaderController implements Listenable {
         annotations: message.annotations,
         savedSelections: _savedSelections(message.annotations),
         annotationsReady: true,
-        annotationError: null,
+        annotationError: _model.annotationsReady
+            ? _model.annotationError
+            : null,
         layout: message.layout,
         relayoutBusy: false,
         selectionError: null,
