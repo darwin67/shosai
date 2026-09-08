@@ -315,6 +315,145 @@ pub enum AnnotationResolution {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTextAnchor {
+    pub resolution: AnnotationResolution,
+    pub range: Option<Range<usize>>,
+}
+
+/// Resolve a persisted quote against the document's current Unicode-scalar
+/// text. Stored offsets win when their normalized quote still matches; bounded
+/// quote/context matching recovers a unique moved range without guessing when
+/// repeated text remains ambiguous.
+pub fn resolve_text_anchor(
+    text: &str,
+    stored_range: Range<usize>,
+    quote: &QuoteSelector,
+) -> ResolvedTextAnchor {
+    let scalar_bytes = text
+        .char_indices()
+        .map(|(byte, _)| byte)
+        .chain(std::iter::once(text.len()))
+        .collect::<Vec<_>>();
+    if stored_range.start < stored_range.end
+        && stored_range.end < scalar_bytes.len()
+        && normalize_quote_v1(
+            &text[scalar_bytes[stored_range.start]..scalar_bytes[stored_range.end]],
+        ) == quote.exact
+    {
+        return ResolvedTextAnchor {
+            resolution: AnnotationResolution::Exact,
+            range: Some(stored_range),
+        };
+    }
+
+    let normalized = mapped_normalized_quote_text(text);
+    let mut candidates = normalized
+        .text
+        .match_indices(&quote.exact)
+        .filter_map(|(start_byte, value)| {
+            let end_byte = start_byte.checked_add(value.len())?;
+            let start = normalized.byte_offsets.binary_search(&start_byte).ok()?;
+            let end = normalized.byte_offsets.binary_search(&end_byte).ok()?;
+            (start < end).then(|| {
+                normalized.source_ranges[start].start..normalized.source_ranges[end - 1].end
+            })
+        })
+        .collect::<Vec<_>>();
+    candidates.dedup();
+    if candidates.is_empty() {
+        return ResolvedTextAnchor {
+            resolution: AnnotationResolution::Orphaned,
+            range: None,
+        };
+    }
+
+    let contextual = candidates
+        .iter()
+        .filter(|candidate| {
+            (quote.prefix.is_empty()
+                || quote_context_v1(
+                    &text[..scalar_bytes[candidate.start]],
+                    ContextDirection::Prefix,
+                )
+                .ends_with(&quote.prefix))
+                && (quote.suffix.is_empty()
+                    || quote_context_v1(
+                        &text[scalar_bytes[candidate.end]..],
+                        ContextDirection::Suffix,
+                    )
+                    .starts_with(&quote.suffix))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let recovered = match contextual.as_slice() {
+        [only] => Some(only.clone()),
+        [] if candidates.len() == 1 => Some(candidates.remove(0)),
+        _ => None,
+    };
+    ResolvedTextAnchor {
+        resolution: if recovered.is_some() {
+            AnnotationResolution::Recovered
+        } else {
+            AnnotationResolution::Ambiguous
+        },
+        range: recovered,
+    }
+}
+
+struct MappedNormalizedText {
+    text: String,
+    byte_offsets: Vec<usize>,
+    source_ranges: Vec<Range<usize>>,
+}
+
+fn mapped_normalized_quote_text(value: &str) -> MappedNormalizedText {
+    let mut text = String::new();
+    let mut source_ranges = Vec::new();
+    let mut source_scalar = 0;
+    let mut pending_space: Option<Range<usize>> = None;
+    for grapheme in value.graphemes(true) {
+        let grapheme_len = grapheme.chars().count();
+        let source_range = source_scalar..source_scalar + grapheme_len;
+        source_scalar += grapheme_len;
+        let normalized = grapheme
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .chars()
+            .filter(|character| *character != '\u{00ad}')
+            .collect::<String>()
+            .nfc()
+            .collect::<String>();
+        for character in normalized.chars() {
+            if quote_v1_whitespace(character) {
+                if !text.is_empty() {
+                    pending_space = Some(match pending_space {
+                        Some(pending) => pending.start..source_range.end,
+                        None => source_range.clone(),
+                    });
+                }
+            } else {
+                if let Some(pending) = pending_space.take() {
+                    text.push(' ');
+                    source_ranges.push(pending);
+                }
+                text.push(character);
+                source_ranges.push(source_range.clone());
+            }
+        }
+    }
+    let byte_offsets = text
+        .char_indices()
+        .map(|(byte, _)| byte)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    MappedNormalizedText {
+        text,
+        byte_offsets,
+        source_ranges,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportProvenance {
     pub source_system: String,
     pub source_id: Option<String>,
@@ -1089,6 +1228,61 @@ fn ensure_scalar_limit(value: &str, limit: usize, field: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_anchor_resolution_distinguishes_exact_and_unique_recovery() {
+        let original = "lead Cafe\u{301}\ttext tail";
+        let quote = QuoteSelector::new("Cafe\u{301}\ttext", "lead ", " tail").unwrap();
+        assert_eq!(
+            resolve_text_anchor(original, 5..15, &quote),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Exact,
+                range: Some(5..15),
+            }
+        );
+
+        let changed = "inserted lead Café text tail";
+        assert_eq!(
+            resolve_text_anchor(changed, 5..15, &quote),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Recovered,
+                range: Some(14..23),
+            }
+        );
+    }
+
+    #[test]
+    fn text_anchor_resolution_uses_context_without_guessing_repeated_quotes() {
+        let contextual = QuoteSelector::new("target", "alpha ", " omega").unwrap();
+        assert_eq!(
+            resolve_text_anchor("target noise alpha target omega", 1..7, &contextual),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Recovered,
+                range: Some(19..25),
+            }
+        );
+
+        let ambiguous = QuoteSelector::new("target", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor("target target", 1..7, &ambiguous),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Ambiguous,
+                range: None,
+            }
+        );
+    }
+
+    #[test]
+    fn text_anchor_resolution_reports_missing_quotes_as_orphaned() {
+        let quote = QuoteSelector::new("missing", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor("other text", 0..7, &quote),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Orphaned,
+                range: None,
+            }
+        );
+    }
 
     #[test]
     fn aggregate_snapshot_usage_enforces_each_limit() {
