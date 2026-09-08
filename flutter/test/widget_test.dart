@@ -1811,6 +1811,167 @@ void main() {
   });
 
   test(
+    'selection notes cannot be started or silently lost during relayout',
+    () async {
+      final bridge = _ControlledBridge(immediateLists: true);
+      final editors = <Completer<String?>>[];
+      final controller = ReaderController(
+        bridge: bridge,
+        decoder: (pixels, {required width, required height}) => _testImage(),
+        noteEditor: (_) {
+          final editor = Completer<String?>();
+          editors.add(editor);
+          return editor.future;
+        },
+      );
+      await _openControlled(controller, bridge, '/tmp/book.epub');
+      controller.dispatch(const ReaderSelectionStarted(1));
+      controller.dispatch(const ReaderSelectionExtended(3));
+      controller.dispatch(const ReaderSelectionEnded());
+      controller.dispatch(const ReaderSelectionNoteRequested());
+      expect(editors, hasLength(1));
+
+      final pendingLayout = Completer<FlutterSelectionSurface>();
+      bridge.selectionCompleters.add(pendingLayout);
+      controller.dispatch(
+        const ReaderLayoutChanged(
+          ReaderLayout(scale: 2, width: 300, fontSize: 20),
+        ),
+      );
+      await _waitUntil(() => controller.model.relayoutBusy);
+      controller.dispatch(const ReaderSelectionStarted(1));
+      controller.dispatch(const ReaderSelectionNoteRequested());
+      expect(controller.model.selectionPhase, ReaderSelectionPhase.idle);
+      expect(editors, hasLength(1));
+
+      editors.single.complete('preserve this draft');
+      await Future<void>.delayed(Duration.zero);
+      expect(controller.model.selectionActionError, contains('not saved'));
+      expect(bridge.createCalls, 0);
+      pendingLayout.complete(_surface(BigInt.from(20), raster: true));
+      await bridge.waitForOp(2);
+      controller.dispose();
+      await bridge.disposed.future;
+    },
+  );
+
+  test('relayout publishes image surface and annotations atomically', () async {
+    final bridge = _ControlledBridge(
+      format: FlutterBookFormat.epub,
+      immediateLists: true,
+    );
+    final oldImage = await _testImage();
+    final newImage = await _testImage();
+    var decodeCalls = 0;
+    final controller = ReaderController(
+      bridge: bridge,
+      decoder: (pixels, {required width, required height}) async {
+        decodeCalls += 1;
+        return decodeCalls == 1 ? oldImage : newImage;
+      },
+    );
+    await _openControlled(controller, bridge, '/tmp/book.epub');
+    final oldSurface = controller.model.selectionSurface!;
+    final selection = Completer<FlutterSelectionSurface>();
+    final annotations = Completer<List<FlutterAnnotation>>();
+    bridge.selectionCompleters.add(selection);
+    bridge.listCompleters.add(annotations);
+    final observed = <ReaderModel>[];
+    controller.addListener(() => observed.add(controller.model));
+
+    controller.dispatch(
+      const ReaderLayoutChanged(
+        ReaderLayout(scale: 2, width: 300, fontSize: 20),
+      ),
+    );
+    selection.complete(
+      _surface(BigInt.from(20), raster: true, text: 'new surface'),
+    );
+    await _waitUntil(() => bridge.listCalls == 2);
+    expect(controller.model.pageImage, same(oldImage));
+    expect(controller.model.selectionSurface, same(oldSurface));
+    expect(controller.model.annotations, isEmpty);
+    expect(oldImage.debugDisposed, isFalse);
+
+    annotations.complete([_annotation('new')]);
+    await bridge.waitForOp(2);
+    expect(controller.model.pageImage, same(newImage));
+    expect(controller.model.selectionSurface!.text, 'new surface');
+    expect(controller.model.annotations.single.id, 'new');
+    expect(oldImage.debugDisposed, isTrue);
+    expect(
+      bridge.releasedSelections.where((item) => item == oldSurface.handle),
+      hasLength(1),
+    );
+    expect(
+      observed.where(
+        (model) =>
+            identical(model.pageImage, newImage) ||
+            model.selectionSurface?.text == 'new surface' ||
+            model.annotations.isNotEmpty,
+      ),
+      everyElement(
+        predicate<ReaderModel>(
+          (model) =>
+              identical(model.pageImage, newImage) &&
+              model.selectionSurface?.text == 'new surface' &&
+              model.annotations.single.id == 'new',
+        ),
+      ),
+    );
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
+  test('opening allocation failure clears an active relayout state', () async {
+    final bridge = _ControlledBridge(immediateLists: true);
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/book.epub');
+    final pendingLayout = Completer<FlutterSelectionSurface>();
+    bridge.selectionCompleters.add(pendingLayout);
+    controller.dispatch(
+      const ReaderLayoutChanged(
+        ReaderLayout(scale: 2, width: 300, fontSize: 20),
+      ),
+    );
+    await _waitUntil(() => controller.model.relayoutBusy);
+    bridge.failCancellationCreation = true;
+    controller.dispatch(const ReaderOpenRequested('/tmp/replacement.epub'));
+
+    expect(controller.model.relayoutBusy, isFalse);
+    expect(controller.model.document, isNull);
+    expect(controller.model.error, contains('cancellation tokens'));
+    pendingLayout.complete(_surface(BigInt.from(20), raster: true));
+    await bridge.waitForOp(2);
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
+  test('queued CBZ layout changes do not start EPUB selection work', () async {
+    final bridge = _ControlledBridge(
+      format: FlutterBookFormat.cbz,
+      immediateLists: true,
+    );
+    final controller = ReaderController(
+      bridge: bridge,
+      decoder: (pixels, {required width, required height}) => _testImage(),
+    );
+    controller.dispatch(const ReaderOpenRequested('/tmp/book.cbz'));
+    controller.dispatch(
+      const ReaderLayoutChanged(
+        ReaderLayout(scale: 2, width: 300, fontSize: 20),
+      ),
+    );
+    await bridge.waitForOp(1);
+
+    expect(bridge.selectionCalls, 0);
+    expect(controller.model.selectionError, isNull);
+    expect(controller.model.relayoutBusy, isFalse);
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
+  test(
     'closing rejects update and delete intents while effects drain',
     () async {
       final bridge = _ControlledBridge(
@@ -2941,19 +3102,22 @@ FlutterRenderedBuffer _buffer(BigInt id) => FlutterRenderedBuffer(
   byteLen: BigInt.from(4),
 );
 
-FlutterSelectionSurface _surface(BigInt id, {required bool raster}) =>
-    FlutterSelectionSurface(
-      handle: FlutterSelectionHandle(registry: BigInt.one, id: id),
-      width: 1,
-      height: 1,
-      text: 'x',
-      copyEligible: true,
-      raster: raster ? _buffer(id) : null,
-      endpoints: const [],
-      graphemeBoundaries: Uint32List.fromList([0, 1]),
-      wordBoundaries: Uint32List.fromList([0, 1]),
-      visualLines: const [],
-    );
+FlutterSelectionSurface _surface(
+  BigInt id, {
+  required bool raster,
+  String text = 'x',
+}) => FlutterSelectionSurface(
+  handle: FlutterSelectionHandle(registry: BigInt.one, id: id),
+  width: 1,
+  height: 1,
+  text: text,
+  copyEligible: true,
+  raster: raster ? _buffer(id) : null,
+  endpoints: const [],
+  graphemeBoundaries: Uint32List.fromList([0, 1]),
+  wordBoundaries: Uint32List.fromList([0, 1]),
+  visualLines: const [],
+);
 
 Future<void> _waitUntil(bool Function() condition) async {
   while (!condition()) {
