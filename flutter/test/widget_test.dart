@@ -1737,6 +1737,23 @@ void main() {
     await bridge.disposed.future;
   });
 
+  test('failed relayout allocation remains the next open layout', () async {
+    final bridge = _ControlledBridge(immediateLists: true);
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/book.epub');
+    const desired = ReaderLayout(scale: 2, width: 300, fontSize: 20);
+    bridge.failCancellationCreation = true;
+    controller.dispatch(const ReaderLayoutChanged(desired));
+
+    bridge.failCancellationCreation = false;
+    controller.dispatch(const ReaderOpenRequested('/tmp/replacement.epub'));
+    await bridge.waitForOp(2);
+
+    expect(bridge.selectionLayouts.last, desired);
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
   test(
     'layout changes during open are applied by a follow-up effect',
     () async {
@@ -1774,6 +1791,10 @@ void main() {
     await bridge.waitForOp(2);
     expect(controller.model.layout, active);
     expect(controller.model.relayoutBusy, isFalse);
+    bridge.failCancellationCreation = false;
+    controller.dispatch(const ReaderOpenRequested('/tmp/replacement.epub'));
+    await bridge.waitForOp(3);
+    expect(bridge.selectionLayouts.last, rejected);
     controller.dispose();
     await bridge.disposed.future;
   });

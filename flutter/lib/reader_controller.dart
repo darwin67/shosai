@@ -467,11 +467,13 @@ final class _ReaderRelayoutFailed extends ReaderMessage {
   const _ReaderRelayoutFailed({
     required this.generation,
     required this.revision,
+    required this.layout,
     required this.error,
   });
 
   final int generation;
   final int revision;
+  final ReaderLayout layout;
   final String error;
 }
 
@@ -721,7 +723,7 @@ final class ReaderController implements Listenable {
       case _ReaderRelayoutFailed():
         if (_isCurrent(message.generation) &&
             message.revision == _layoutRevision) {
-          _failedLayout = _requestedLayout;
+          _failedLayout = message.layout;
           _emit(
             _model.copyWith(
               relayoutBusy: false,
@@ -1054,6 +1056,7 @@ final class ReaderController implements Listenable {
 
   void _startRelayout(FlutterDocumentSummary document, ReaderLayout layout) {
     final generation = _model.generation;
+    _requestedLayout = layout;
     late final BigInt cancellation;
     try {
       cancellation = _bridge.createCancellation();
@@ -1064,7 +1067,6 @@ final class ReaderController implements Listenable {
       );
       return;
     }
-    _requestedLayout = layout;
     _failedLayout = null;
     for (final active in _relayoutCancellations) {
       _bridge.cancel(id: active);
@@ -1162,6 +1164,7 @@ final class ReaderController implements Listenable {
         _ReaderRelayoutFailed(
           generation: generation,
           revision: revision,
+          layout: layout,
           error: error.toString(),
         ),
       );
