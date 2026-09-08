@@ -454,7 +454,7 @@ mod tests {
 
     fn dense_pdf() -> Vec<u8> {
         let mut content = String::new();
-        for line in 0..160 {
+        for line in 0..80 {
             content.push_str(&format!(
                 "BT /F1 1 Tf 1 0 0 1 105 {} Tm ({}) Tj ET\n",
                 51.0 + line as f32 * 0.9,

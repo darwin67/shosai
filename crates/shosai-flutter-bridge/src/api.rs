@@ -4,8 +4,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use shosai_core::annotations::HighlightColor;
 use shosai_core::bridge::{
-    Bridge, BridgeAnnotation, BridgeError, BufferHandle, Cancellation, CreateAnnotationRequest,
-    DocumentHandle, OpenRequest, RenderRequest, SelectionHandle, SelectionSurface,
+    AnnotationTextRange, Bridge, BridgeAnnotation, BridgeError, BufferHandle, Cancellation,
+    CreateAnnotationRequest, DocumentHandle, OpenRequest, RenderRequest, SelectionHandle,
+    SelectionSurface,
 };
 use shosai_core::library::BookFormat;
 use thiserror::Error;
@@ -55,18 +56,47 @@ impl From<HighlightColor> for FlutterHighlightColor {
 pub struct FlutterAnnotation {
     pub id: String,
     pub unit: usize,
-    pub start: usize,
-    pub end: usize,
+    pub text_range: Option<FlutterAnnotationTextRange>,
+    pub quote: Option<String>,
+    pub rectangles: Option<Vec<FlutterSelectionRect>>,
     pub color: FlutterHighlightColor,
     pub body: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlutterAnnotationTextRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl From<AnnotationTextRange> for FlutterAnnotationTextRange {
+    fn from(value: AnnotationTextRange) -> Self {
+        Self {
+            start: value.start,
+            end: value.end,
+        }
+    }
+}
+
 impl From<BridgeAnnotation> for FlutterAnnotation {
     fn from(value: BridgeAnnotation) -> Self {
         Self {
             id: value.id,
             unit: value.unit,
-            start: value.start,
-            end: value.end,
+            text_range: value.text_range.map(Into::into),
+            quote: value.quote,
+            rectangles: Some(
+                value
+                    .rectangles
+                    .into_iter()
+                    .map(|rect| FlutterSelectionRect {
+                        left: rect.left,
+                        top: rect.top,
+                        right: rect.right,
+                        bottom: rect.bottom,
+                    })
+                    .collect(),
+            ),
             color: value.color.into(),
             body: value.body,
         }
@@ -204,15 +234,34 @@ pub struct FlutterSelectionEndpoint {
     pub rect: FlutterSelectionRect,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlutterSelectionCaret {
+    pub offset: usize,
+    pub x: f32,
+    pub along_line: f32,
+    pub vertical: bool,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlutterSelectionVisualLine {
+    pub carets: Vec<FlutterSelectionCaret>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlutterSelectionSurface {
     pub handle: FlutterSelectionHandle,
     pub width: f32,
     pub height: f32,
     pub text: String,
+    pub copy_eligible: bool,
     pub resource_path: Option<String>,
     pub raster: Option<FlutterRenderedBuffer>,
     pub endpoints: Vec<FlutterSelectionEndpoint>,
+    pub grapheme_boundaries: Vec<u32>,
+    pub word_boundaries: Vec<u32>,
+    pub visual_lines: Vec<FlutterSelectionVisualLine>,
 }
 
 impl From<SelectionSurface> for FlutterSelectionSurface {
@@ -222,6 +271,7 @@ impl From<SelectionSurface> for FlutterSelectionSurface {
             width: value.width,
             height: value.height,
             text: value.text,
+            copy_eligible: value.copy_eligible,
             resource_path: value.resource_path,
             raster: value.raster.map(|raster| FlutterRenderedBuffer {
                 handle: raster.handle.into(),
@@ -242,6 +292,34 @@ impl From<SelectionSurface> for FlutterSelectionSurface {
                         right: endpoint.rect.right,
                         bottom: endpoint.rect.bottom,
                     },
+                })
+                .collect(),
+            grapheme_boundaries: value
+                .grapheme_boundaries
+                .into_iter()
+                .map(|offset| offset as u32)
+                .collect(),
+            word_boundaries: value
+                .word_boundaries
+                .into_iter()
+                .map(|offset| offset as u32)
+                .collect(),
+            visual_lines: value
+                .visual_lines
+                .into_iter()
+                .map(|line| FlutterSelectionVisualLine {
+                    carets: line
+                        .carets
+                        .into_iter()
+                        .map(|caret| FlutterSelectionCaret {
+                            offset: caret.offset,
+                            x: caret.x,
+                            along_line: caret.along_line,
+                            vertical: caret.vertical,
+                            top: caret.top,
+                            bottom: caret.bottom,
+                        })
+                        .collect(),
                 })
                 .collect(),
         }
@@ -475,9 +553,11 @@ impl FlutterBridge {
     pub async fn list_annotations(
         &self,
         document: FlutterDocumentHandle,
+        cancellation_id: u64,
     ) -> Result<Vec<FlutterAnnotation>, FlutterBridgeError> {
+        let cancellation = self.cancellation(cancellation_id)?;
         self.bridge
-            .list_annotations(document.into())
+            .list_annotations(document.into(), cancellation)
             .await
             .map(|items| items.into_iter().map(Into::into).collect())
             .map_err(Into::into)

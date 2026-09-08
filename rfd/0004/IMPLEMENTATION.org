@@ -109,7 +109,7 @@ coordinates.
   reproducible debug and release commands.
 - [X] Open one representative PDF and EPUB, render visible content, and release
   document and buffer handles deterministically.
-- [ ] Reproduce RFD 6's shared idle/selecting/selected/committing interaction for
+- [X] Reproduce RFD 6's shared idle/selecting/selected/committing interaction for
   mouse, keyboard, and touch using the same logical endpoint and anchor contract.
 - [X] Draw temporary and saved overlays without rerendering PDF pages during drag
   or changing EPUB pagination geometry.
@@ -124,6 +124,17 @@ coordinates.
   renderer recovery, missing files, and revoked file capabilities.
 - [ ] Measure the M0 budgets on Linux, macOS, Windows, and physical Android/iOS
   hardware available for the first release decision.
+
+The completed interaction slice keeps widgets on the Elm boundary documented in
+[[file:../../docs/flutter-architecture.md][the Flutter architecture contract]].
+Rust exports grapheme, word, visual-line, bidi, and oriented-caret metadata;
+Flutter dispatches typed pointer, keyboard, focus, and action messages without
+re-entering layout during interaction.  Native and widget regressions cover both
+formats, mouse/touch ownership, keyboard-only operation, cancellation and stale
+completion races, annotation reopen/update/delete, geometry bounds, and compact
+large-text action layout.  The unchecked relayout, responsive/screen-reader,
+lifecycle, multi-platform measurement, and physical-mobile exit gates remain
+explicitly unclaimed.
 
 *Exit*: highlighting works end to end in both formats on desktop and at least one
 physical mobile platform, and failures on any unvalidated target are recorded

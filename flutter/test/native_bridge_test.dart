@@ -217,16 +217,33 @@ void main() {
         color: FlutterHighlightColor.yellow,
         cancellationId: cancellation!,
       );
-      expect(created.start, endpoint.rangeStart);
-      expect(created.end, endpoint.rangeEnd);
+      expect(created.textRange?.start, endpoint.rangeStart);
+      expect(created.textRange?.end, endpoint.rangeEnd);
+      expect(created.quote, isNotEmpty);
+      if (expectedFormat == FlutterBookFormat.pdf) {
+        // Text-backed highlights paint from their range on the retained
+        // selection surface; only geometry-only PDF annotations export rects.
+        expect(created.rectangles, isEmpty);
+      } else {
+        expect(created.rectangles, isEmpty);
+      }
       expect(await File(databasePath).exists(), isTrue);
 
       release();
       await open();
-      var listed = await bridge!.listAnnotations(document: document!);
+      var listed = await bridge!.listAnnotations(
+        document: document!,
+        cancellationId: cancellation!,
+      );
       expect(listed, hasLength(1));
       expect(listed.single.id, created.id);
       expect(listed.single.color, FlutterHighlightColor.yellow);
+      expect(listed.single.textRange, isNotNull);
+      expect(listed.single.quote, created.quote);
+      expect(
+        listed.single.rectangles,
+        orderedEquals(created.rectangles ?? const []),
+      );
 
       expect(
         await bridge!.updateAnnotation(
@@ -237,7 +254,10 @@ void main() {
         ),
         isTrue,
       );
-      listed = await bridge!.listAnnotations(document: document!);
+      listed = await bridge!.listAnnotations(
+        document: document!,
+        cancellationId: cancellation!,
+      );
       expect(listed, hasLength(1));
       expect(listed.single.color, FlutterHighlightColor.purple);
       expect(listed.single.body, 'native bridge note');
@@ -246,7 +266,13 @@ void main() {
         await bridge!.deleteAnnotation(document: document!, id: created.id),
         isTrue,
       );
-      expect(await bridge!.listAnnotations(document: document!), isEmpty);
+      expect(
+        await bridge!.listAnnotations(
+          document: document!,
+          cancellationId: cancellation!,
+        ),
+        isEmpty,
+      );
     } finally {
       release();
       await directory.delete(recursive: true);

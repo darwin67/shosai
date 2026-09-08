@@ -77,9 +77,14 @@ pub struct EpubTextHit {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EpubTextEndpoint {
     pub rect: EpubTextRect,
+    /// Shaper-derived caret coordinate; unlike the hit-zone center this is an
+    /// actual cluster edge and preserves proportional widths and bidi.
+    pub caret_x: f32,
     pub scalar: usize,
     pub scalar_start: usize,
     pub scalar_end: usize,
+    /// Index into `EpubTextLayout::lines`, assigned by the shaper.
+    pub visual_line: usize,
 }
 #[derive(Clone, Debug)]
 pub struct EpubTextLine {
@@ -304,6 +309,7 @@ impl EpubFontBook {
                 endpoint.scalar += scalar_start;
                 endpoint.scalar_start += scalar_start;
                 endpoint.scalar_end += scalar_start;
+                endpoint.visual_line += result.lines.len();
             }
             result.width = result.width.max(layout.width);
             result.height += layout.height;
@@ -500,7 +506,7 @@ impl EpubFontBook {
         let mut lines = Vec::with_capacity(runs.len());
         let mut links = Vec::new();
         let mut endpoints = Vec::new();
-        for (run, line_range) in runs.into_iter().zip(line_ranges) {
+        for (visual_line, (run, line_range)) in runs.into_iter().zip(line_ranges).enumerate() {
             check_cancelled(is_cancelled)?;
             let ph = (run.line_height * request.scale).ceil() as usize;
             let mut rgba = if rasterize {
@@ -563,9 +569,11 @@ impl EpubFontBook {
                                 width: grapheme_width / 2.0,
                                 height: rect.height,
                             },
+                            caret_x: x,
                             scalar: left,
                             scalar_start: cluster_scalar,
                             scalar_end: after,
+                            visual_line,
                         },
                     )?;
                     checked_push_endpoint(
@@ -577,9 +585,11 @@ impl EpubFontBook {
                                 width: grapheme_width / 2.0,
                                 height: rect.height,
                             },
+                            caret_x: x + grapheme_width,
                             scalar: right,
                             scalar_start: cluster_scalar,
                             scalar_end: after,
+                            visual_line,
                         },
                     )?;
                     cluster_scalar = after;
@@ -897,12 +907,16 @@ fn is_bidi_paragraph_separator(character: char) -> bool {
 }
 fn paragraph_ranges(text: &str) -> Vec<Range<usize>> {
     let base = text.as_ptr() as usize;
-    BidiParagraphs::new(text)
+    let mut ranges = BidiParagraphs::new(text)
         .map(|paragraph| {
             let start = paragraph.as_ptr() as usize - base;
             start..start + paragraph.len()
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if text.chars().last().is_some_and(is_bidi_paragraph_separator) {
+        ranges.push(text.len()..text.len());
+    }
+    ranges
 }
 fn checked_scalar_range(
     scalar_boundaries: &[usize],
@@ -967,9 +981,11 @@ mod tests {
                 width: 1.0,
                 height: 1.0,
             },
+            caret_x: 0.0,
             scalar: 0,
             scalar_start: 0,
             scalar_end: 1,
+            visual_line: 0,
         };
         let mut endpoints = vec![endpoint; EPUB_TEXT_MAX_ENDPOINTS];
         let error = checked_push_endpoint(&mut endpoints, endpoint).unwrap_err();
