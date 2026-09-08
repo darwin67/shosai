@@ -19,6 +19,8 @@ export 'package:shosai_flutter/reader_controller.dart'
         ReaderAnnotationNoteRequested,
         ReaderAnnotationUpdated,
         ReaderFocusTarget,
+        ReaderLayout,
+        ReaderLayoutChanged,
         ReaderMessage,
         ReaderModel,
         ReaderOpenRequested,
@@ -142,89 +144,138 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Widget build(BuildContext context) {
     final model = _controller.model;
     final document = model.document;
-    return Scaffold(
-      appBar: AppBar(title: const Text('Shōsai Flutter feasibility slice')),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Semantics(
-                textField: true,
-                label: 'Document path',
-                child: TextField(
-                  controller: _path,
-                  enabled: !model.busy,
-                  onSubmitted: (_) => _open(),
-                  decoration: const InputDecoration(
-                    border: OutlineInputBorder(),
-                    hintText: '/path/to/book.pdf',
-                    labelText: 'PDF, EPUB, or CBZ path',
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: FilledButton.icon(
-                  onPressed: model.busy ? null : _open,
-                  icon: const Icon(Icons.menu_book),
-                  label: Text(model.busy ? 'Opening…' : 'Open document'),
-                ),
-              ),
-              if (model.error != null) ...[
-                const SizedBox(height: 12),
+    return _ReaderLayoutReporter(
+      model: model,
+      dispatch: _controller.dispatch,
+      child: Scaffold(
+        appBar: AppBar(title: const Text('Shōsai Flutter feasibility slice')),
+        body: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
                 Semantics(
-                  liveRegion: true,
-                  child: Text(
-                    model.error!,
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.error,
+                  textField: true,
+                  label: 'Document path',
+                  child: TextField(
+                    controller: _path,
+                    enabled: !model.busy,
+                    onSubmitted: (_) => _open(),
+                    decoration: const InputDecoration(
+                      border: OutlineInputBorder(),
+                      hintText: '/path/to/book.pdf',
+                      labelText: 'PDF, EPUB, or CBZ path',
                     ),
                   ),
                 ),
-              ],
-              if (model.selectionError != null && model.document != null)
-                Semantics(
-                  liveRegion: true,
-                  child: Text('Selection unavailable: ${model.selectionError}'),
-                ),
-              if (model.selectionActionError != null && model.document != null)
-                Semantics(
-                  liveRegion: true,
-                  child: Text(
-                    'Selection action failed: ${model.selectionActionError}',
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: FilledButton.icon(
+                    onPressed: model.busy ? null : _open,
+                    icon: const Icon(Icons.menu_book),
+                    label: Text(model.busy ? 'Opening…' : 'Open document'),
                   ),
                 ),
-              if (model.annotationError != null && model.document != null)
-                Semantics(
-                  liveRegion: true,
-                  child: Text(
-                    model.annotationsReady
-                        ? 'Highlight action failed: ${model.annotationError}'
-                        : 'Highlights unavailable: ${model.annotationError}',
-                  ),
-                ),
-              const SizedBox(height: 20),
-              Expanded(
-                child: document == null
-                    ? const WelcomePanel()
-                    : _DocumentView(
-                        document: document,
-                        image: model.pageImage,
-                        model: model,
-                        dispatch: _controller.dispatch,
-                        readerFocus: _readerFocus,
-                        actionFocus: _actionFocus,
+                if (model.error != null) ...[
+                  const SizedBox(height: 12),
+                  Semantics(
+                    liveRegion: true,
+                    child: Text(
+                      model.error!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
                       ),
-              ),
-            ],
+                    ),
+                  ),
+                ],
+                if (model.selectionError != null && model.document != null)
+                  Semantics(
+                    liveRegion: true,
+                    child: Text(
+                      'Selection unavailable: ${model.selectionError}',
+                    ),
+                  ),
+                if (model.selectionActionError != null &&
+                    model.document != null)
+                  Semantics(
+                    liveRegion: true,
+                    child: Text(
+                      'Selection action failed: ${model.selectionActionError}',
+                    ),
+                  ),
+                if (model.annotationError != null && model.document != null)
+                  Semantics(
+                    liveRegion: true,
+                    child: Text(
+                      model.annotationsReady
+                          ? 'Highlight action failed: ${model.annotationError}'
+                          : 'Highlights unavailable: ${model.annotationError}',
+                    ),
+                  ),
+                if (model.relayoutBusy) const LinearProgressIndicator(),
+                const SizedBox(height: 20),
+                Expanded(
+                  child: document == null
+                      ? const WelcomePanel()
+                      : _DocumentView(
+                          document: document,
+                          image: model.pageImage,
+                          model: model,
+                          dispatch: _controller.dispatch,
+                          readerFocus: _readerFocus,
+                          actionFocus: _actionFocus,
+                        ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
     );
   }
+}
+
+class _ReaderLayoutReporter extends StatefulWidget {
+  const _ReaderLayoutReporter({
+    required this.model,
+    required this.dispatch,
+    required this.child,
+  });
+
+  final ReaderModel model;
+  final void Function(ReaderMessage) dispatch;
+  final Widget child;
+
+  @override
+  State<_ReaderLayoutReporter> createState() => _ReaderLayoutReporterState();
+}
+
+class _ReaderLayoutReporterState extends State<_ReaderLayoutReporter> {
+  bool _scheduled = false;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final availableWidth = constraints.maxWidth.isFinite
+          ? math.max(1.0, constraints.maxWidth - 48).roundToDouble()
+          : widget.model.layout.width;
+      final layout = ReaderLayout(
+        scale: MediaQuery.devicePixelRatioOf(context),
+        width: availableWidth,
+        fontSize: MediaQuery.textScalerOf(context).scale(18),
+      );
+      if (layout != widget.model.layout && !_scheduled) {
+        _scheduled = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _scheduled = false;
+          if (mounted) widget.dispatch(ReaderLayoutChanged(layout));
+        });
+      }
+      return widget.child;
+    },
+  );
 }
 
 class WelcomePanel extends StatelessWidget {
@@ -477,7 +528,8 @@ class _DocumentView extends StatelessWidget {
                                   ReaderAnnotationNavigated(annotation.id),
                                 ),
                                 child: Text(
-                                  'Highlight ${annotation.unit.toInt() + 1}',
+                                  'Highlight ${annotation.unit.toInt() + 1}'
+                                  '${_annotationResolutionSuffix(annotation.resolution)}',
                                 ),
                               ),
                               IconButton(
@@ -713,6 +765,14 @@ FlutterHighlightColor _nextColor(FlutterHighlightColor color) =>
       FlutterHighlightColor.blue => FlutterHighlightColor.pink,
       FlutterHighlightColor.pink => FlutterHighlightColor.purple,
       FlutterHighlightColor.purple => FlutterHighlightColor.yellow,
+    };
+
+String _annotationResolutionSuffix(FlutterAnnotationResolution resolution) =>
+    switch (resolution) {
+      FlutterAnnotationResolution.exact => '',
+      FlutterAnnotationResolution.recovered => ' — recovered',
+      FlutterAnnotationResolution.ambiguous => ' — ambiguous',
+      FlutterAnnotationResolution.orphaned => ' — unavailable',
     };
 
 String _colorName(FlutterHighlightColor color) => switch (color) {

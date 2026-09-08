@@ -1528,6 +1528,50 @@ void main() {
     await bridge.disposed.future;
   });
 
+  for (final format in [FlutterBookFormat.epub, FlutterBookFormat.pdf]) {
+    test(
+      '$format relayout preserves resolved highlights and layout inputs',
+      () async {
+        final bridge = _ControlledBridge(
+          format: format,
+          initialAnnotations: _resolutionAnnotations(),
+          immediateLists: true,
+        );
+        final controller = ReaderController(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        );
+        await _openControlled(controller, bridge, '/tmp/book');
+        const layout = ReaderLayout(scale: 2, width: 320, fontSize: 24);
+
+        controller.dispatch(const ReaderLayoutChanged(layout));
+        await bridge.waitForOp(2);
+
+        expect(controller.model.layout, layout);
+        expect(controller.model.relayoutBusy, isFalse);
+        expect(
+          controller.model.annotations.map((item) => item.resolution),
+          orderedEquals([
+            FlutterAnnotationResolution.recovered,
+            FlutterAnnotationResolution.ambiguous,
+            FlutterAnnotationResolution.orphaned,
+          ]),
+        );
+        expect(controller.model.savedSelections, hasLength(1));
+        expect(bridge.selectionLayouts, [const ReaderLayout(), layout]);
+        expect(bridge.listScales, [1, 2]);
+        if (format == FlutterBookFormat.pdf) {
+          expect(bridge.renderScales, [1, 2]);
+        } else {
+          expect(bridge.renderScales, isEmpty);
+        }
+
+        controller.dispose();
+        await bridge.disposed.future;
+      },
+    );
+  }
+
   test(
     'closing rejects update and delete intents while effects drain',
     () async {
@@ -2060,6 +2104,92 @@ void main() {
     expect(bridge.disposeCount, 1);
   });
 
+  testWidgets(
+    'viewport DPI font and theme changes preserve surfaced anchor states',
+    (tester) async {
+      tester.view.physicalSize = const Size(1200, 1000);
+      tester.view.devicePixelRatio = 2;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final bridge = _ControlledBridge(
+        initialAnnotations: _resolutionAnnotations(),
+        immediateLists: true,
+      );
+      Widget app({
+        Brightness brightness = Brightness.light,
+        double textScale = 1.5,
+      }) => MaterialApp(
+        theme: ThemeData(brightness: brightness),
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(
+            context,
+          ).copyWith(textScaler: TextScaler.linear(textScale)),
+          child: child!,
+        ),
+        home: ReaderScreen(
+          key: const ValueKey('reader'),
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      );
+
+      await tester.pumpWidget(app());
+      await tester.pump();
+      await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+      await tester.tap(find.text('Open document'));
+      await tester.pumpAndSettle();
+      expect(
+        bridge.selectionLayouts.single,
+        const ReaderLayout(scale: 2, width: 552, fontSize: 27),
+      );
+      expect(find.text('Highlight 1 — recovered'), findsOneWidget);
+      await tester.scrollUntilVisible(
+        find.text('Highlight 1 — ambiguous'),
+        300,
+        scrollable: find.byType(Scrollable).last,
+      );
+      expect(find.text('Highlight 1 — ambiguous'), findsOneWidget);
+      await tester.scrollUntilVisible(
+        find.text('Highlight 1 — unavailable'),
+        300,
+        scrollable: find.byType(Scrollable).last,
+      );
+      expect(find.text('Highlight 1 — unavailable'), findsOneWidget);
+
+      tester.view.physicalSize = const Size(1400, 1000);
+      await tester.pumpAndSettle();
+      expect(
+        bridge.selectionLayouts.last,
+        const ReaderLayout(scale: 2, width: 652, fontSize: 27),
+      );
+
+      final callsBeforeTheme = bridge.selectionCalls;
+      await tester.pumpWidget(app(brightness: Brightness.dark));
+      await tester.pumpAndSettle();
+      expect(bridge.selectionCalls, callsBeforeTheme);
+      expect(find.text('Highlight 1 — unavailable'), findsOneWidget);
+
+      await tester.pumpWidget(app(brightness: Brightness.dark, textScale: 2));
+      await tester.pumpAndSettle();
+      expect(
+        bridge.selectionLayouts.last,
+        const ReaderLayout(scale: 2, width: 652, fontSize: 36),
+      );
+
+      tester.view.devicePixelRatio = 3;
+      tester.view.physicalSize = const Size(2100, 1500);
+      await tester.pumpAndSettle();
+      expect(
+        bridge.selectionLayouts.last,
+        const ReaderLayout(scale: 3, width: 652, fontSize: 36),
+      );
+      expect(find.text('Highlight 1 — unavailable'), findsOneWidget);
+
+      await tester.pumpWidget(const SizedBox());
+      await bridge.disposed.future;
+    },
+  );
+
   for (final format in [FlutterBookFormat.pdf, FlutterBookFormat.epub]) {
     for (final device in [
       ui.PointerDeviceKind.mouse,
@@ -2530,6 +2660,31 @@ FlutterAnnotation _annotation(String id) => FlutterAnnotation(
   color: FlutterHighlightColor.yellow,
 );
 
+List<FlutterAnnotation> _resolutionAnnotations() => [
+  FlutterAnnotation(
+    id: 'recovered',
+    unit: BigInt.zero,
+    resolution: FlutterAnnotationResolution.recovered,
+    textRange: FlutterAnnotationTextRange(
+      start: BigInt.one,
+      end: BigInt.from(3),
+    ),
+    color: FlutterHighlightColor.yellow,
+  ),
+  FlutterAnnotation(
+    id: 'ambiguous',
+    unit: BigInt.zero,
+    resolution: FlutterAnnotationResolution.ambiguous,
+    color: FlutterHighlightColor.green,
+  ),
+  FlutterAnnotation(
+    id: 'orphaned',
+    unit: BigInt.zero,
+    resolution: FlutterAnnotationResolution.orphaned,
+    color: FlutterHighlightColor.blue,
+  ),
+];
+
 Future<void> _openControlled(
   ReaderController controller,
   _ControlledBridge bridge,
@@ -2585,6 +2740,9 @@ final class _ControlledBridge implements FlutterBridge {
   var _nextId = BigInt.one;
   final _listedDocuments = <BigInt>{};
   final createdRanges = <(BigInt, BigInt)>[];
+  final selectionLayouts = <ReaderLayout>[];
+  final renderScales = <double>[];
+  final listScales = <double>[];
 
   Future<void> waitForOp(int count) async {
     while (finishedOperations < count) {
@@ -2638,6 +2796,9 @@ final class _ControlledBridge implements FlutterBridge {
     required BigInt cancellationId,
   }) async {
     selectionCalls += 1;
+    selectionLayouts.add(
+      ReaderLayout(scale: scale, width: width, fontSize: fontSize),
+    );
     if (selectionFailure) throw StateError('selection failed');
     return FlutterSelectionSurface(
       handle: FlutterSelectionHandle(registry: BigInt.one, id: cancellationId),
@@ -2760,6 +2921,7 @@ final class _ControlledBridge implements FlutterBridge {
     required BigInt cancellationId,
   }) {
     listCalls += 1;
+    listScales.add(scale);
     if (listFailure) return Future.error(StateError('annotation list failed'));
     if (immediateLists) return Future.value(List.of(storedAnnotations));
     if (_listedDocuments.add(document.id)) {
@@ -2849,6 +3011,7 @@ final class _ControlledBridge implements FlutterBridge {
     required BigInt cancellationId,
   }) async {
     renderCalls += 1;
+    renderScales.add(scale);
     return FlutterRenderedBuffer(
       handle: FlutterBufferHandle(registry: BigInt.one, id: cancellationId),
       width: 1,
