@@ -2064,19 +2064,42 @@ fn selection_transient_byte_len(
             .selection_admission_byte_len(unit, scale)
             .map_err(map_preflight_error),
         OpenDocument::Epub(_) => {
-            let geometry = EPUB_TEXT_MAX_ENDPOINTS
+            let native_workspace = EPUB_TEXT_MAX_ENDPOINTS
                 .checked_mul(std::mem::size_of::<EpubTextEndpoint>())
                 // Chapter text, request runs, shaping text/control buffers, and
                 // scalar-boundary indexes coexist during native layout.
                 .and_then(|bytes| bytes.checked_add(EPUB_TEXT_MAX_SCALARS * 4 * 12))
+                .ok_or(BridgeError::BufferLimit)?;
+            // Bridge geometry is built while native layout remains live. Caret
+            // vectors may retain up to four slots for each endpoint because
+            // Vec's first growth allocates four elements; boundary vectors can
+            // retain the next power-of-two capacity above the scalar ceiling.
+            let bridge_geometry = EPUB_TEXT_MAX_ENDPOINTS
+                .checked_mul(std::mem::size_of::<SelectionEndpoint>())
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        EPUB_TEXT_MAX_ENDPOINTS * 4 * std::mem::size_of::<SelectionCaret>(),
+                    )
+                })
+                .and_then(|bytes| {
+                    bytes.checked_add(
+                        EPUB_TEXT_MAX_ENDPOINTS * std::mem::size_of::<SelectionVisualLine>(),
+                    )
+                })
+                .and_then(|bytes| {
+                    bytes.checked_add(EPUB_TEXT_MAX_SCALARS * 2 * 2 * std::mem::size_of::<usize>())
+                })
+                .and_then(|bytes| bytes.checked_add(EPUB_TEXT_MAX_SCALARS * 4))
+                .and_then(|bytes| bytes.checked_add(std::mem::size_of::<SelectionSurface>()))
                 .ok_or(BridgeError::BufferLimit)?;
             let rasters = if rasterize {
                 EPUB_TEXT_MAX_PIXELS * 4 * 2
             } else {
                 0
             };
-            geometry
-                .checked_add(rasters)
+            native_workspace
+                .checked_add(bridge_geometry)
+                .and_then(|bytes| bytes.checked_add(rasters))
                 .ok_or(BridgeError::BufferLimit)
         }
         OpenDocument::Cbz(_) => Err(BridgeError::UnsupportedOperation(BookFormat::Cbz)),
@@ -3693,6 +3716,7 @@ mod tests {
             .find(|endpoint| endpoint.range_start < endpoint.range_end)
             .copied()
             .unwrap();
+        assert!(bridge.release_buffer(surface.raster.unwrap().handle));
         assert!(bridge.release_selection(surface.handle));
 
         let created = bridge
@@ -3717,6 +3741,85 @@ mod tests {
                 .await
                 .unwrap(),
             vec![created]
+        );
+    }
+
+    #[tokio::test]
+    async fn epub_annotation_admits_retained_caret_capacity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("many-caret-lines.epub");
+        let body = format!("<p>{}</p>", "i".repeat(65)).repeat(496);
+        std::fs::write(&path, epub_with_body(&body)).unwrap();
+        let admission = Arc::new(BridgeAdmission::new(
+            MAX_BRIDGE_RETAINED_BUFFER_BYTES,
+            MAX_BRIDGE_RENDER_WORKERS,
+        ));
+        let bridge = Bridge::with_admission_database(
+            Arc::clone(&admission),
+            Some(Arc::new(directory.path().join("annotations.sqlite"))),
+        );
+        let document = bridge
+            .open_document(
+                OpenRequest {
+                    book_id: None,
+                    local_id: "many-caret-lines".into(),
+                    path_key: crate::path_key::path_key(&path),
+                    format_hint: Some(BookFormat::Epub),
+                },
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        let initial_probe_bytes = admission.probe_bytes.available_permits();
+        let surface = bridge
+            .selection_surface(document.handle, 0, 1.0, 680.0, 18.0, Cancellation::new())
+            .await
+            .unwrap();
+        let endpoint = surface
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.range_start < endpoint.range_end)
+            .copied()
+            .unwrap();
+        assert!(bridge.release_buffer(surface.raster.unwrap().handle));
+        assert!(bridge.release_selection(surface.handle));
+        assert_eq!(
+            admission.probe_bytes.available_permits(),
+            initial_probe_bytes
+        );
+
+        let created = bridge
+            .create_annotation(
+                CreateAnnotationRequest {
+                    document: document.handle,
+                    unit: 0,
+                    start: endpoint.range_start,
+                    end: endpoint.range_end,
+                    display_scale: 1.0,
+                    color: HighlightColor::Yellow,
+                    body: None,
+                },
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            created.text_range,
+            Some(AnnotationTextRange {
+                start: endpoint.range_start,
+                end: endpoint.range_end,
+            })
+        );
+        assert_eq!(
+            bridge
+                .list_annotations(document.handle, 1.0, Cancellation::new())
+                .await
+                .unwrap(),
+            vec![created]
+        );
+        assert_eq!(
+            admission.probe_bytes.available_permits(),
+            initial_probe_bytes
         );
     }
 
