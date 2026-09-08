@@ -601,6 +601,7 @@ class _SelectionActions extends StatelessWidget {
     final copyEnabled = model.selectedText != null;
     final persistenceEnabled =
         !model.busy &&
+        !model.relayoutBusy &&
         model.annotationsReady &&
         model.annotationOperations.isEmpty;
     return Semantics(

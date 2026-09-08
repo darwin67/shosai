@@ -640,9 +640,17 @@ final class ReaderController implements Listenable {
         _selectionCopyRequested();
       case _ReaderSelectionNoteCompleted():
         if (_isCurrent(message.generation) &&
-            message.revision == _noteRevision &&
-            message.selectionRevision == _selectionRevision) {
-          _selectionCommitted(FlutterHighlightColor.yellow, message.body);
+            message.revision == _noteRevision) {
+          if (message.selectionRevision == _selectionRevision) {
+            _selectionCommitted(FlutterHighlightColor.yellow, message.body);
+          } else {
+            _emit(
+              _model.copyWith(
+                selectionActionError:
+                    'The note was not saved because the selection or reader layout changed. Try again.',
+              ),
+            );
+          }
         }
       case _ReaderSelectionEffectFailed():
         if (_isCurrent(message.generation) &&
@@ -778,10 +786,22 @@ final class ReaderController implements Listenable {
     try {
       cancellation = _bridge.createCancellation();
     } on FlutterBridgeError catch (error) {
-      _emit(_model.copyWith(error: error.message, generation: generation));
+      _emit(
+        _model.copyWith(
+          error: error.message,
+          generation: generation,
+          relayoutBusy: false,
+        ),
+      );
       return;
     } catch (error) {
-      _emit(_model.copyWith(error: error.toString(), generation: generation));
+      _emit(
+        _model.copyWith(
+          error: error.toString(),
+          generation: generation,
+          relayoutBusy: false,
+        ),
+      );
       return;
     }
     _activeCancellation = cancellation;
@@ -1182,7 +1202,9 @@ final class ReaderController implements Listenable {
   }
 
   void _selectionStarted(int offset) {
-    if (_model.selectionSurface == null || _closing) return;
+    if (_model.selectionSurface == null || _model.relayoutBusy || _closing) {
+      return;
+    }
     _cancelSelectionCreates();
     _selectionRevision += 1;
     _emit(
@@ -1213,7 +1235,7 @@ final class ReaderController implements Listenable {
     double? y,
   ) {
     final surface = _model.selectionSurface;
-    if (surface == null || _closing) return;
+    if (surface == null || _model.relayoutBusy || _closing) return;
     if (_model.selectionPointer case final owner? when owner != pointer) return;
     _focusAdapter(ReaderFocusTarget.surface);
     final anchor = _model.anchor;
@@ -1273,7 +1295,10 @@ final class ReaderController implements Listenable {
 
   void _selectionKeyboardExtended(ReaderSelectionMovement movement) {
     final surface = _model.selectionSurface;
-    if (surface == null || surface.graphemeBoundaries.length < 2 || _closing) {
+    if (surface == null ||
+        surface.graphemeBoundaries.length < 2 ||
+        _model.relayoutBusy ||
+        _closing) {
       return;
     }
     final graphemes = surface.graphemeBoundaries.toList(growable: false);
@@ -1413,7 +1438,10 @@ final class ReaderController implements Listenable {
   }
 
   void _selectionNoteRequested() {
-    if (_model.selectionPhase != ReaderSelectionPhase.selected) return;
+    if (_model.selectionPhase != ReaderSelectionPhase.selected ||
+        _model.relayoutBusy) {
+      return;
+    }
     _emit(_model.copyWith(selectionActionError: null));
     final generation = _model.generation;
     final revision = ++_noteRevision;
@@ -1875,7 +1903,8 @@ final class ReaderController implements Listenable {
       final document = _model.document;
       if (document != null &&
           _requestedLayout != _model.layout &&
-          _model.contentState == ReaderContentState.ready) {
+          _model.contentState == ReaderContentState.ready &&
+          document.format != FlutterBookFormat.cbz) {
         _startRelayout(document, _requestedLayout);
       }
     }
