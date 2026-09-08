@@ -384,6 +384,7 @@ pub(crate) struct TextAnchorResolver<'a> {
 }
 
 impl<'a> TextAnchorResolver<'a> {
+    #[cfg(test)]
     pub(crate) fn new(
         text: &'a str,
         remaining_work: &mut usize,

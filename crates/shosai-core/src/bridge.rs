@@ -2166,9 +2166,9 @@ fn annotation_dtos(
         let unit = match (&annotation.target, document) {
             (AnnotationTarget::Epub(anchor), OpenDocument::Epub(document)) => {
                 let unit = anchor.spine_occurrence as usize;
-                if !document
+                if document
                     .chapter(unit)
-                    .is_some_and(|chapter| chapter.path == anchor.resource_path.as_str())
+                    .is_none_or(|chapter| chapter.path != anchor.resource_path.as_str())
                 {
                     continue;
                 }
