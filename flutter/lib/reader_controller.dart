@@ -1034,9 +1034,13 @@ final class ReaderController implements Listenable {
       _emit(_model.copyWith(relayoutBusy: false, selectionError: null));
       return;
     }
+    if (_model.annotationOperations.isNotEmpty) {
+      _requestedLayout = layout;
+      _failedLayout = null;
+      return;
+    }
     if (layout == _requestedLayout ||
         layout == _failedLayout ||
-        _model.annotationOperations.isNotEmpty ||
         _model.contentState != ReaderContentState.ready ||
         document.format == FlutterBookFormat.cbz) {
       return;
@@ -1801,7 +1805,10 @@ final class ReaderController implements Listenable {
       final pending = {..._model.annotationOperations}..remove(operation);
       _emit(_model.copyWith(annotationOperations: pending));
     }
-    if (message.revision != _annotationRevision) return;
+    if (message.revision != _annotationRevision) {
+      _startRequestedRelayoutIfReady();
+      return;
+    }
     if (message.items case final items?) {
       _setAnnotations(items, annotationsReady: operation == null ? true : null);
     }
@@ -1835,6 +1842,21 @@ final class ReaderController implements Listenable {
             : _unchanged,
       ),
     );
+    _startRequestedRelayoutIfReady();
+  }
+
+  void _startRequestedRelayoutIfReady() {
+    final document = _model.document;
+    if (document != null &&
+        !_model.busy &&
+        !_model.relayoutBusy &&
+        _model.annotationOperations.isEmpty &&
+        _model.contentState == ReaderContentState.ready &&
+        document.format != FlutterBookFormat.cbz &&
+        _requestedLayout != _model.layout &&
+        _requestedLayout != _failedLayout) {
+      _startRelayout(document, _requestedLayout);
+    }
   }
 
   void _navigateAnnotation(String id) {
@@ -1912,13 +1934,7 @@ final class ReaderController implements Listenable {
     }
     if (_isCurrent(message.generation)) {
       _emit(_model.copyWith(busy: false));
-      final document = _model.document;
-      if (document != null &&
-          _requestedLayout != _model.layout &&
-          _model.contentState == ReaderContentState.ready &&
-          document.format != FlutterBookFormat.cbz) {
-        _startRelayout(document, _requestedLayout);
-      }
+      _startRequestedRelayoutIfReady();
     }
     _activeBridgeOperations -= 1;
     _disposeBridgeIfIdle();
