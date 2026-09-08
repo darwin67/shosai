@@ -2092,6 +2092,9 @@ fn annotation_dtos(
         let resolver =
             TextAnchorResolver::new(&text, &mut remaining_work, is_cancelled).map_err(|error| {
                 match error {
+                    TextAnchorResolutionError::InvalidSelector => {
+                        BridgeError::InvalidRequest(error.to_string())
+                    }
                     TextAnchorResolutionError::Cancelled => BridgeError::Cancelled,
                     TextAnchorResolutionError::WorkLimit => BridgeError::BufferLimit,
                 }
@@ -2115,6 +2118,9 @@ fn annotation_dtos(
                 resolver
                     .resolve(stored_range, quote, &mut remaining_work, is_cancelled)
                     .map_err(|error| match error {
+                        TextAnchorResolutionError::InvalidSelector => {
+                            BridgeError::InvalidRequest(error.to_string())
+                        }
                         TextAnchorResolutionError::Cancelled => BridgeError::Cancelled,
                         TextAnchorResolutionError::WorkLimit => BridgeError::BufferLimit,
                     })?,

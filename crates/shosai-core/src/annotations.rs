@@ -12,7 +12,7 @@ use thiserror::Error;
 #[cfg(test)]
 use tokio::sync::Semaphore;
 use unicode_normalization::UnicodeNormalization;
-use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentation};
+use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
 
 use crate::epub::CanonicalEpubPath;
@@ -324,6 +324,8 @@ pub struct ResolvedTextAnchor {
 
 #[derive(Debug, Error)]
 pub enum TextAnchorResolutionError {
+    #[error("text anchor selector is invalid")]
+    InvalidSelector,
     #[error("text anchor resolution was cancelled")]
     Cancelled,
     #[error("text anchor resolution exceeded its work limit")]
@@ -342,7 +344,7 @@ impl<'a> TextAnchorResolver<'a> {
         remaining_work: &mut usize,
         is_cancelled: &dyn Fn() -> bool,
     ) -> Result<Self, TextAnchorResolutionError> {
-        let mut scalar_bytes = Vec::new();
+        let mut scalar_bytes = Vec::with_capacity(text.len().saturating_add(1));
         for (index, (byte, _)) in text.char_indices().enumerate() {
             if index % 1024 == 0 && is_cancelled() {
                 return Err(TextAnchorResolutionError::Cancelled);
@@ -571,6 +573,9 @@ pub fn resolve_text_anchor(
     stored_range: Range<usize>,
     quote: &QuoteSelector,
 ) -> Result<ResolvedTextAnchor, TextAnchorResolutionError> {
+    quote
+        .validate()
+        .map_err(|_| TextAnchorResolutionError::InvalidSelector)?;
     let mut remaining_work = MAX_TEXT_ANCHOR_RESOLUTION_WORK;
     TextAnchorResolver::new(text, &mut remaining_work, &|| false)
         .and_then(|resolver| resolver.resolve(stored_range, quote, &mut remaining_work, &|| false))
@@ -655,82 +660,50 @@ fn for_each_bounded_grapheme(
     if value.is_empty() {
         return Ok(());
     }
-    let mut chunk_offsets = Vec::new();
-    for (index, (byte, _)) in value.char_indices().enumerate() {
-        if index % MAX_TEXT_ANCHOR_GRAPHEME_SCALARS == 0 {
-            if is_cancelled() {
-                return Err(TextAnchorResolutionError::Cancelled);
-            }
-            chunk_offsets.push(byte);
-        }
-        consume_resolution_work(remaining_work, 1)?;
-    }
-    chunk_offsets.push(value.len());
-
-    let mut cursor = GraphemeCursor::new(0, value.len(), true);
-    let mut chunk_index = 0;
-    let mut grapheme_start = 0;
-    let mut pending_grapheme_scalars = 0_usize;
-    while grapheme_start < value.len() {
+    // Keep the final grapheme pending until the next bounded window. This
+    // preserves the context needed by ZWJ sequences and regional indicators
+    // without allowing one adversarial cluster to monopolize cancellation.
+    let mut pending_start = 0;
+    let mut loaded_end = 0;
+    loop {
         if is_cancelled() {
             return Err(TextAnchorResolutionError::Cancelled);
         }
-        let chunk_start = chunk_offsets[chunk_index];
-        let chunk_end = chunk_offsets[chunk_index + 1];
-        let scan_start = cursor.cur_cursor().max(chunk_start);
-        let boundary = match cursor.next_boundary(&value[chunk_start..chunk_end], chunk_start) {
-            Ok(Some(boundary)) => boundary,
-            Ok(None) => break,
-            Err(GraphemeIncomplete::NextChunk) => {
-                let scanned = value[scan_start..chunk_end].chars().count();
-                consume_resolution_work(remaining_work, scanned)?;
-                pending_grapheme_scalars = pending_grapheme_scalars.saturating_add(scanned);
-                if pending_grapheme_scalars > MAX_TEXT_ANCHOR_GRAPHEME_SCALARS {
-                    return Err(TextAnchorResolutionError::WorkLimit);
-                }
-                chunk_index += 1;
-                if chunk_index + 1 >= chunk_offsets.len() {
-                    return Err(TextAnchorResolutionError::WorkLimit);
-                }
-                continue;
-            }
-            Err(GraphemeIncomplete::PreContext(offset)) => {
-                if is_cancelled() {
-                    return Err(TextAnchorResolutionError::Cancelled);
-                }
-                consume_resolution_work(remaining_work, usize::BITS as usize)?;
-                let Ok(context_index) = chunk_offsets.binary_search(&offset) else {
-                    return Err(TextAnchorResolutionError::WorkLimit);
-                };
-                if context_index == 0 {
-                    return Err(TextAnchorResolutionError::WorkLimit);
-                }
-                let context_start = chunk_offsets[context_index - 1];
-                let context = &value[context_start..offset];
-                let context_scalars = context.chars().count();
-                consume_resolution_work(remaining_work, context_scalars)?;
-                if context_scalars > MAX_TEXT_ANCHOR_GRAPHEME_SCALARS {
-                    return Err(TextAnchorResolutionError::WorkLimit);
-                }
-                cursor.provide_context(context, context_start);
-                continue;
-            }
-            Err(_) => return Err(TextAnchorResolutionError::WorkLimit),
-        };
-        let grapheme = &value[grapheme_start..boundary];
-        let grapheme_scalars = grapheme.chars().count();
-        if grapheme_scalars > MAX_TEXT_ANCHOR_GRAPHEME_SCALARS {
-            return Err(TextAnchorResolutionError::WorkLimit);
+        let mut added = 0;
+        for character in value[loaded_end..]
+            .chars()
+            .take(MAX_TEXT_ANCHOR_GRAPHEME_SCALARS)
+        {
+            loaded_end += character.len_utf8();
+            added += 1;
         }
-        consume_resolution_work(remaining_work, grapheme_scalars)?;
-        visit(grapheme, remaining_work)?;
-        grapheme_start = boundary;
-        pending_grapheme_scalars = 0;
-        while chunk_index + 1 < chunk_offsets.len() && boundary >= chunk_offsets[chunk_index + 1] {
-            chunk_index += 1;
+        consume_resolution_work(remaining_work, added)?;
+
+        let at_end = loaded_end == value.len();
+        let window_start = pending_start;
+        let mut graphemes = value[window_start..loaded_end]
+            .grapheme_indices(true)
+            .peekable();
+        while let Some((offset, grapheme)) = graphemes.next() {
+            if graphemes.peek().is_none() && !at_end {
+                pending_start = window_start + offset;
+                if grapheme.chars().count() > MAX_TEXT_ANCHOR_GRAPHEME_SCALARS {
+                    return Err(TextAnchorResolutionError::WorkLimit);
+                }
+                break;
+            }
+            let grapheme_scalars = grapheme.chars().count();
+            if grapheme_scalars > MAX_TEXT_ANCHOR_GRAPHEME_SCALARS {
+                return Err(TextAnchorResolutionError::WorkLimit);
+            }
+            consume_resolution_work(remaining_work, grapheme_scalars)?;
+            visit(grapheme, remaining_work)?;
+            pending_start = window_start + offset + grapheme.len();
+        }
+        if at_end {
+            return Ok(());
         }
     }
-    Ok(())
 }
 
 struct MappedNormalizedText {
@@ -745,8 +718,8 @@ fn mapped_normalized_quote_text(
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<MappedNormalizedText, TextAnchorResolutionError> {
     let mut source = value.chars().enumerate().peekable();
-    let mut profile_input = String::new();
-    let mut input_ranges = Vec::new();
+    let mut profile_input = String::with_capacity(value.len());
+    let mut input_ranges = Vec::with_capacity(value.len());
     let mut since_cancel_check = 0;
     while let Some((index, character)) = source.next() {
         if since_cancel_check >= 1024 {
@@ -776,8 +749,8 @@ fn mapped_normalized_quote_text(
             input_ranges.push(index..index + 1);
         }
     }
-    let mut text = String::new();
-    let mut source_ranges = Vec::new();
+    let mut text = String::with_capacity(profile_input.len());
+    let mut source_ranges = Vec::with_capacity(profile_input.len());
     let mut pending_space: Option<Range<usize>> = None;
     let mut input_scalar_start = 0;
     for_each_bounded_grapheme(
@@ -815,7 +788,9 @@ fn mapped_normalized_quote_text(
             Ok(())
         },
     )?;
-    let mut byte_offsets = Vec::new();
+    drop(profile_input);
+    drop(input_ranges);
+    let mut byte_offsets = Vec::with_capacity(text.len().saturating_add(1));
     for (index, (byte, _)) in text.char_indices().enumerate() {
         if index % 1024 == 0 && is_cancelled() {
             return Err(TextAnchorResolutionError::Cancelled);
@@ -1767,6 +1742,47 @@ mod tests {
                 "failed at a workspace boundary for {selected:?}",
             );
         }
+
+        let split_zwj = format!("{}👩‍💻", "a".repeat(1_023));
+        let laptop = QuoteSelector::new("💻", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor(&split_zwj, 0..1, &laptop)
+                .unwrap()
+                .resolution,
+            AnnotationResolution::Orphaned,
+        );
+
+        let split_indicators = format!("{}🇷🇸🇮", "a".repeat(1_023));
+        let flag = QuoteSelector::new("🇷🇸", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor(&split_indicators, 0..1, &flag).unwrap(),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Recovered,
+                range: Some(1_023..1_025),
+            }
+        );
+    }
+
+    #[test]
+    fn text_anchor_resolution_rejects_mutated_empty_selectors() {
+        let mut quote = QuoteSelector::new("quote", "", "").unwrap();
+        quote.exact.clear();
+        assert!(matches!(
+            resolve_text_anchor("quote", 0..5, &quote),
+            Err(TextAnchorResolutionError::InvalidSelector)
+        ));
+    }
+
+    #[test]
+    fn text_anchor_resolution_handles_large_mismatching_stored_ranges() {
+        let text = "a".repeat(131_072);
+        let quote = QuoteSelector::new("missing", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor(&text, 0..text.len(), &quote)
+                .unwrap()
+                .resolution,
+            AnnotationResolution::Orphaned,
+        );
     }
 
     #[test]
