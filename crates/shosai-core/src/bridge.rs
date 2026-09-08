@@ -41,7 +41,7 @@ pub const MAX_BRIDGE_RETAINED_DOCUMENT_BYTES: usize = 3 * 1024 * 1024 * 1024;
 pub const MAX_BRIDGE_PROBE_BYTES: usize = 512 * 1024 * 1024;
 pub const MAX_BRIDGE_LOCAL_ID_BYTES: usize = 4 * 1024;
 pub const MAX_BRIDGE_PATH_KEY_BYTES: usize = 64 * 1024;
-// The resolver retains five usize/range indexes plus source/profile/normalized
+// The resolver retains its usize/range indexes plus source/profile/normalized
 // text at peak. Limiting PDF text to 2 MiB keeps the conservative 144 MiB
 // reservation below the process-wide transient buffer budget on 64-bit hosts.
 const MAX_ANNOTATION_PDF_TEXT_BYTES: usize = 2 * 1024 * 1024;
@@ -3766,7 +3766,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn annotation_resolution_workspace_serializes_at_its_peak_bound() {
+    async fn annotation_resolution_workspace_caps_peak_concurrency() {
         const INDEX_AND_TEXT_BYTES_PER_INPUT_BYTE: usize = 64;
         const NORMALIZATION_AND_MATCHER_OVERHEAD: usize = 16 * 1024 * 1024;
         assert!(
@@ -3776,7 +3776,7 @@ mod tests {
         );
         assert!(ANNOTATION_RESOLUTION_WORKSPACE_BYTES as usize <= MAX_BRIDGE_BUFFER_BYTES);
 
-        let admission = BridgeAdmission::new(MAX_BRIDGE_BUFFER_BYTES, 2);
+        let admission = BridgeAdmission::new(MAX_BRIDGE_RETAINED_BUFFER_BYTES, 3);
         let cancellation = Cancellation::new();
         let first = acquire_permits(
             Arc::clone(&admission.buffer_bytes),
@@ -3789,18 +3789,26 @@ mod tests {
             Arc::clone(&admission.buffer_bytes),
             ANNOTATION_RESOLUTION_WORKSPACE_BYTES,
             &cancellation,
+        )
+        .await
+        .unwrap();
+        let third = acquire_permits(
+            Arc::clone(&admission.buffer_bytes),
+            ANNOTATION_RESOLUTION_WORKSPACE_BYTES,
+            &cancellation,
         );
-        tokio::pin!(second);
+        tokio::pin!(third);
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(10), &mut second)
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut third)
                 .await
                 .is_err()
         );
         drop(first);
-        let _second = tokio::time::timeout(std::time::Duration::from_secs(1), second)
+        let _third = tokio::time::timeout(std::time::Duration::from_secs(1), third)
             .await
-            .expect("the serialized resolution workspace must be admitted")
+            .expect("a third workspace must be admitted after one completes")
             .unwrap();
+        drop(second);
     }
 
     #[tokio::test]

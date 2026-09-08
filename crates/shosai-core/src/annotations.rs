@@ -12,7 +12,7 @@ use thiserror::Error;
 #[cfg(test)]
 use tokio::sync::Semaphore;
 use unicode_normalization::UnicodeNormalization;
-use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete, UnicodeSegmentation};
 use uuid::Uuid;
 
 use crate::epub::CanonicalEpubPath;
@@ -408,6 +408,8 @@ impl<'a> TextAnchorResolver<'a> {
         let mut last_candidate = None;
         let mut contextual_candidate = None;
         let mut contextual_count = 0;
+        let mut start_scalar = 0;
+        let mut end_scalar = 0;
         matched = 0;
         for (byte_index, byte) in self.normalized.text.bytes().enumerate() {
             if byte_index % 1024 == 0 && is_cancelled() {
@@ -427,19 +429,26 @@ impl<'a> TextAnchorResolver<'a> {
             let end_byte = byte_index + 1;
             let start_byte = end_byte - pattern.len();
             matched = prefix_table[matched - 1];
-            let Ok(start) = self.normalized.byte_offsets.binary_search(&start_byte) else {
+            while self.normalized.byte_offsets[start_scalar] < start_byte {
+                consume_resolution_work(remaining_work, 1)?;
+                start_scalar += 1;
+            }
+            if self.normalized.byte_offsets[start_scalar] != start_byte {
                 continue;
-            };
-            let Ok(end) = self.normalized.byte_offsets.binary_search(&end_byte) else {
+            }
+            if end_scalar < start_scalar {
+                end_scalar = start_scalar;
+            }
+            while self.normalized.byte_offsets[end_scalar] < end_byte {
+                consume_resolution_work(remaining_work, 1)?;
+                end_scalar += 1;
+            }
+            if self.normalized.byte_offsets[end_scalar] != end_byte {
                 continue;
-            };
-            if start >= end
-                || (start > 0
-                    && self.normalized.source_ranges[start - 1]
-                        == self.normalized.source_ranges[start])
-                || (end < self.normalized.source_ranges.len()
-                    && self.normalized.source_ranges[end - 1] == self.normalized.source_ranges[end])
-            {
+            }
+            let start = start_scalar;
+            let end = end_scalar;
+            if start >= end || !self.has_legal_profile_boundaries(start, end, remaining_work)? {
                 continue;
             }
             let source_range = self.normalized.source_ranges[start].start
@@ -493,6 +502,39 @@ impl<'a> TextAnchorResolver<'a> {
             range: recovered,
         })
     }
+
+    fn has_legal_profile_boundaries(
+        &self,
+        start: usize,
+        end: usize,
+        remaining_work: &mut usize,
+    ) -> Result<bool, TextAnchorResolutionError> {
+        let start_range = &self.normalized.source_ranges[start];
+        let mut omitted = start;
+        while omitted > 0 && self.normalized.source_ranges[omitted - 1] == *start_range {
+            consume_resolution_work(remaining_work, 1)?;
+            omitted -= 1;
+            let byte = self.normalized.byte_offsets[omitted];
+            let next = self.normalized.byte_offsets[omitted + 1];
+            if &self.normalized.text[byte..next] != " " {
+                return Ok(false);
+            }
+        }
+        let end_range = &self.normalized.source_ranges[end - 1];
+        let mut omitted = end;
+        while omitted < self.normalized.source_ranges.len()
+            && self.normalized.source_ranges[omitted] == *end_range
+        {
+            consume_resolution_work(remaining_work, 1)?;
+            let byte = self.normalized.byte_offsets[omitted];
+            let next = self.normalized.byte_offsets[omitted + 1];
+            if &self.normalized.text[byte..next] != " " {
+                return Ok(false);
+            }
+            omitted += 1;
+        }
+        Ok(true)
+    }
 }
 
 /// Resolve a persisted quote against the document's current Unicode-scalar
@@ -524,22 +566,7 @@ fn bounded_normalize_quote_v1(
     remaining_work: &mut usize,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<String, TextAnchorResolutionError> {
-    for grapheme in value.graphemes(true) {
-        let mut scalars = 0;
-        for _ in grapheme.chars() {
-            if scalars % 1024 == 0 && is_cancelled() {
-                return Err(TextAnchorResolutionError::Cancelled);
-            }
-            scalars += 1;
-            if scalars > MAX_TEXT_ANCHOR_GRAPHEME_SCALARS {
-                return Err(TextAnchorResolutionError::WorkLimit);
-            }
-        }
-        // Account for both the validation walk above and the subsequent
-        // normalization walk before entering the bounded NFC operation.
-        consume_resolution_work(remaining_work, scalars.saturating_mul(2))?;
-    }
-    Ok(normalize_quote_v1(value))
+    mapped_normalized_quote_text(value, remaining_work, is_cancelled).map(|mapped| mapped.text)
 }
 
 struct MappedNormalizedText {
@@ -579,26 +606,56 @@ fn mapped_normalized_quote_text(
             input_ranges.push(index..index + 1);
         }
     }
-    let input_byte_offsets = profile_input
-        .char_indices()
-        .map(|(byte, _)| byte)
-        .chain(std::iter::once(profile_input.len()))
-        .collect::<Vec<_>>();
     let mut text = String::new();
     let mut source_ranges = Vec::new();
     let mut pending_space: Option<Range<usize>> = None;
-    for (grapheme_index, (start_byte, grapheme)) in profile_input.grapheme_indices(true).enumerate()
-    {
-        if grapheme_index % 1024 == 0 && is_cancelled() {
+    let mut chunk_offsets = Vec::new();
+    for (index, (byte, _)) in profile_input.char_indices().enumerate() {
+        if index % MAX_TEXT_ANCHOR_GRAPHEME_SCALARS == 0 {
+            if is_cancelled() {
+                return Err(TextAnchorResolutionError::Cancelled);
+            }
+            chunk_offsets.push(byte);
+        }
+        consume_resolution_work(remaining_work, 1)?;
+    }
+    if !profile_input.is_empty() {
+        chunk_offsets.push(profile_input.len());
+    }
+    let mut cursor = GraphemeCursor::new(0, profile_input.len(), true);
+    let mut chunk_index = 0;
+    let mut grapheme_start = 0;
+    let mut input_scalar_start = 0;
+    while grapheme_start < profile_input.len() {
+        if is_cancelled() {
             return Err(TextAnchorResolutionError::Cancelled);
         }
+        let chunk_start = chunk_offsets[chunk_index];
+        let chunk_end = chunk_offsets[chunk_index + 1];
+        let boundary =
+            match cursor.next_boundary(&profile_input[chunk_start..chunk_end], chunk_start) {
+                Ok(Some(boundary)) => boundary,
+                Ok(None) => break,
+                Err(GraphemeIncomplete::NextChunk) => {
+                    chunk_index += 1;
+                    if chunk_index + 1 >= chunk_offsets.len()
+                        || cursor.cur_cursor().saturating_sub(grapheme_start)
+                            > MAX_TEXT_ANCHOR_GRAPHEME_SCALARS * 4
+                    {
+                        return Err(TextAnchorResolutionError::WorkLimit);
+                    }
+                    continue;
+                }
+                Err(_) => return Err(TextAnchorResolutionError::WorkLimit),
+            };
+        let grapheme = &profile_input[grapheme_start..boundary];
         let grapheme_scalars = grapheme.chars().count();
         if grapheme_scalars > MAX_TEXT_ANCHOR_GRAPHEME_SCALARS {
             return Err(TextAnchorResolutionError::WorkLimit);
         }
         consume_resolution_work(remaining_work, grapheme_scalars)?;
-        let start = input_byte_offsets.binary_search(&start_byte).unwrap();
-        let end = start + grapheme.chars().count();
+        let start = input_scalar_start;
+        let end = start + grapheme_scalars;
         let source_range = input_ranges[start].start..input_ranges[end - 1].end;
         let normalized = grapheme.nfc().collect::<String>();
         for (index, character) in normalized.chars().enumerate() {
@@ -622,12 +679,21 @@ fn mapped_normalized_quote_text(
                 source_ranges.push(source_range.clone());
             }
         }
+        grapheme_start = boundary;
+        input_scalar_start = end;
+        while chunk_index + 1 < chunk_offsets.len() && boundary >= chunk_offsets[chunk_index + 1] {
+            chunk_index += 1;
+        }
     }
-    let byte_offsets = text
-        .char_indices()
-        .map(|(byte, _)| byte)
-        .chain(std::iter::once(text.len()))
-        .collect();
+    let mut byte_offsets = Vec::new();
+    for (index, (byte, _)) in text.char_indices().enumerate() {
+        if index % 1024 == 0 && is_cancelled() {
+            return Err(TextAnchorResolutionError::Cancelled);
+        }
+        consume_resolution_work(remaining_work, 1)?;
+        byte_offsets.push(byte);
+    }
+    byte_offsets.push(text.len());
     Ok(MappedNormalizedText {
         text,
         byte_offsets,
@@ -1488,6 +1554,15 @@ mod tests {
         let resolved = resolve_text_anchor("x👩‍💻", 0..1, &partial_cluster).unwrap();
         assert_eq!(resolved.resolution, AnnotationResolution::Orphaned);
         assert!(resolved.range.is_none());
+
+        let whitespace_cluster = QuoteSelector::new(" \u{0301}", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor("x \u{0301}", 0..1, &whitespace_cluster).unwrap(),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Recovered,
+                range: Some(1..3),
+            }
+        );
     }
 
     #[test]
