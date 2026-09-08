@@ -1820,7 +1820,7 @@ fn selection_surface(
             let raster_pixels = (raster_width as usize)
                 .checked_mul(raster_height as usize)
                 .ok_or(BridgeError::BufferLimit)?;
-            if raster_pixels > EPUB_TEXT_MAX_PIXELS {
+            if rasterize && raster_pixels > EPUB_TEXT_MAX_PIXELS {
                 return Err(BridgeError::BufferLimit);
             }
             let mut raster = if rasterize {
@@ -3643,6 +3643,80 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn epub_annotation_measurement_ignores_unused_raster_limits() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tall-layout.epub");
+        let body = "<p>x</p>".repeat(4_095);
+        std::fs::write(&path, epub_with_body(&body)).unwrap();
+        let bridge = Bridge::with_database_path(directory.path().join("annotations.sqlite"));
+        let document = bridge
+            .open_document(
+                OpenRequest {
+                    book_id: None,
+                    local_id: "tall-layout".into(),
+                    path_key: crate::path_key::path_key(&path),
+                    format_hint: Some(BookFormat::Epub),
+                },
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        let retained = bridge.document(document.handle).unwrap();
+        match selection_surface(&retained.document, 0, 1.0, 680.0, 18.0, true, &|| false) {
+            Err(BridgeError::Render(message))
+                if message.contains("16777216-pixel per-call ceiling") => {}
+            Err(error) => panic!("unexpected raster failure: {error:?}"),
+            Ok(extraction) => panic!(
+                "default raster unexpectedly fit: {}x{}, text={}, lines={}",
+                extraction.raster_width,
+                extraction.raster_height,
+                extraction.surface.text.chars().count(),
+                extraction.surface.visual_lines.len(),
+            ),
+        }
+        let measurement =
+            selection_surface(&retained.document, 0, 1.0, 680.0, 18.0, false, &|| false);
+        if let Err(error) = measurement {
+            panic!("measurement failed: {error:?}");
+        }
+        let surface = bridge
+            .selection_surface(document.handle, 0, 0.1, 680.0, 18.0, Cancellation::new())
+            .await
+            .unwrap();
+        let endpoint = surface
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.range_start < endpoint.range_end)
+            .copied()
+            .unwrap();
+        assert!(bridge.release_selection(surface.handle));
+
+        let created = bridge
+            .create_annotation(
+                CreateAnnotationRequest {
+                    document: document.handle,
+                    unit: 0,
+                    start: endpoint.range_start,
+                    end: endpoint.range_end,
+                    display_scale: 0.1,
+                    color: HighlightColor::Yellow,
+                    body: None,
+                },
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.resolution, AnnotationResolution::Exact);
+        assert_eq!(
+            bridge
+                .list_annotations(document.handle, 0.1, Cancellation::new())
+                .await
+                .unwrap(),
+            vec![created]
         );
     }
 
