@@ -136,6 +136,18 @@ large-text action layout.  The unchecked relayout, responsive/screen-reader,
 lifecycle, multi-platform measurement, and physical-mobile exit gates remain
 explicitly unclaimed.
 
+The first relayout increment now recomputes PDF geometry at the active display
+scale and EPUB geometry at the active viewport, font size, and display scale,
+then atomically publishes the raster, selection surface, and resolved annotation
+snapshot.  Completer-controlled regressions cover superseded work at selection,
+render, decode, and annotation-list boundaries, deterministic handle release,
+queued layout changes during open, bounded/cancellable quote resolution, and
+exact/recovered/ambiguous/orphaned presentation.  This proves relayout for the
+same fingerprint (unchanged document bytes).  Recovery after changed document
+bytes remains deferred until the core has a stable document-association contract;
+path equality alone is intentionally not treated as identity, so the full
+relayout/recovery checklist item remains unchecked.
+
 *Exit*: highlighting works end to end in both formats on desktop and at least one
 physical mobile platform, and failures on any unvalidated target are recorded
 rather than inferred away.
