@@ -360,6 +360,26 @@ final class ReaderAnnotationUpdated extends ReaderMessage {
   final String? body;
 }
 
+final class _ReaderAnnotationUpdateCompleted extends ReaderMessage {
+  const _ReaderAnnotationUpdateCompleted({
+    required this.generation,
+    required this.revision,
+    required this.operationId,
+    required this.id,
+    required this.color,
+    required this.body,
+    required this.changed,
+  });
+
+  final int generation;
+  final int revision;
+  final String operationId;
+  final String id;
+  final FlutterHighlightColor color;
+  final String? body;
+  final bool changed;
+}
+
 final class ReaderAnnotationNoteRequested extends ReaderMessage {
   const ReaderAnnotationNoteRequested(this.id);
   final String id;
@@ -761,6 +781,8 @@ final class ReaderController implements Listenable {
       case _ReaderAnnotationOperationFinished():
         _activeBridgeOperations -= 1;
         _disposeBridgeIfIdle();
+      case _ReaderAnnotationUpdateCompleted():
+        _annotationUpdateCompleted(message);
       case _ReaderDisposeRequested():
         _disposeRequested();
     }
@@ -1655,21 +1677,15 @@ final class ReaderController implements Listenable {
         body: message.body,
       );
       if (!_isCurrent(generation)) return;
-      final items = changed
-          ? await _bridge.listAnnotations(
-              document: document.handle,
-              scale: _model.layout.scale,
-              cancellationId: cancellation,
-            )
-          : _model.annotations;
-      if (!_isCurrent(generation)) return;
       dispatch(
-        _ReaderAnnotationsChanged(
-          generation,
-          revision,
-          operationId,
-          null,
-          items,
+        _ReaderAnnotationUpdateCompleted(
+          generation: generation,
+          revision: revision,
+          operationId: operationId,
+          id: message.id,
+          color: message.color,
+          body: message.body,
+          changed: changed,
         ),
       );
     } catch (error) {
@@ -1688,6 +1704,39 @@ final class ReaderController implements Listenable {
       _bridge.releaseCancellation(id: cancellation);
       dispatch(const _ReaderAnnotationOperationFinished());
     }
+  }
+
+  void _annotationUpdateCompleted(_ReaderAnnotationUpdateCompleted message) {
+    if (!_isCurrent(message.generation)) return;
+    final pending = {..._model.annotationOperations}
+      ..remove(message.operationId);
+    _emit(_model.copyWith(annotationOperations: pending));
+    if (message.revision != _annotationRevision) {
+      _startRequestedRelayoutIfReady();
+      return;
+    }
+    if (message.changed) {
+      _setAnnotations(
+        _model.annotations
+            .map(
+              (annotation) => annotation.id == message.id
+                  ? FlutterAnnotation(
+                      id: annotation.id,
+                      unit: annotation.unit,
+                      resolution: annotation.resolution,
+                      textRange: annotation.textRange,
+                      quote: annotation.quote,
+                      rectangles: annotation.rectangles,
+                      color: message.color,
+                      body: message.body,
+                    )
+                  : annotation,
+            )
+            .toList(growable: false),
+      );
+    }
+    _emit(_model.copyWith(annotationError: null));
+    _startRequestedRelayoutIfReady();
   }
 
   Future<void> _deleteAnnotation(String id) async {

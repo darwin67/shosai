@@ -2422,6 +2422,45 @@ void main() {
     });
   }
 
+  test(
+    'acknowledged note survives a failed refresh and later recolor',
+    () async {
+      final bridge = _ControlledBridge(
+        initialAnnotations: [_annotation('one')],
+        immediateLists: true,
+      )..updateCompleter = null;
+      final controller = _epubController(bridge);
+      await _openControlled(controller, bridge, '/tmp/book.epub');
+      bridge.listFailure = true;
+
+      controller.dispatch(
+        const ReaderAnnotationUpdated(
+          'one',
+          FlutterHighlightColor.yellow,
+          'saved note',
+        ),
+      );
+      await _waitUntil(() => controller.model.annotationOperations.isEmpty);
+      expect(controller.model.annotations.single.body, 'saved note');
+
+      controller.dispatch(
+        ReaderAnnotationUpdated(
+          'one',
+          FlutterHighlightColor.green,
+          controller.model.annotations.single.body,
+        ),
+      );
+      await _waitUntil(() => controller.model.annotationOperations.isEmpty);
+      expect(bridge.storedAnnotations.single.body, 'saved note');
+      expect(
+        bridge.storedAnnotations.single.color,
+        FlutterHighlightColor.green,
+      );
+      controller.dispose();
+      await bridge.disposed.future;
+    },
+  );
+
   testWidgets('annotation controls prevent overlapping writes', (tester) async {
     addTearDown(tester.view.resetDevicePixelRatio);
     final bridge = _ControlledBridge(
