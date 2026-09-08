@@ -35,6 +35,7 @@ All notable changes to this project will be documented in this file.
 - *(flutter)* Deliver the desktop feasibility slice (#87)
 - *(flutter)* Add persistent cross-format highlights (#88)
 - *(flutter)* Add shared selection interactions (#89)
+- *(flutter)* Preserve annotations across relayout (#90)
 
 ### 🐛 Bug Fixes
 
