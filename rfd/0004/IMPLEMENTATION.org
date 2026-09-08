@@ -115,8 +115,12 @@ coordinates.
   or changing EPUB pagination geometry.
 - [X] Persist, reopen, navigate to, recolor, annotate, and delete one highlight
   in each format through the Rust annotation store.
-- [ ] Verify PDF zoom/DPI and EPUB viewport/font/theme relayout preserve anchors;
+- [-] Verify PDF zoom/DPI and EPUB viewport/font/theme relayout preserve anchors;
   surface exact, recovered, ambiguous, and orphaned states.
+  - [X] Preserve and resolve anchors across relayout when document bytes retain
+    the same fingerprint.
+  - [ ] Define stable document association, then recover anchors after document
+    bytes and fingerprints change without treating path equality as identity.
 - [ ] Implement responsive reader compositions for desktop, phone, and tablet,
   including rotation, safe areas, text scaling, visible focus, screen-reader
   semantics, and non-color highlight indication.
