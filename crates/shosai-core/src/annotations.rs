@@ -34,6 +34,7 @@ pub const MAX_LOCAL_PATH_BYTES: usize = 32_768;
 pub const MAX_EPUB_RESOURCE_PATH_BYTES: usize = 4_096;
 pub const MAX_PROVENANCE_SYSTEM_BYTES: usize = 256;
 pub const MAX_PROVENANCE_ID_BYTES: usize = 4_096;
+pub(crate) const MAX_TEXT_ANCHOR_RESOLUTION_WORK: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 #[error("annotation snapshot exceeds its aggregate retention limit")]
@@ -320,6 +321,150 @@ pub struct ResolvedTextAnchor {
     pub range: Option<Range<usize>>,
 }
 
+#[derive(Debug, Error)]
+pub(crate) enum TextAnchorResolutionError {
+    #[error("text anchor resolution was cancelled")]
+    Cancelled,
+    #[error("text anchor resolution exceeded its work limit")]
+    WorkLimit,
+}
+
+pub(crate) struct TextAnchorResolver<'a> {
+    text: &'a str,
+    scalar_bytes: Vec<usize>,
+    normalized: MappedNormalizedText,
+}
+
+impl<'a> TextAnchorResolver<'a> {
+    pub(crate) fn new(
+        text: &'a str,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Self, TextAnchorResolutionError> {
+        let scalar_bytes = text
+            .char_indices()
+            .map(|(byte, _)| byte)
+            .chain(std::iter::once(text.len()))
+            .collect::<Vec<_>>();
+        let normalized = mapped_normalized_quote_text(text, is_cancelled)?;
+        Ok(Self {
+            text,
+            scalar_bytes,
+            normalized,
+        })
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        stored_range: Range<usize>,
+        quote: &QuoteSelector,
+        remaining_work: &mut usize,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<ResolvedTextAnchor, TextAnchorResolutionError> {
+        if stored_range.start < stored_range.end
+            && stored_range.end < self.scalar_bytes.len()
+            && normalize_quote_v1(
+                &self.text
+                    [self.scalar_bytes[stored_range.start]..self.scalar_bytes[stored_range.end]],
+            ) == quote.exact
+        {
+            return Ok(ResolvedTextAnchor {
+                resolution: AnnotationResolution::Exact,
+                range: Some(stored_range),
+            });
+        }
+
+        let mut candidate_count = 0;
+        let mut only_candidate = None;
+        let mut last_candidate = None;
+        let mut contextual_candidate = None;
+        let mut contextual_count = 0;
+        for (index, start_byte) in self
+            .normalized
+            .byte_offsets
+            .iter()
+            .take(self.normalized.source_ranges.len())
+            .enumerate()
+        {
+            if index % 1024 == 0 && is_cancelled() {
+                return Err(TextAnchorResolutionError::Cancelled);
+            }
+            *remaining_work = remaining_work
+                .checked_sub(1)
+                .ok_or(TextAnchorResolutionError::WorkLimit)?;
+            let Some(value) = self.normalized.text.get(*start_byte..) else {
+                continue;
+            };
+            if !value.starts_with(&quote.exact) {
+                continue;
+            }
+            let Some(end_byte) = start_byte.checked_add(quote.exact.len()) else {
+                continue;
+            };
+            let Ok(end) = self.normalized.byte_offsets.binary_search(&end_byte) else {
+                continue;
+            };
+            if index >= end {
+                continue;
+            }
+            let source_range = self.normalized.source_ranges[index].start
+                ..self.normalized.source_ranges[end - 1].end;
+            if normalize_quote_v1(
+                &self.text
+                    [self.scalar_bytes[source_range.start]..self.scalar_bytes[source_range.end]],
+            ) == quote.exact
+            {
+                if last_candidate.as_ref() == Some(&source_range) {
+                    continue;
+                }
+                last_candidate = Some(source_range.clone());
+                candidate_count += 1;
+                if candidate_count == 1 {
+                    only_candidate = Some(source_range.clone());
+                }
+                let matches_context = (quote.prefix.is_empty()
+                    || self.normalized.text[..*start_byte]
+                        .trim_end_matches(' ')
+                        .ends_with(&quote.prefix))
+                    && (quote.suffix.is_empty()
+                        || self.normalized.text[end_byte..]
+                            .trim_start_matches(' ')
+                            .starts_with(&quote.suffix));
+                if matches_context {
+                    contextual_count += 1;
+                    if contextual_count == 1 {
+                        contextual_candidate = Some(source_range);
+                    } else {
+                        return Ok(ResolvedTextAnchor {
+                            resolution: AnnotationResolution::Ambiguous,
+                            range: None,
+                        });
+                    }
+                }
+            }
+        }
+        if candidate_count == 0 {
+            return Ok(ResolvedTextAnchor {
+                resolution: AnnotationResolution::Orphaned,
+                range: None,
+            });
+        }
+
+        let recovered = match contextual_count {
+            1 => contextual_candidate,
+            0 if candidate_count == 1 => only_candidate,
+            _ => None,
+        };
+        Ok(ResolvedTextAnchor {
+            resolution: if recovered.is_some() {
+                AnnotationResolution::Recovered
+            } else {
+                AnnotationResolution::Ambiguous
+            },
+            range: recovered,
+        })
+    }
+}
+
 /// Resolve a persisted quote against the document's current Unicode-scalar
 /// text. Stored offsets win when their normalized quote still matches; bounded
 /// quote/context matching recovers a unique moved range without guessing when
@@ -329,78 +474,10 @@ pub fn resolve_text_anchor(
     stored_range: Range<usize>,
     quote: &QuoteSelector,
 ) -> ResolvedTextAnchor {
-    let scalar_bytes = text
-        .char_indices()
-        .map(|(byte, _)| byte)
-        .chain(std::iter::once(text.len()))
-        .collect::<Vec<_>>();
-    if stored_range.start < stored_range.end
-        && stored_range.end < scalar_bytes.len()
-        && normalize_quote_v1(
-            &text[scalar_bytes[stored_range.start]..scalar_bytes[stored_range.end]],
-        ) == quote.exact
-    {
-        return ResolvedTextAnchor {
-            resolution: AnnotationResolution::Exact,
-            range: Some(stored_range),
-        };
-    }
-
-    let normalized = mapped_normalized_quote_text(text);
-    let mut candidates = normalized
-        .byte_offsets
-        .iter()
-        .take(normalized.source_ranges.len())
-        .filter_map(|start_byte| {
-            let value = normalized.text.get(*start_byte..)?;
-            value.starts_with(&quote.exact).then_some(())?;
-            let end_byte = start_byte.checked_add(quote.exact.len())?;
-            let start = normalized.byte_offsets.binary_search(&start_byte).ok()?;
-            let end = normalized.byte_offsets.binary_search(&end_byte).ok()?;
-            (start < end).then(|| {
-                normalized.source_ranges[start].start..normalized.source_ranges[end - 1].end
-            })
-        })
-        .collect::<Vec<_>>();
-    candidates.dedup();
-    if candidates.is_empty() {
-        return ResolvedTextAnchor {
-            resolution: AnnotationResolution::Orphaned,
-            range: None,
-        };
-    }
-
-    let contextual = candidates
-        .iter()
-        .filter(|candidate| {
-            (quote.prefix.is_empty()
-                || quote_context_v1(
-                    &text[..scalar_bytes[candidate.start]],
-                    ContextDirection::Prefix,
-                )
-                .ends_with(&quote.prefix))
-                && (quote.suffix.is_empty()
-                    || quote_context_v1(
-                        &text[scalar_bytes[candidate.end]..],
-                        ContextDirection::Suffix,
-                    )
-                    .starts_with(&quote.suffix))
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let recovered = match contextual.as_slice() {
-        [only] => Some(only.clone()),
-        [] if candidates.len() == 1 => Some(candidates.remove(0)),
-        _ => None,
-    };
-    ResolvedTextAnchor {
-        resolution: if recovered.is_some() {
-            AnnotationResolution::Recovered
-        } else {
-            AnnotationResolution::Ambiguous
-        },
-        range: recovered,
-    }
+    let mut remaining_work = usize::MAX;
+    TextAnchorResolver::new(text, &|| false)
+        .and_then(|resolver| resolver.resolve(stored_range, quote, &mut remaining_work, &|| false))
+        .expect("unlimited, uncancelled text resolution cannot fail")
 }
 
 struct MappedNormalizedText {
@@ -409,23 +486,51 @@ struct MappedNormalizedText {
     source_ranges: Vec<Range<usize>>,
 }
 
-fn mapped_normalized_quote_text(value: &str) -> MappedNormalizedText {
+fn mapped_normalized_quote_text(
+    value: &str,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<MappedNormalizedText, TextAnchorResolutionError> {
+    let mut source = value.chars().enumerate().peekable();
+    let mut profile_input = String::new();
+    let mut input_ranges = Vec::new();
+    while let Some((index, character)) = source.next() {
+        if index % 1024 == 0 && is_cancelled() {
+            return Err(TextAnchorResolutionError::Cancelled);
+        }
+        if character == '\u{00ad}' {
+            continue;
+        }
+        if character == '\r' {
+            let end = if source.peek().is_some_and(|(_, next)| *next == '\n') {
+                source.next();
+                index + 2
+            } else {
+                index + 1
+            };
+            profile_input.push('\n');
+            input_ranges.push(index..end);
+        } else {
+            profile_input.push(character);
+            input_ranges.push(index..index + 1);
+        }
+    }
+    let input_byte_offsets = profile_input
+        .char_indices()
+        .map(|(byte, _)| byte)
+        .chain(std::iter::once(profile_input.len()))
+        .collect::<Vec<_>>();
     let mut text = String::new();
     let mut source_ranges = Vec::new();
-    let mut source_scalar = 0;
     let mut pending_space: Option<Range<usize>> = None;
-    for grapheme in value.graphemes(true) {
-        let grapheme_len = grapheme.chars().count();
-        let source_range = source_scalar..source_scalar + grapheme_len;
-        source_scalar += grapheme_len;
-        let normalized = grapheme
-            .replace("\r\n", "\n")
-            .replace('\r', "\n")
-            .chars()
-            .filter(|character| *character != '\u{00ad}')
-            .collect::<String>()
-            .nfc()
-            .collect::<String>();
+    for (grapheme_index, (start_byte, grapheme)) in profile_input.grapheme_indices(true).enumerate()
+    {
+        if grapheme_index % 1024 == 0 && is_cancelled() {
+            return Err(TextAnchorResolutionError::Cancelled);
+        }
+        let start = input_byte_offsets.binary_search(&start_byte).unwrap();
+        let end = start + grapheme.chars().count();
+        let source_range = input_ranges[start].start..input_ranges[end - 1].end;
+        let normalized = grapheme.nfc().collect::<String>();
         for character in normalized.chars() {
             if quote_v1_whitespace(character) {
                 if !text.is_empty() {
@@ -449,11 +554,11 @@ fn mapped_normalized_quote_text(value: &str) -> MappedNormalizedText {
         .map(|(byte, _)| byte)
         .chain(std::iter::once(text.len()))
         .collect();
-    MappedNormalizedText {
+    Ok(MappedNormalizedText {
         text,
         byte_offsets,
         source_ranges,
-    }
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1290,6 +1395,42 @@ mod tests {
                 range: None,
             }
         );
+    }
+
+    #[test]
+    fn text_anchor_resolution_preserves_the_normalization_profile_at_source_boundaries() {
+        let composed = QuoteSelector::new("é", "", "").unwrap();
+        assert_eq!(
+            resolve_text_anchor("xe\u{00ad}\u{0301}", 0..1, &composed),
+            ResolvedTextAnchor {
+                resolution: AnnotationResolution::Recovered,
+                range: Some(1..4),
+            }
+        );
+
+        let partial_cluster = QuoteSelector::new("👩", "", "").unwrap();
+        let resolved = resolve_text_anchor("x👩‍💻", 0..1, &partial_cluster);
+        assert_eq!(resolved.resolution, AnnotationResolution::Orphaned);
+        assert!(resolved.range.is_none());
+    }
+
+    #[test]
+    fn text_anchor_resolution_observes_cancellation_and_work_limits() {
+        let checks = std::cell::Cell::new(0);
+        assert!(matches!(
+            TextAnchorResolver::new(&"x".repeat(2_048), &|| {
+                checks.set(checks.get() + 1);
+                checks.get() > 1
+            }),
+            Err(TextAnchorResolutionError::Cancelled)
+        ));
+
+        let resolver = TextAnchorResolver::new("different", &|| false).unwrap();
+        let quote = QuoteSelector::new("missing", "", "").unwrap();
+        assert!(matches!(
+            resolver.resolve(0..1, &quote, &mut 0, &|| false),
+            Err(TextAnchorResolutionError::WorkLimit)
+        ));
     }
 
     #[test]

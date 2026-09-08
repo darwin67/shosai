@@ -15,12 +15,12 @@ use crate::annotations::AnnotationPersistenceTestGate;
 use crate::annotations::{
     ANNOTATION_SNAPSHOT_BASE_BYTES, Annotation, AnnotationId, AnnotationResolution,
     AnnotationSnapshotLimit, AnnotationStore, AnnotationTarget, DocumentFingerprint, EpubAnchor,
-    HighlightColor, MAX_ANNOTATION_SNAPSHOT_BYTES, NewAnnotation, PageRect, PdfAnchor,
-    QuoteSelector, resolve_text_anchor,
+    HighlightColor, MAX_ANNOTATION_SNAPSHOT_BYTES, MAX_TEXT_ANCHOR_RESOLUTION_WORK, NewAnnotation,
+    PageRect, PdfAnchor, QuoteSelector, TextAnchorResolutionError, TextAnchorResolver,
 };
 
 use crate::application::{DeviceFileLocator, OpenDocument, OpenDocumentError, OpenDocumentPlan};
-use crate::document::RenderedPage;
+use crate::document::{Document, RenderedPage};
 #[cfg(test)]
 use crate::epub::EpubLimits;
 use crate::epub::{
@@ -41,6 +41,8 @@ pub const MAX_BRIDGE_RETAINED_DOCUMENT_BYTES: usize = 3 * 1024 * 1024 * 1024;
 pub const MAX_BRIDGE_PROBE_BYTES: usize = 512 * 1024 * 1024;
 pub const MAX_BRIDGE_LOCAL_ID_BYTES: usize = 4 * 1024;
 pub const MAX_BRIDGE_PATH_KEY_BYTES: usize = 64 * 1024;
+const MAX_ANNOTATION_PDF_TEXT_BYTES: usize = 4 * 1024 * 1024;
+const ANNOTATION_RESOLUTION_WORKSPACE_BYTES: u32 = 112 * 1024 * 1024;
 
 static NEXT_REGISTRY_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -196,6 +198,7 @@ pub struct CreateAnnotationRequest {
     pub unit: usize,
     pub start: usize,
     pub end: usize,
+    pub display_scale: f32,
     pub color: HighlightColor,
     pub body: Option<String>,
 }
@@ -689,12 +692,18 @@ impl Bridge {
             unit,
             start,
             end,
+            display_scale,
             color,
             body,
         } = request;
         if start >= end {
             return Err(BridgeError::InvalidRequest(
                 "annotation range must be non-empty".into(),
+            ));
+        }
+        if !display_scale.is_finite() || display_scale <= 0.0 {
+            return Err(BridgeError::InvalidRequest(
+                "annotation display scale must be finite and positive".into(),
             ));
         }
         let request_slot = try_acquire_slot(
@@ -845,7 +854,7 @@ impl Bridge {
         self.resolve_annotation_dtos(
             Arc::clone(&retained),
             vec![created],
-            1.0,
+            display_scale,
             accepted_conversion,
             vec![request_slot, conversion_slot],
         )
@@ -908,8 +917,16 @@ impl Bridge {
         annotations: Vec<Annotation>,
         scale: f32,
         cancellation: Cancellation,
-        guards: Vec<OwnedSemaphorePermit>,
+        mut guards: Vec<OwnedSemaphorePermit>,
     ) -> Result<Vec<BridgeAnnotation>, BridgeError> {
+        guards.push(
+            acquire_permits(
+                Arc::clone(&self.admission.buffer_bytes),
+                ANNOTATION_RESOLUTION_WORKSPACE_BYTES,
+                &cancellation,
+            )
+            .await?,
+        );
         let worker_cancellation = cancellation.clone();
         let (result, _guards) = tokio::task::spawn_blocking(move || {
             let result = guarded(|| {
@@ -1997,8 +2014,8 @@ fn annotation_dtos(
     scale: f32,
     is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<BridgeAnnotation>, BridgeError> {
-    let mut text_by_unit = HashMap::<usize, String>::new();
-    for annotation in &annotations {
+    let mut annotations_by_unit = HashMap::<usize, Vec<usize>>::new();
+    for (index, annotation) in annotations.iter().enumerate() {
         if is_cancelled() {
             return Err(BridgeError::Cancelled);
         }
@@ -2009,18 +2026,20 @@ fn annotation_dtos(
             }
             AnnotationTarget::Pdf(_) => continue,
         };
-        if text_by_unit.contains_key(&unit) {
-            continue;
-        }
+        annotations_by_unit.entry(unit).or_default().push(index);
+    }
+    let mut resolved_texts = vec![None; annotations.len()];
+    let mut remaining_work = MAX_TEXT_ANCHOR_RESOLUTION_WORK;
+    for (unit, indices) in annotations_by_unit {
         let text = match document {
             OpenDocument::Epub(document) => document
                 .presentation()
                 .chapter(unit)
                 .map(|chapter| bounded_epub_selection_text(chapter.search_text(), is_cancelled))
                 .transpose()?,
-            OpenDocument::Pdf(document) => Some(
+            OpenDocument::Pdf(document) if unit < document.page_count() => Some(
                 document
-                    .page_text_bounded(unit, crate::pdf::MAX_PDF_PAGE_TEXT_BYTES, is_cancelled)
+                    .page_text_bounded(unit, MAX_ANNOTATION_PDF_TEXT_BYTES, is_cancelled)
                     .map_err(|error| match error {
                         crate::pdf::BoundedPageTextError::Cancelled => BridgeError::Cancelled,
                         crate::pdf::BoundedPageTextError::Limit { .. } => BridgeError::BufferLimit,
@@ -2029,80 +2048,102 @@ fn annotation_dtos(
                         }
                     })?,
             ),
+            OpenDocument::Pdf(_) => None,
             OpenDocument::Cbz(_) => None,
         };
-        if let Some(text) = text {
-            text_by_unit.insert(unit, text);
+        let Some(text) = text else {
+            continue;
+        };
+        let resolver =
+            TextAnchorResolver::new(&text, is_cancelled).map_err(|error| match error {
+                TextAnchorResolutionError::Cancelled => BridgeError::Cancelled,
+                TextAnchorResolutionError::WorkLimit => BridgeError::BufferLimit,
+            })?;
+        for index in indices {
+            let (stored_range, quote, matches_resource) =
+                match (&annotations[index].target, &annotations[index].quote) {
+                    (AnnotationTarget::Epub(anchor), Some(quote)) => (
+                        anchor.scalar_start as usize..anchor.scalar_end as usize,
+                        quote,
+                        matches!(document, OpenDocument::Epub(document) if document
+                        .chapter(unit)
+                        .is_some_and(|chapter| chapter.path == anchor.resource_path.as_str())),
+                    ),
+                    (AnnotationTarget::Pdf(anchor), Some(quote)) => {
+                        let Some((start, end)) = anchor.character_range else {
+                            continue;
+                        };
+                        (start as usize..end as usize, quote, true)
+                    }
+                    _ => continue,
+                };
+            if matches_resource {
+                resolved_texts[index] = Some(
+                    resolver
+                        .resolve(stored_range, quote, &mut remaining_work, is_cancelled)
+                        .map_err(|error| match error {
+                            TextAnchorResolutionError::Cancelled => BridgeError::Cancelled,
+                            TextAnchorResolutionError::WorkLimit => BridgeError::BufferLimit,
+                        })?,
+                );
+            }
         }
     }
     let batches = annotations
         .iter()
-        .filter_map(|annotation| match &annotation.target {
-            AnnotationTarget::Pdf(anchor) if anchor.character_range.is_none() => Some((
-                anchor.page as usize,
-                anchor
-                    .rectangles
-                    .iter()
-                    .map(|rect| (rect.left, rect.bottom, rect.right, rect.top))
-                    .collect(),
-            )),
-            AnnotationTarget::Pdf(_) | AnnotationTarget::Epub(_) => None,
+        .enumerate()
+        .filter_map(|(index, annotation)| match (&annotation.target, document) {
+            (AnnotationTarget::Pdf(anchor), OpenDocument::Pdf(pdf))
+                if anchor.character_range.is_none()
+                    && (anchor.page as usize) < pdf.page_count() =>
+            {
+                Some((
+                    index,
+                    (
+                        anchor.page as usize,
+                        anchor
+                            .rectangles
+                            .iter()
+                            .map(|rect| (rect.left, rect.bottom, rect.right, rect.top))
+                            .collect(),
+                    ),
+                ))
+            }
+            _ => None,
         })
         .collect::<Vec<_>>();
-    let mut resolved = if batches.is_empty() {
-        Vec::new().into_iter()
+    let mut resolved_rectangles = if batches.is_empty() {
+        HashMap::new()
     } else {
         let OpenDocument::Pdf(pdf) = document else {
-            return Err(BridgeError::InvalidRequest(
-                "PDF annotation does not match open document".into(),
-            ));
+            unreachable!("only matching PDF batches are collected");
         };
-        pdf.page_rectangle_batches_to_pixels(&batches, scale, is_cancelled)
+        let geometry = batches
+            .iter()
+            .map(|(_, batch)| batch.clone())
+            .collect::<Vec<_>>();
+        let converted = pdf
+            .page_rectangle_batches_to_pixels(&geometry, scale, is_cancelled)
             .map_err(map_render_error)?
+            .into_iter();
+        batches
             .into_iter()
+            .map(|(index, _)| index)
+            .zip(converted)
+            .collect()
     };
     annotations
         .into_iter()
-        .map(|annotation| {
+        .enumerate()
+        .map(|(index, annotation)| {
             if is_cancelled() {
                 return Err(BridgeError::Cancelled);
             }
-            let rectangles = matches!(
-                &annotation.target,
-                AnnotationTarget::Pdf(anchor) if anchor.character_range.is_none()
+            annotation_dto(
+                annotation,
+                resolved_rectangles.remove(&index),
+                resolved_texts[index].take(),
             )
-            .then(|| resolved.next())
-            .flatten();
-            let resolved_text = match (&annotation.target, &annotation.quote) {
-                (AnnotationTarget::Epub(anchor), Some(quote)) => {
-                    let matches_resource = match document {
-                        OpenDocument::Epub(document) => document
-                            .chapter(anchor.spine_occurrence as usize)
-                            .is_some_and(|chapter| chapter.path == anchor.resource_path.as_str()),
-                        OpenDocument::Pdf(_) | OpenDocument::Cbz(_) => false,
-                    };
-                    matches_resource
-                        .then(|| text_by_unit.get(&(anchor.spine_occurrence as usize)))
-                        .flatten()
-                        .map(|text| {
-                            resolve_text_anchor(
-                                text,
-                                anchor.scalar_start as usize..anchor.scalar_end as usize,
-                                quote,
-                            )
-                        })
-                }
-                (AnnotationTarget::Pdf(anchor), Some(quote)) => {
-                    anchor.character_range.and_then(|(start, end)| {
-                        text_by_unit.get(&(anchor.page as usize)).map(|text| {
-                            resolve_text_anchor(text, start as usize..end as usize, quote)
-                        })
-                    })
-                }
-                (AnnotationTarget::Pdf(anchor), None) if anchor.character_range.is_none() => None,
-                _ => None,
-            };
-            annotation_dto(annotation, rectangles, resolved_text)
         })
         .collect()
 }
@@ -2116,9 +2157,21 @@ fn annotation_dto(
         .quote
         .as_ref()
         .and_then(|quote| quote.original.clone());
-    let resolution = resolved_text
-        .as_ref()
-        .map_or(AnnotationResolution::Exact, |resolved| resolved.resolution);
+    let geometry_only = matches!(
+        &annotation.target,
+        AnnotationTarget::Pdf(anchor) if anchor.character_range.is_none()
+    );
+    let geometry_resolved = resolved_pdf_rectangles.is_some();
+    let resolution = resolved_text.as_ref().map_or_else(
+        || {
+            if geometry_only && geometry_resolved {
+                AnnotationResolution::Exact
+            } else {
+                AnnotationResolution::Orphaned
+            }
+        },
+        |resolved| resolved.resolution,
+    );
     let (unit, text_range, rectangles) = match annotation.target {
         AnnotationTarget::Epub(anchor) => (
             anchor.spine_occurrence as usize,
@@ -2142,7 +2195,7 @@ fn annotation_dto(
                 Vec::new()
             } else {
                 resolved_pdf_rectangles
-                    .ok_or_else(|| BridgeError::Render("PDF rectangles were not resolved".into()))?
+                    .unwrap_or_default()
                     .into_iter()
                     .map(|rect| SelectionRect {
                         left: rect.left,
@@ -2253,6 +2306,7 @@ mod tests {
             unit: 0,
             start: 0,
             end: 1,
+            display_scale: 1.0,
             color: HighlightColor::Yellow,
             body: None,
         }
@@ -2444,6 +2498,67 @@ mod tests {
                 bottom: expected.bottom,
             }]
         );
+    }
+
+    #[test]
+    fn missing_pdf_pages_orphan_only_the_affected_annotations() {
+        let pdf = crate::pdf::PdfDoc::open(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sample.pdf"
+        )))
+        .unwrap();
+        let fingerprint = DocumentFingerprint::new("sha256", 1, vec![7; 32]).unwrap();
+        let annotation = |target, quote| Annotation {
+            id: AnnotationId::new(),
+            book_id: None,
+            local_path: Some("sample.pdf".into()),
+            fingerprint: fingerprint.clone(),
+            quote,
+            target,
+            color: HighlightColor::Yellow,
+            body: None,
+            provenance: None,
+            created_at: "now".into(),
+            modified_at: "now".into(),
+            deleted_at: None,
+        };
+        let missing_page = u32::try_from(pdf.page_count()).unwrap();
+        let geometry = annotation(
+            AnnotationTarget::Pdf(
+                PdfAnchor::new(
+                    missing_page,
+                    None,
+                    vec![PageRect::new(0.0, 0.0, 1.0, 1.0).unwrap()],
+                )
+                .unwrap(),
+            ),
+            None,
+        );
+        let text = annotation(
+            AnnotationTarget::Pdf(
+                PdfAnchor::new(
+                    missing_page,
+                    Some((0, 1)),
+                    vec![PageRect::new(0.0, 0.0, 1.0, 1.0).unwrap()],
+                )
+                .unwrap(),
+            ),
+            Some(QuoteSelector::new("x", "", "").unwrap()),
+        );
+
+        let resolved = annotation_dtos(
+            vec![geometry, text],
+            &OpenDocument::Pdf(pdf.into()),
+            1.0,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.iter().all(|item| {
+            item.resolution == AnnotationResolution::Orphaned
+                && item.text_range.is_none()
+                && item.rectangles.is_empty()
+        }));
     }
 
     #[test]
@@ -2852,6 +2967,7 @@ mod tests {
                     unit: 0,
                     start: endpoint.range_start,
                     end: endpoint.range_end,
+                    display_scale: 2.0,
                     color: HighlightColor::Yellow,
                     body: None,
                 },

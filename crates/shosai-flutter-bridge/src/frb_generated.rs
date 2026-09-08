@@ -94,6 +94,7 @@ fn wire__crate__api__FlutterBridge_create_annotation_impl(
     unit: impl CstDecode<usize>,
     start: impl CstDecode<usize>,
     end: impl CstDecode<usize>,
+    display_scale: impl CstDecode<f32>,
     color: impl CstDecode<crate::api::FlutterHighlightColor>,
     body: impl CstDecode<Option<String>>,
     cancellation_id: impl CstDecode<u64>,
@@ -110,6 +111,7 @@ fn wire__crate__api__FlutterBridge_create_annotation_impl(
             let api_unit = unit.cst_decode();
             let api_start = start.cst_decode();
             let api_end = end.cst_decode();
+            let api_display_scale = display_scale.cst_decode();
             let api_color = color.cst_decode();
             let api_body = body.cst_decode();
             let api_cancellation_id = cancellation_id.cst_decode();
@@ -139,6 +141,7 @@ fn wire__crate__api__FlutterBridge_create_annotation_impl(
                             api_unit,
                             api_start,
                             api_end,
+                            api_display_scale,
                             api_color,
                             api_body,
                             api_cancellation_id,
@@ -2837,6 +2840,7 @@ mod io {
         unit: usize,
         start: usize,
         end: usize,
+        display_scale: f32,
         color: i32,
         body: *mut wire_cst_list_prim_u_8_strict,
         cancellation_id: u64,
@@ -2848,6 +2852,7 @@ mod io {
             unit,
             start,
             end,
+            display_scale,
             color,
             body,
             cancellation_id,
