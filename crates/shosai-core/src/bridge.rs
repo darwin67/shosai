@@ -3263,11 +3263,15 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_annotation_create_keeps_request_admission_until_worker_exits() {
+        let directory = tempfile::tempdir().unwrap();
         let worker_barrier = Arc::new(std::sync::Barrier::new(2));
         let mut admission = BridgeAdmission::new(MAX_BRIDGE_RETAINED_BUFFER_BYTES, 1);
         admission.request_slots = Arc::new(Semaphore::new(1));
         let admission = Arc::new(admission);
-        let mut bridge = Bridge::with_admission(Arc::clone(&admission));
+        let mut bridge = Bridge::with_admission_database(
+            Arc::clone(&admission),
+            Some(Arc::new(directory.path().join("annotations.sqlite"))),
+        );
         bridge.annotation_resolution_worker_barrier = Some(Arc::clone(&worker_barrier));
         let bridge = Arc::new(bridge);
         let document = bridge
