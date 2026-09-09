@@ -3,7 +3,10 @@ import 'dart:collection';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart'
+    show debugDefaultTargetPlatformOverride;
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shosai_flutter/main.dart';
@@ -33,6 +36,51 @@ void main() {
     expect(app.onGenerateTitle, isNull);
   });
 
+  testWidgets('process restoration reopens the persisted document locator', (
+    tester,
+  ) async {
+    final bridges = <_FakeBridge>[];
+    FlutterBridge bridgeFactory() {
+      final bridge = _FakeBridge();
+      bridges.add(bridge);
+      return bridge;
+    }
+
+    await tester.pumpWidget(
+      MaterialApp(
+        restorationScopeId: 'test',
+        home: ReaderScreen(bridgeFactory: bridgeFactory),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pump();
+    expect(bridges, hasLength(1));
+    expect(bridges.single.openRequests, hasLength(1));
+
+    await tester.restartAndRestore();
+    await tester.pump();
+
+    expect(bridges, hasLength(2));
+    expect(bridges.last.openRequests, hasLength(1));
+    expect(bridges.last.openRequests.single.pathKey, '/tmp/book.epub');
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      '/tmp/book.epub',
+    );
+
+    await tester.pumpWidget(const SizedBox());
+    for (final bridge in bridges) {
+      bridge.openCompleter.completeError(
+        const FlutterBridgeError(
+          kind: FlutterBridgeErrorKind.cancelled,
+          message: 'cancelled',
+        ),
+      );
+    }
+    await Future.wait(bridges.map((bridge) => bridge.disposed.future));
+  });
+
   testWidgets('welcome panel describes the native bridge action', (
     tester,
   ) async {
@@ -49,6 +97,14 @@ void main() {
       ThemeData.estimateBrightnessForColor(colors.background),
       isNot(ThemeData.estimateBrightnessForColor(colors.foreground)),
     );
+  });
+
+  test('desktop platforms use explicit selection announcements', () {
+    expect(usesExplicitSelectionAnnouncements(TargetPlatform.linux), isTrue);
+    expect(usesExplicitSelectionAnnouncements(TargetPlatform.macOS), isTrue);
+    expect(usesExplicitSelectionAnnouncements(TargetPlatform.windows), isTrue);
+    expect(usesExplicitSelectionAnnouncements(TargetPlatform.android), isFalse);
+    expect(usesExplicitSelectionAnnouncements(TargetPlatform.iOS), isFalse);
   });
 
   test('page image source uses non-unit raster pixel dimensions', () async {
@@ -127,6 +183,63 @@ void main() {
       image.dispose();
     },
   );
+
+  test('temporary selection has a non-color outline', () async {
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    PagePainter(
+      image: null,
+      surface: FlutterSelectionSurface(
+        handle: FlutterSelectionHandle(registry: BigInt.one, id: BigInt.one),
+        width: 40,
+        height: 40,
+        text: 'x',
+        copyEligible: true,
+        endpoints: [
+          FlutterSelectionEndpoint(
+            offset: BigInt.zero,
+            rangeStart: BigInt.zero,
+            rangeEnd: BigInt.one,
+            rect: const FlutterSelectionRect(
+              left: 10,
+              top: 10,
+              right: 30,
+              bottom: 30,
+            ),
+          ),
+        ],
+        graphemeBoundaries: Uint32List.fromList([0, 1]),
+        wordBoundaries: Uint32List.fromList([0, 1]),
+        visualLines: const [],
+      ),
+      backgroundColor: Colors.white,
+      foregroundColor: Colors.black,
+      recolorImage: false,
+      anchor: 0,
+      focus: 1,
+      savedSelections: const [],
+      annotations: const [],
+    ).paint(canvas, const Size(40, 40));
+    final picture = recorder.endRecording();
+    try {
+      final image = await picture.toImage(40, 40);
+      try {
+        final bytes = await image.toByteData(
+          format: ui.ImageByteFormat.rawRgba,
+        );
+        expect(bytes, isNotNull);
+        List<int> pixel(int x, int y) => [
+          for (var channel = 0; channel < 3; channel += 1)
+            bytes!.getUint8((y * 40 + x) * 4 + channel),
+        ];
+        expect(pixel(10, 20), isNot(pixel(20, 20)));
+      } finally {
+        image.dispose();
+      }
+    } finally {
+      picture.dispose();
+    }
+  });
 
   test('reader model recursively freezes collection inputs and copies', () {
     final endpoints = <FlutterSelectionEndpoint>[
@@ -230,6 +343,54 @@ void main() {
     );
     expect(() => copy.annotations.clear(), throwsUnsupportedError);
   });
+
+  test(
+    'selection announcements follow distinct controller state changes',
+    () async {
+      final bridge = _ControlledBridge();
+      final announcements = <String>[];
+      final controller = ReaderController(
+        bridge: bridge,
+        decoder: (pixels, {required width, required height}) => _testImage(),
+        selectionAnnouncer: (description) async =>
+            announcements.add(description),
+      );
+      await _openControlled(controller, bridge, '/tmp/book.epub');
+      expect(announcements, isEmpty);
+
+      controller.dispatch(
+        const ReaderSelectionKeyboardExtended(
+          ReaderSelectionMovement.nextGrapheme,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(announcements, ['Selected text: e']);
+
+      controller.dispatch(const ReaderSelectionActionsRequested());
+      await Future<void>.delayed(Duration.zero);
+      expect(announcements, ['Selected text: e']);
+
+      bridge.failCancellationCreation = true;
+      controller.dispatch(const ReaderOpenRequested('/tmp/replacement.epub'));
+      await Future<void>.delayed(Duration.zero);
+      expect(announcements, ['Selected text: e', 'No text selected']);
+      expect(controller.model.document, isNull);
+      expect(controller.model.error, contains('too many cancellation tokens'));
+      controller.dispatch(const ReaderSelectionCancelled());
+      await Future<void>.delayed(Duration.zero);
+      expect(announcements, ['Selected text: e', 'No text selected']);
+
+      controller.dispose();
+      controller.dispatch(
+        const ReaderSelectionKeyboardExtended(
+          ReaderSelectionMovement.nextGrapheme,
+        ),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(announcements, ['Selected text: e', 'No text selected']);
+      await bridge.disposed.future;
+    },
+  );
 
   testWidgets('CBZ image-only completion displays instead of spinning', (
     tester,
@@ -750,12 +911,20 @@ void main() {
     expect(controller.model.document, isNull);
     expect(controller.model.pageImage, isNull);
     expect(controller.model.error, 'too many cancellation tokens');
+    expect(controller.model.openPath, '/tmp/second.pdf');
     expect(image.debugDisposed, isTrue);
     expect(bridge.releasedDocuments, [_documentHandle]);
 
+    bridge.failCancellationCreation = false;
+    controller.dispatch(const ReaderSuspended());
+    controller.dispatch(const ReaderMemoryPressureReceived());
+    controller.dispatch(const ReaderResumed());
+    await _waitUntil(() => bridge.openRequests.length == 2);
+    expect(bridge.openRequests.last.pathKey, controller.model.openPath);
+
     controller.dispose();
     await bridge.disposed.future;
-    expect(bridge.releasedDocuments, [_documentHandle]);
+    expect(bridge.releasedDocuments, [_documentHandle, _documentHandle]);
     expect(bridge.disposeCount, 1);
   });
 
@@ -770,6 +939,24 @@ void main() {
       expect(bridge.releasedDocuments, isEmpty);
       expect(bridge.releasedBuffers, isEmpty);
     });
+
+    for (final unavailable in [
+      (FlutterBridgeErrorKind.notFound, 'document was not found'),
+      (FlutterBridgeErrorKind.inaccessible, 'document is inaccessible'),
+    ]) {
+      test('${unavailable.$1} locator failure remains actionable', () async {
+        final bridge = _FakeBridge();
+        final controller = _epubController(bridge);
+        controller.dispatch(const ReaderOpenRequested('/tmp/book.epub'));
+        bridge.openCompleter.completeError(
+          FlutterBridgeError(kind: unavailable.$1, message: unavailable.$2),
+        );
+
+        await _expectFailedOperation(controller, bridge, unavailable.$2);
+        expect(bridge.releasedDocuments, isEmpty);
+        expect(bridge.releasedBuffers, isEmpty);
+      });
+    }
 
     test('render failure releases the document', () async {
       final bridge = _FakeBridge()..completeOpen(FlutterBookFormat.pdf);
@@ -2218,10 +2405,8 @@ void main() {
 
       controller.dispatch(const ReaderAnnotationNoteRequested('one'));
       controller.dispatch(const ReaderAnnotationNoteRequested('one'));
-      editors[1].complete('stale note');
-      await Future<void>.delayed(Duration.zero);
-      expect(controller.model.annotations.single.body, 'current note');
-      editors[2].complete('new note');
+      expect(editors, hasLength(2));
+      editors[1].complete('new note');
       await Future<void>.delayed(Duration.zero);
       await Future<void>.delayed(Duration.zero);
       expect(controller.model.annotations.single.body, 'new note');
@@ -2229,14 +2414,14 @@ void main() {
       final updatesBeforeReplacement = bridge.updateCalls;
       controller.dispatch(const ReaderAnnotationNoteRequested('one'));
       await _openControlled(controller, bridge, '/tmp/b.epub');
-      editors[3].complete('old document note');
+      editors[2].complete('old document note');
       await Future<void>.delayed(Duration.zero);
       expect(bridge.updateCalls, updatesBeforeReplacement);
 
       controller.dispatch(const ReaderAnnotationNoteRequested('one'));
       controller.dispatch(const ReaderAnnotationDeleted('one'));
       await Future<void>.delayed(Duration.zero);
-      editors[4].complete('after delete');
+      editors[3].complete('after delete');
       await Future<void>.delayed(Duration.zero);
       expect(controller.model.annotations, isEmpty);
 
@@ -2244,6 +2429,346 @@ void main() {
       await bridge.disposed.future;
     },
   );
+
+  test('memory pressure releases and reopens the active reader', () async {
+    final bridge = _ControlledBridge(immediateLists: true);
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/a.epub');
+    final firstDocument = controller.model.document!.handle;
+    final firstSurface = controller.model.selectionSurface!.handle;
+
+    controller.dispatch(const ReaderMemoryPressureReceived());
+    await bridge.waitForOp(2);
+
+    expect(bridge.openCalls, 2);
+    expect(bridge.releasedDocuments, [firstDocument]);
+    expect(bridge.releasedSelections, contains(firstSurface));
+    expect(controller.model.document, isNotNull);
+    expect(controller.model.contentState, ReaderContentState.ready);
+
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
+  test(
+    'resume waits for suspended relayout cleanup before reopening',
+    () async {
+      final bridge = _ControlledBridge(
+        initialAnnotations: [_annotation('one')],
+        immediateLists: true,
+      )..updateCompleter = null;
+      final controller = _epubController(bridge);
+      await _openControlled(controller, bridge, '/tmp/a.epub');
+      final firstDocument = controller.model.document!.handle;
+      final staleSelection = Completer<FlutterSelectionSurface>();
+      bridge.selectionCompleters.add(staleSelection);
+
+      controller.dispatch(
+        const ReaderLayoutChanged(
+          ReaderLayout(scale: 2, width: 300, fontSize: 20),
+        ),
+      );
+      await _waitUntil(() => bridge.selectionCalls == 2);
+      final relayoutCancellation = bridge.createdCancellations.last;
+      controller.dispatch(const ReaderSuspended());
+      controller.dispatch(const ReaderResumed());
+      controller.dispatch(const ReaderOpenRequested('/tmp/b.epub'));
+      controller.dispatch(
+        const ReaderAnnotationUpdated('one', FlutterHighlightColor.green, null),
+      );
+
+      expect(bridge.cancelled, contains(relayoutCancellation));
+      expect(bridge.releasedDocuments, isEmpty);
+      expect(bridge.openCalls, 1);
+      expect(bridge.updateCalls, 0);
+
+      staleSelection.complete(_surface(BigInt.from(20), raster: true));
+      await bridge.waitForOp(3);
+
+      expect(bridge.releasedDocuments, [firstDocument]);
+      expect(bridge.openCalls, 2);
+      expect(bridge.openRequests.last.pathKey, '/tmp/b.epub');
+      expect(controller.model.document, isNotNull);
+      expect(controller.model.contentState, ReaderContentState.ready);
+
+      controller.dispose();
+      await bridge.disposed.future;
+    },
+  );
+
+  test('suspended layout changes apply to the recovered reader', () async {
+    final bridge = _ControlledBridge(immediateLists: true);
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/a.epub');
+    const resumedLayout = ReaderLayout(scale: 2, width: 320, fontSize: 24);
+
+    controller.dispatch(const ReaderSuspended());
+    controller.dispatch(const ReaderLayoutChanged(resumedLayout));
+    controller.dispatch(const ReaderResumed());
+    await bridge.waitForOp(2);
+
+    expect(bridge.selectionLayouts.last, resumedLayout);
+    expect(controller.model.layout, resumedLayout);
+
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
+  test(
+    'suspension cancels a note editor and reports the unsaved draft',
+    () async {
+      final bridge = _ControlledBridge(immediateLists: true);
+      final editor = Completer<String?>();
+      var editorCalls = 0;
+      var cancellations = 0;
+      final controller = ReaderController(
+        bridge: bridge,
+        decoder: (pixels, {required width, required height}) => _testImage(),
+        noteEditor: (_) {
+          editorCalls += 1;
+          return editor.future;
+        },
+        noteEditorCanceller: () {
+          cancellations += 1;
+          editor.complete(null);
+        },
+      );
+      await _openControlled(controller, bridge, '/tmp/a.epub');
+
+      controller.dispatch(const ReaderSelectionStarted(1));
+      controller.dispatch(const ReaderSelectionExtended(3));
+      controller.dispatch(const ReaderSelectionEnded());
+      controller.dispatch(const ReaderSelectionNoteRequested());
+      controller.dispatch(const ReaderSelectionNoteRequested());
+      expect(editorCalls, 1);
+      controller.dispatch(const ReaderSuspended());
+      expect(cancellations, 1);
+      final recoverySurface = Completer<FlutterSelectionSurface>();
+      bridge.selectionCompleters.add(recoverySurface);
+      controller.dispatch(const ReaderResumed());
+      await _waitUntil(() => bridge.selectionCalls == 2);
+      controller.dispatch(
+        const ReaderLayoutChanged(
+          ReaderLayout(scale: 2, width: 320, fontSize: 24),
+        ),
+      );
+      recoverySurface.complete(_surface(BigInt.from(20), raster: true));
+      await bridge.waitForOp(3);
+
+      expect(
+        controller.model.selectionActionError,
+        'The note was not saved because the app was suspended. Try again.',
+      );
+      expect(bridge.createCalls, 0);
+
+      controller.dispose();
+      await bridge.disposed.future;
+    },
+  );
+
+  test(
+    'rejected replacement does not change the restorable open path',
+    () async {
+      final bridge = _ControlledBridge(
+        initialAnnotations: [_annotation('one')],
+        immediateLists: true,
+      );
+      final controller = _epubController(bridge);
+      await _openControlled(controller, bridge, '/tmp/a.epub');
+
+      controller.dispatch(
+        const ReaderAnnotationUpdated('one', FlutterHighlightColor.green, null),
+      );
+      controller.dispatch(const ReaderOpenRequested('/tmp/b.epub'));
+
+      expect(controller.model.openPath, '/tmp/a.epub');
+      expect(bridge.openCalls, 1);
+
+      bridge.updateCompleter!.complete(true);
+      await _waitUntil(() => controller.model.annotationOperations.isEmpty);
+      controller.dispose();
+      await bridge.disposed.future;
+    },
+  );
+
+  for (final createSucceeds in [false, true]) {
+    test(
+      'recovery reports an interrupted note create when it ${createSucceeds ? 'succeeds' : 'fails'}',
+      () async {
+        final bridge = _ControlledBridge(immediateLists: true);
+        final pendingCreate = Completer<FlutterAnnotation>();
+        bridge.createCompleter = pendingCreate;
+        final controller = ReaderController(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+          noteEditor: (_) async => 'draft',
+        );
+        await _openControlled(controller, bridge, '/tmp/a.epub');
+        controller.dispatch(const ReaderSelectionStarted(1));
+        controller.dispatch(const ReaderSelectionExtended(3));
+        controller.dispatch(const ReaderSelectionEnded());
+        controller.dispatch(const ReaderSelectionNoteRequested());
+        await _waitUntil(() => bridge.createCalls == 1);
+        await Future<void>.delayed(Duration.zero);
+
+        controller.dispatch(const ReaderSuspended());
+        controller.dispatch(const ReaderResumed());
+        if (createSucceeds) {
+          pendingCreate.complete(
+            FlutterAnnotation(
+              id: 'accepted-note',
+              unit: BigInt.zero,
+              resolution: FlutterAnnotationResolution.exact,
+              textRange: FlutterAnnotationTextRange(
+                start: BigInt.one,
+                end: BigInt.from(3),
+              ),
+              color: FlutterHighlightColor.yellow,
+              body: 'draft',
+            ),
+          );
+        } else {
+          pendingCreate.completeError(
+            const FlutterBridgeError(
+              kind: FlutterBridgeErrorKind.cancelled,
+              message: 'operation was cancelled',
+            ),
+          );
+        }
+        await bridge.waitForOp(3);
+
+        if (createSucceeds) {
+          expect(controller.model.selectionActionError, isNull);
+          expect(
+            controller.model.annotations.map((item) => item.id),
+            contains('accepted-note'),
+          );
+        } else {
+          expect(
+            controller.model.selectionActionError,
+            'The note could not be saved while the app was suspended. Try again.',
+          );
+          expect(controller.model.annotations, isEmpty);
+        }
+
+        controller.dispose();
+        await bridge.disposed.future;
+      },
+    );
+  }
+
+  for (final updateOutcome in ['throws', 'rejected', 'accepted']) {
+    test(
+      'recovery handles interrupted note update outcome: $updateOutcome',
+      () async {
+        final bridge = _ControlledBridge(
+          initialAnnotations: [_annotation('one')],
+          immediateLists: true,
+        );
+        final controller = ReaderController(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+          noteEditor: (_) async => 'updated draft',
+        );
+        await _openControlled(controller, bridge, '/tmp/a.epub');
+        controller.dispatch(const ReaderAnnotationNoteRequested('one'));
+        await _waitUntil(() => bridge.updateCalls == 1);
+        await Future<void>.delayed(Duration.zero);
+
+        controller.dispatch(const ReaderSuspended());
+        controller.dispatch(const ReaderResumed());
+        switch (updateOutcome) {
+          case 'accepted':
+            bridge.updateCompleter!.complete(true);
+          case 'rejected':
+            bridge.updateCompleter!.complete(false);
+          case 'throws':
+            bridge.updateCompleter!.completeError(
+              const FlutterBridgeError(
+                kind: FlutterBridgeErrorKind.cancelled,
+                message: 'operation was cancelled',
+              ),
+            );
+        }
+        await bridge.waitForOp(3);
+
+        if (updateOutcome == 'accepted') {
+          expect(controller.model.annotationError, isNull);
+          expect(controller.model.annotations.single.body, 'updated draft');
+        } else {
+          expect(
+            controller.model.annotationError,
+            'The note could not be saved while the app was suspended. Try again.',
+          );
+          expect(controller.model.annotations.single.body, isNull);
+        }
+
+        controller.dispose();
+        await bridge.disposed.future;
+      },
+    );
+  }
+
+  for (final unavailable in [
+    (FlutterBridgeErrorKind.notFound, 'document was not found'),
+    (FlutterBridgeErrorKind.inaccessible, 'document is inaccessible'),
+  ]) {
+    test(
+      '${unavailable.$1} retries after background memory pressure',
+      () async {
+        final error = FlutterBridgeError(
+          kind: unavailable.$1,
+          message: unavailable.$2,
+        );
+        final bridge = _SequentialBridge(Queue<Object>.of([error, error]));
+        final controller = _epubController(bridge);
+        controller.dispatch(const ReaderOpenRequested('/tmp/missing.epub'));
+        await bridge.waitForFinishedOperations(1);
+        expect(controller.model.error, unavailable.$2);
+
+        controller.dispatch(const ReaderSuspended());
+        controller.dispatch(const ReaderMemoryPressureReceived());
+        expect(controller.model.error, unavailable.$2);
+        controller.dispatch(const ReaderResumed());
+        await bridge.waitForFinishedOperations(2);
+
+        expect(controller.model.error, unavailable.$2);
+        expect(bridge.openResults, isEmpty);
+        controller.dispose();
+        expect(bridge.disposeCount, 1);
+      },
+    );
+  }
+
+  testWidgets('reader maps platform lifecycle events to recovery messages', (
+    tester,
+  ) async {
+    final bridge = _FakeBridge();
+    await tester.pumpWidget(MaterialApp(home: ReaderScreen(bridge: bridge)));
+    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pump();
+    expect(bridge.openRequests, hasLength(1));
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    expect(bridge.events, contains('cancel'));
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(bridge.openRequests, hasLength(1));
+
+    await tester.pumpWidget(const SizedBox());
+    bridge.openCompleter.completeError(
+      const FlutterBridgeError(
+        kind: FlutterBridgeErrorKind.cancelled,
+        message: 'cancelled',
+      ),
+    );
+    await bridge.disposed.future;
+  });
 
   test(
     'disposal cancels and releases an in-flight annotation create',
@@ -2845,6 +3370,525 @@ void main() {
     },
   );
 
+  testWidgets('reader composition adapts across rotation and device classes', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge(immediateLists: true);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey('reader-composition-compact')),
+      findsOneWidget,
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    expect(bridge.selectionLayouts.last.width, 342);
+
+    tester.view.physicalSize = const Size(844, 390);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('reader-composition-medium')),
+      findsOneWidget,
+    );
+    expect(bridge.selectionLayouts.last.width, 796);
+
+    tester.view.physicalSize = const Size(800, 1100);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('reader-composition-medium')),
+      findsOneWidget,
+    );
+    expect(bridge.selectionLayouts.last.width, 752);
+
+    tester.view.physicalSize = const Size(1180, 800);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('reader-composition-expanded')),
+      findsOneWidget,
+    );
+    expect(bridge.selectionLayouts.last.width, 788);
+
+    tester.view.physicalSize = const Size(1440, 900);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('reader-composition-expanded')),
+      findsOneWidget,
+    );
+    expect(bridge.selectionLayouts.last.width, 1048);
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('safe insets constrain the reported reader viewport', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge(immediateLists: true);
+    await tester.pumpWidget(
+      MaterialApp(
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(
+            context,
+          ).copyWith(padding: const EdgeInsets.only(left: 20, right: 30)),
+          child: child!,
+        ),
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+
+    final composition = tester.getRect(
+      find.byKey(const ValueKey('reader-composition-compact')),
+    );
+    expect(composition.left, 20);
+    expect(composition.right, 360);
+    expect(bridge.selectionLayouts.single.width, 292);
+    expect(tester.takeException(), isNull);
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('path editing survives responsive breakpoint transitions', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.tap(find.byType(TextField));
+    await tester.pump();
+    tester.testTextInput.enterText('/tmp/part');
+    await tester.pump();
+    final editable = tester.state<EditableTextState>(find.byType(EditableText));
+    expect(editable.widget.focusNode.hasFocus, isTrue);
+    expect(tester.testTextInput.isVisible, isTrue);
+
+    tester.view.physicalSize = const Size(844, 390);
+    await tester.pumpAndSettle();
+    expect(
+      tester.state<EditableTextState>(find.byType(EditableText)),
+      same(editable),
+    );
+    expect(editable.widget.focusNode.hasFocus, isTrue);
+    expect(tester.testTextInput.isVisible, isTrue);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.selection,
+      const TextSelection.collapsed(offset: 9),
+    );
+
+    tester.view.physicalSize = const Size(1180, 800);
+    await tester.pumpAndSettle();
+    expect(
+      tester.state<EditableTextState>(find.byType(EditableText)),
+      same(editable),
+    );
+    expect(editable.widget.focusNode.hasFocus, isTrue);
+    tester.testTextInput.enterText('/tmp/part-two');
+    await tester.pump();
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      '/tmp/part-two',
+    );
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('open button focus survives responsive breakpoint transitions', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+    await tester.pump();
+    final openFocus = tester
+        .widget<FilledButton>(find.byType(FilledButton))
+        .focusNode!;
+    expect(FocusManager.instance.primaryFocus, same(openFocus));
+
+    tester.view.physicalSize = const Size(844, 390);
+    await tester.pumpAndSettle();
+    expect(FocusManager.instance.primaryFocus, same(openFocus));
+
+    tester.view.physicalSize = const Size(1180, 800);
+    await tester.pumpAndSettle();
+    expect(FocusManager.instance.primaryFocus, same(openFocus));
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pump();
+    expect(bridge.openCalls, 1);
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('highlight scroll position survives responsive breakpoints', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge(
+      initialAnnotations: List.generate(
+        8,
+        (index) => _annotation('$index', unit: index),
+      ),
+      immediateLists: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    await tester.drag(find.byType(ListView), const Offset(-600, 0));
+    await tester.pumpAndSettle();
+    final listBefore = tester.state<ScrollableState>(
+      find.byType(Scrollable).last,
+    );
+    expect(listBefore.position.pixels, greaterThan(0));
+
+    tester.view.physicalSize = const Size(1144, 900);
+    await tester.pumpAndSettle();
+    final listAfter = tester.state<ScrollableState>(
+      find.byType(Scrollable).last,
+    );
+    expect(listAfter, same(listBefore));
+    expect(listAfter.position.pixels, greaterThan(0));
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('highlight focus survives responsive breakpoint transitions', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge(
+      initialAnnotations: [_annotation('one')],
+      immediateLists: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    final highlight = find.widgetWithText(TextButton, 'Highlight 1');
+    for (var tabs = 0; tabs < 10; tabs += 1) {
+      final focus = FocusManager.instance.primaryFocus;
+      if (focus != null && focus.rect.overlaps(tester.getRect(highlight))) {
+        break;
+      }
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+    }
+    final focusBefore = FocusManager.instance.primaryFocus!;
+    expect(focusBefore.rect.overlaps(tester.getRect(highlight)), isTrue);
+
+    tester.view.physicalSize = const Size(1144, 900);
+    await tester.pumpAndSettle();
+    expect(FocusManager.instance.primaryFocus, same(focusBefore));
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pump();
+    expect(find.byKey(const ValueKey('selection-actions')), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('reader exposes text, selection, and visible keyboard focus', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+    final announcementLog = <Map<dynamic, dynamic>>[];
+    tester.binding.defaultBinaryMessenger.setMockDecodedMessageHandler<dynamic>(
+      SystemChannels.accessibility,
+      (message) async {
+        announcementLog.add(message as Map<dynamic, dynamic>);
+      },
+    );
+    try {
+      final bridge = _ControlledBridge(format: FlutterBookFormat.epub);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: ReaderScreen(
+            bridge: bridge,
+            decoder: (pixels, {required width, required height}) =>
+                _testImage(),
+          ),
+        ),
+      );
+      await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+      await tester.tap(find.text('Open document'));
+      await tester.pumpAndSettle();
+
+      final contentFinder = find.byKey(
+        const ValueKey('reader-content-semantics'),
+      );
+      var content = tester.getSemantics(contentFinder);
+      var data = content.getSemanticsData();
+      expect(data.label, 'Document text: Selectable fixture text');
+      expect(data.flagsCollection.isLiveRegion, isFalse);
+      final statusFinder = find.byKey(
+        const ValueKey('reader-selection-status'),
+      );
+      final statusNode = tester.getSemantics(statusFinder);
+      var status = statusNode.getSemanticsData();
+      expect(status.label, 'No text selected');
+      expect(status.flagsCollection.isLiveRegion, isTrue);
+      Rect globalRect(SemanticsNode node) {
+        var transform = node.transform ?? Matrix4.identity();
+        for (var parent = node.parent; parent != null; parent = parent.parent) {
+          if (parent.transform != null) {
+            transform = parent.transform!.multiplied(transform);
+          }
+        }
+        return MatrixUtils.transformRect(transform, node.rect);
+      }
+
+      expect(
+        globalRect(content).overlaps(globalRect(statusNode)),
+        isFalse,
+        reason: '${globalRect(content)} overlaps ${globalRect(statusNode)}',
+      );
+      BoxDecoration focusDecoration() =>
+          tester
+                  .widget<DecoratedBox>(
+                    find.byKey(const ValueKey('reader-focus-indicator')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      for (
+        var tabs = 0;
+        tabs < 5 && focusDecoration().border == null;
+        tabs += 1
+      ) {
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pump();
+      }
+      content = tester.getSemantics(contentFinder);
+      data = content.getSemanticsData();
+      expect(data.hasAction(ui.SemanticsAction.focus), isTrue);
+      final focusedNodes = <SemanticsNode>[];
+      void collectFocused(SemanticsNode node) {
+        if (node.getSemanticsData().flagsCollection.isFocused ==
+            ui.Tristate.isTrue) {
+          focusedNodes.add(node);
+        }
+        node.visitChildren((child) {
+          collectFocused(child);
+          return true;
+        });
+      }
+
+      collectFocused(
+        tester.getSemantics(
+          find.byKey(const ValueKey('reader-document-semantics')),
+        ),
+      );
+      expect(focusedNodes, [same(content)]);
+      final focusBorder = focusDecoration().border! as Border;
+      expect(
+        focusBorder.top.color,
+        Theme.of(tester.element(contentFinder)).colorScheme.primary,
+      );
+      expect(focusBorder.top.width, 3);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+      status = tester.getSemantics(statusFinder).getSemanticsData();
+      expect(status.label, 'Selected text: e');
+      expect(status.flagsCollection.isLiveRegion, isTrue);
+      expect(announcementLog.where((event) => event['type'] == 'announce'), [
+        {
+          'type': 'announce',
+          'data': {
+            'viewId': tester.view.viewId,
+            'message': 'Selected text: e',
+            'textDirection': TextDirection.ltr.index,
+          },
+        },
+      ]);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+      expect(tester.getSemantics(statusFinder), same(statusNode));
+      status = statusNode.getSemanticsData();
+      expect(status.label, 'No text selected');
+      expect(status.flagsCollection.isLiveRegion, isTrue);
+      expect(
+        (announcementLog.last['data'] as Map<dynamic, dynamic>)['message'],
+        'No text selected',
+      );
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      expect(tester.getSemantics(statusFinder), same(statusNode));
+      status = statusNode.getSemanticsData();
+      expect(status.label, 'No text selected');
+      expect(status.flagsCollection.isLiveRegion, isTrue);
+
+      await tester.tap(find.byType(TextField));
+      await tester.pump();
+      expect(focusDecoration().border, isNull);
+
+      await tester.pumpWidget(const SizedBox());
+      await bridge.disposed.future;
+    } finally {
+      tester.binding.defaultBinaryMessenger
+          .setMockDecodedMessageHandler<dynamic>(
+            SystemChannels.accessibility,
+            null,
+          );
+      debugDefaultTargetPlatformOverride = null;
+      semantics.dispose();
+    }
+  });
+
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    testWidgets(
+      '$platform retains cleared selection status during replacement',
+      (tester) async {
+        final semantics = tester.ensureSemantics();
+        debugDefaultTargetPlatformOverride = platform;
+        try {
+          final bridge = _ControlledBridge(format: FlutterBookFormat.epub);
+          await tester.pumpWidget(
+            MaterialApp(
+              home: ReaderScreen(
+                bridge: bridge,
+                decoder: (pixels, {required width, required height}) =>
+                    _testImage(),
+              ),
+            ),
+          );
+          await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+          await tester.tap(find.text('Open document'));
+          await tester.pumpAndSettle();
+          final statusFinder = find.byKey(
+            const ValueKey('reader-selection-status'),
+          );
+          final statusNode = tester.getSemantics(statusFinder);
+
+          await tester.tap(
+            find.byKey(const ValueKey('reader-selection-surface')),
+          );
+          await tester.pump();
+          await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+          await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+          await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+          await tester.pump();
+          expect(statusNode.getSemanticsData().label, 'Selected text: e');
+
+          final editable = tester.state<EditableTextState>(
+            find.byType(EditableText),
+          );
+          for (
+            var tabs = 0;
+            tabs < 5 && !editable.widget.focusNode.hasFocus;
+            tabs += 1
+          ) {
+            await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+            await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+            await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+            await tester.pump();
+          }
+          expect(editable.widget.focusNode.hasFocus, isTrue);
+          tester.testTextInput.enterText('/tmp/replacement.epub');
+          bridge.failCancellationCreation = true;
+          await tester.testTextInput.receiveAction(TextInputAction.done);
+          await tester.pump();
+
+          expect(tester.getSemantics(statusFinder), same(statusNode));
+          expect(statusNode.getSemanticsData().label, 'No text selected');
+          expect(
+            statusNode.getSemanticsData().flagsCollection.isLiveRegion,
+            isTrue,
+          );
+          expect(
+            find.textContaining('too many cancellation tokens'),
+            findsOneWidget,
+          );
+
+          await tester.pumpWidget(const SizedBox());
+          await bridge.disposed.future;
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+          semantics.dispose();
+        }
+      },
+    );
+  }
+
   for (final format in [FlutterBookFormat.pdf, FlutterBookFormat.epub]) {
     for (final device in [
       ui.PointerDeviceKind.mouse,
@@ -3305,11 +4349,216 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await bridge.disposed.future;
   });
+
+  testWidgets('failed recovery displays an interrupted note save', (
+    tester,
+  ) async {
+    final bridge = _ControlledBridge(
+      format: FlutterBookFormat.epub,
+      immediateLists: true,
+    );
+    final pendingCreate = Completer<FlutterAnnotation>();
+    bridge.createCompleter = pendingCreate;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    final rect = tester.getRect(
+      find.byKey(const ValueKey('reader-selection-surface')),
+    );
+    final side = rect.shortestSide;
+    final topLeft = rect.center - Offset(side / 2, side / 2);
+    final gesture = await tester.createGesture(
+      kind: ui.PointerDeviceKind.mouse,
+    );
+    await gesture.down(topLeft + Offset(side * .2, side * .2));
+    await gesture.moveBy(Offset(side * .5, side * .5));
+    await gesture.up();
+    await tester.pump();
+    await tester.tap(find.text('Add note'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'Remember this');
+    await tester.tap(find.text('Save'));
+    await _waitUntil(() => bridge.createCalls == 1);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    bridge.openFailure = StateError('book moved');
+    pendingCreate.completeError(
+      const FlutterBridgeError(
+        kind: FlutterBridgeErrorKind.cancelled,
+        message: 'operation was cancelled',
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text(
+        'Bad state: book moved\n'
+        'The note could not be saved while the app was suspended. Try again.',
+      ),
+      findsOneWidget,
+    );
+
+    bridge.openFailure = null;
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    expect(bridge.openCalls, 3);
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('relayout preserves an interrupted annotation note warning', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge(
+      format: FlutterBookFormat.epub,
+      initialAnnotations: [_annotation('one')],
+      immediateLists: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Edit note'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'Updated note');
+    await tester.tap(find.text('Save'));
+    await _waitUntil(() => bridge.updateCalls == 1);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    final recoveryList = Completer<List<FlutterAnnotation>>();
+    bridge.listCompleters.add(recoveryList);
+    bridge.updateCompleter!.complete(false);
+    await tester.pump();
+    await tester.pump();
+    expect(bridge.listCalls, 2);
+    tester.view.physicalSize = const Size(900, 700);
+    await tester.pump();
+    recoveryList.completeError(StateError('annotation list failed'));
+    await tester.pumpAndSettle();
+
+    expect(bridge.listCalls, 3);
+    expect(find.text('Highlight 1'), findsOneWidget);
+    expect(find.textContaining('annotation list failed'), findsNothing);
+    expect(
+      find.text(
+        'The note could not be saved while the app was suspended. Try again.',
+      ),
+      findsOneWidget,
+    );
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('suspension dismisses a note draft with actionable feedback', (
+    tester,
+  ) async {
+    final bridge = _ControlledBridge(format: FlutterBookFormat.epub);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    final surface = find.byKey(const ValueKey('reader-selection-surface'));
+    final rect = tester.getRect(surface);
+    final side = rect.shortestSide;
+    final topLeft = rect.center - Offset(side / 2, side / 2);
+    final gesture = await tester.createGesture(
+      kind: ui.PointerDeviceKind.mouse,
+    );
+    await gesture.down(topLeft + Offset(side * .2, side * .2));
+    await gesture.moveBy(Offset(side * .5, side * .5));
+    await gesture.up();
+    await tester.pump();
+    await tester.tap(find.text('Add note'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'Unsaved draft');
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    expect(bridge.releasedDocuments, hasLength(1));
+    expect(bridge.createCalls, 0);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(find.text('Save'), findsNothing);
+    expect(
+      find.text(
+        'Selection action failed: The note was not saved because the app was suspended. Try again.',
+      ),
+      findsOneWidget,
+    );
+    expect(bridge.createCalls, 0);
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('disposing an open note dialog remains teardown safe', (
+    tester,
+  ) async {
+    final bridge = _ControlledBridge(
+      initialAnnotations: [_annotation('one')],
+      immediateLists: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Edit note'));
+    await tester.pumpAndSettle();
+    expect(find.text('Save'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+    await bridge.disposed.future;
+    expect(tester.takeException(), isNull);
+  });
 }
 
-FlutterAnnotation _annotation(String id) => FlutterAnnotation(
+FlutterAnnotation _annotation(String id, {int unit = 0}) => FlutterAnnotation(
   id: id,
-  unit: BigInt.zero,
+  unit: BigInt.from(unit),
   resolution: FlutterAnnotationResolution.exact,
   textRange: FlutterAnnotationTextRange(start: BigInt.one, end: BigInt.from(3)),
   color: FlutterHighlightColor.yellow,
@@ -3411,6 +4660,7 @@ final class _ControlledBridge implements FlutterBridge {
   final listCompleters = Queue<Completer<List<FlutterAnnotation>>>();
   final takenBuffers = <FlutterBufferHandle>[];
   final releasedBuffers = <FlutterBufferHandle>[];
+  final releasedDocuments = <FlutterDocumentHandle>[];
   final releasedSelections = <FlutterSelectionHandle>[];
   final events = <String>[];
   Completer<bool>? updateCompleter = Completer<bool>();
@@ -3428,6 +4678,7 @@ final class _ControlledBridge implements FlutterBridge {
   var finishedOperations = 0;
   var disposeCount = 0;
   var failCancellationCreation = false;
+  Object? openFailure;
   var _nextId = BigInt.one;
   final _listedDocuments = <BigInt>{};
   final createdRanges = <(BigInt, BigInt)>[];
@@ -3435,6 +4686,7 @@ final class _ControlledBridge implements FlutterBridge {
   final selectionLayouts = <ReaderLayout>[];
   final renderScales = <double>[];
   final listScales = <double>[];
+  final openRequests = <FlutterOpenRequest>[];
 
   Future<void> waitForOp(int count) async {
     while (finishedOperations < count) {
@@ -3471,6 +4723,8 @@ final class _ControlledBridge implements FlutterBridge {
     required BigInt cancellationId,
   }) async {
     openCalls += 1;
+    openRequests.add(request);
+    if (openFailure case final failure?) throw failure;
     return FlutterDocumentSummary(
       handle: FlutterDocumentHandle(registry: BigInt.one, id: cancellationId),
       format: format,
@@ -3742,7 +4996,10 @@ final class _ControlledBridge implements FlutterBridge {
   }
 
   @override
-  bool releaseDocument({required FlutterDocumentHandle handle}) => true;
+  bool releaseDocument({required FlutterDocumentHandle handle}) {
+    releasedDocuments.add(handle);
+    return true;
+  }
 
   @override
   bool releaseCancellation({required BigInt id}) {
@@ -4081,7 +5338,7 @@ final class _SequentialBridge implements FlutterBridge {
       currentFormat = summary.format;
       return summary;
     }
-    throw StateError(result as String);
+    throw result;
   }
 
   @override
