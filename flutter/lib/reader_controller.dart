@@ -891,7 +891,10 @@ final class ReaderController implements Listenable {
           _activeNoteEditorRevision = null;
         }
       case _ReaderAnnotationUpdateCompleted():
-        _recordNoteUpdateOutcome(message.operationId, succeeded: true);
+        _recordNoteUpdateOutcome(
+          message.operationId,
+          succeeded: message.changed,
+        );
         _annotationUpdateCompleted(message);
       case _ReaderDisposeRequested():
         _disposeRequested();
@@ -927,7 +930,7 @@ final class ReaderController implements Listenable {
       _emit(
         _model.copyWith(
           openPath: path,
-          error: error.message,
+          error: _consumeRecoveryNotices(error.message),
           generation: generation,
           relayoutBusy: false,
         ),
@@ -937,7 +940,7 @@ final class ReaderController implements Listenable {
       _emit(
         _model.copyWith(
           openPath: path,
-          error: error.toString(),
+          error: _consumeRecoveryNotices(error.toString()),
           generation: generation,
           relayoutBusy: false,
         ),
@@ -1819,7 +1822,6 @@ final class ReaderController implements Listenable {
         color: message.color,
         body: message.body,
       );
-      if (!_isCurrent(generation)) return;
       dispatch(
         _ReaderAnnotationUpdateCompleted(
           generation: generation,
@@ -2129,7 +2131,7 @@ final class ReaderController implements Listenable {
           document: null,
           pageImage: null,
           contentState: ReaderContentState.failed,
-          error: message.error,
+          error: _consumeRecoveryNotices(message.error),
         ),
       );
     }
@@ -2140,10 +2142,13 @@ final class ReaderController implements Listenable {
       _activeCancellation = null;
     }
     if (_isCurrent(message.generation)) {
-      final selectionNotice = _recoverySelectionNotice;
-      final annotationNotice = _recoveryAnnotationNotice;
-      _recoverySelectionNotice = null;
-      _recoveryAnnotationNotice = null;
+      final recovered = _model.document != null;
+      final selectionNotice = recovered ? _recoverySelectionNotice : null;
+      final annotationNotice = recovered ? _recoveryAnnotationNotice : null;
+      if (recovered) {
+        _recoverySelectionNotice = null;
+        _recoveryAnnotationNotice = null;
+      }
       _emit(
         _model.copyWith(
           busy: false,
@@ -2371,6 +2376,13 @@ final class ReaderController implements Listenable {
       _recoveryAnnotationNotice =
           'The note could not be saved while the app was suspended. Try again.';
     }
+  }
+
+  String _consumeRecoveryNotices(String error) {
+    final notices = [?_recoverySelectionNotice, ?_recoveryAnnotationNotice];
+    _recoverySelectionNotice = null;
+    _recoveryAnnotationNotice = null;
+    return notices.isEmpty ? error : '$error\n${notices.join('\n')}';
   }
 
   void _disposeBridgeIfIdle() {

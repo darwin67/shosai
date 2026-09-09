@@ -2657,9 +2657,9 @@ void main() {
     );
   }
 
-  for (final updateSucceeds in [false, true]) {
+  for (final updateOutcome in ['throws', 'rejected', 'accepted']) {
     test(
-      'recovery handles an interrupted note update when it ${updateSucceeds ? 'succeeds' : 'fails'}',
+      'recovery handles interrupted note update outcome: $updateOutcome',
       () async {
         final bridge = _ControlledBridge(
           initialAnnotations: [_annotation('one')],
@@ -2677,19 +2677,22 @@ void main() {
 
         controller.dispatch(const ReaderSuspended());
         controller.dispatch(const ReaderResumed());
-        if (updateSucceeds) {
-          bridge.updateCompleter!.complete(true);
-        } else {
-          bridge.updateCompleter!.completeError(
-            const FlutterBridgeError(
-              kind: FlutterBridgeErrorKind.cancelled,
-              message: 'operation was cancelled',
-            ),
-          );
+        switch (updateOutcome) {
+          case 'accepted':
+            bridge.updateCompleter!.complete(true);
+          case 'rejected':
+            bridge.updateCompleter!.complete(false);
+          case 'throws':
+            bridge.updateCompleter!.completeError(
+              const FlutterBridgeError(
+                kind: FlutterBridgeErrorKind.cancelled,
+                message: 'operation was cancelled',
+              ),
+            );
         }
         await bridge.waitForOp(3);
 
-        if (updateSucceeds) {
+        if (updateOutcome == 'accepted') {
           expect(controller.model.annotationError, isNull);
           expect(controller.model.annotations.single.body, 'updated draft');
         } else {
@@ -4347,6 +4350,73 @@ void main() {
     await bridge.disposed.future;
   });
 
+  testWidgets('failed recovery displays an interrupted note save', (
+    tester,
+  ) async {
+    final bridge = _ControlledBridge(
+      format: FlutterBookFormat.epub,
+      immediateLists: true,
+    );
+    final pendingCreate = Completer<FlutterAnnotation>();
+    bridge.createCompleter = pendingCreate;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    final rect = tester.getRect(
+      find.byKey(const ValueKey('reader-selection-surface')),
+    );
+    final side = rect.shortestSide;
+    final topLeft = rect.center - Offset(side / 2, side / 2);
+    final gesture = await tester.createGesture(
+      kind: ui.PointerDeviceKind.mouse,
+    );
+    await gesture.down(topLeft + Offset(side * .2, side * .2));
+    await gesture.moveBy(Offset(side * .5, side * .5));
+    await gesture.up();
+    await tester.pump();
+    await tester.tap(find.text('Add note'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'Remember this');
+    await tester.tap(find.text('Save'));
+    await _waitUntil(() => bridge.createCalls == 1);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    bridge.openFailure = StateError('book moved');
+    pendingCreate.completeError(
+      const FlutterBridgeError(
+        kind: FlutterBridgeErrorKind.cancelled,
+        message: 'operation was cancelled',
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text(
+        'Bad state: book moved\n'
+        'The note could not be saved while the app was suspended. Try again.',
+      ),
+      findsOneWidget,
+    );
+
+    bridge.openFailure = null;
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    expect(bridge.openCalls, 3);
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
   testWidgets('suspension dismisses a note draft with actionable feedback', (
     tester,
   ) async {
@@ -4550,6 +4620,7 @@ final class _ControlledBridge implements FlutterBridge {
   var finishedOperations = 0;
   var disposeCount = 0;
   var failCancellationCreation = false;
+  Object? openFailure;
   var _nextId = BigInt.one;
   final _listedDocuments = <BigInt>{};
   final createdRanges = <(BigInt, BigInt)>[];
@@ -4595,6 +4666,7 @@ final class _ControlledBridge implements FlutterBridge {
   }) async {
     openCalls += 1;
     openRequests.add(request);
+    if (openFailure case final failure?) throw failure;
     return FlutterDocumentSummary(
       handle: FlutterDocumentHandle(registry: BigInt.one, id: cancellationId),
       format: format,
