@@ -584,8 +584,12 @@ final class _ReaderOperationFinished extends ReaderMessage {
 }
 
 final class _ReaderAnnotationCreateFinished extends ReaderMessage {
-  const _ReaderAnnotationCreateFinished(this.cancellation);
+  const _ReaderAnnotationCreateFinished(
+    this.cancellation, {
+    required this.succeeded,
+  });
   final BigInt cancellation;
+  final bool succeeded;
 }
 
 final class _ReaderAnnotationOperationFinished extends ReaderMessage {
@@ -630,6 +634,10 @@ final class ReaderController implements Listenable {
   BigInt? _activeCancellation;
   final Set<BigInt> _relayoutCancellations = {};
   final Set<BigInt> _annotationCancellations = {};
+  final Set<BigInt> _noteCreateCancellations = {};
+  final Set<BigInt> _interruptedNoteCreates = {};
+  final Set<String> _noteUpdateOperations = {};
+  final Set<String> _interruptedNoteUpdates = {};
   final Map<BigInt, int> _selectionCancellations = {};
   final Set<int> _cancelledSelectionCreates = {};
   int _activeBridgeOperations = 0;
@@ -854,6 +862,14 @@ final class ReaderController implements Listenable {
       case _ReaderOperationFinished():
         _operationFinished(message);
       case _ReaderAnnotationCreateFinished():
+        final interruptedNote = _interruptedNoteCreates.remove(
+          message.cancellation,
+        );
+        _noteCreateCancellations.remove(message.cancellation);
+        if (interruptedNote && !message.succeeded) {
+          _recoverySelectionNotice =
+              'The note could not be saved while the app was suspended. Try again.';
+        }
         final selectionRevision = _selectionCancellations[message.cancellation];
         _annotationCancellations.remove(message.cancellation);
         _selectionCancellations.remove(message.cancellation);
@@ -875,6 +891,7 @@ final class ReaderController implements Listenable {
           _activeNoteEditorRevision = null;
         }
       case _ReaderAnnotationUpdateCompleted():
+        _recordNoteUpdateOutcome(message.operationId, succeeded: true);
         _annotationUpdateCompleted(message);
       case _ReaderDisposeRequested():
         _disposeRequested();
@@ -909,6 +926,7 @@ final class ReaderController implements Listenable {
     } on FlutterBridgeError catch (error) {
       _emit(
         _model.copyWith(
+          openPath: path,
           error: error.message,
           generation: generation,
           relayoutBusy: false,
@@ -918,6 +936,7 @@ final class ReaderController implements Listenable {
     } catch (error) {
       _emit(
         _model.copyWith(
+          openPath: path,
           error: error.toString(),
           generation: generation,
           relayoutBusy: false,
@@ -1689,6 +1708,7 @@ final class ReaderController implements Listenable {
       return;
     }
     _annotationCancellations.add(cancellation);
+    if (body != null) _noteCreateCancellations.add(cancellation);
     _selectionCancellations[cancellation] = selectionRevision;
     _activeBridgeOperations += 1;
     _emit(
@@ -1699,6 +1719,7 @@ final class ReaderController implements Listenable {
       ),
     );
     unawaited(() async {
+      var succeeded = false;
       try {
         final created = await _bridge.createAnnotation(
           document: document.handle,
@@ -1710,6 +1731,7 @@ final class ReaderController implements Listenable {
           body: body,
           cancellationId: cancellation,
         );
+        succeeded = true;
         if (!_isCurrent(generation)) return;
         dispatch(
           _ReaderAnnotationsChanged(
@@ -1732,7 +1754,9 @@ final class ReaderController implements Listenable {
           ),
         );
       } finally {
-        dispatch(_ReaderAnnotationCreateFinished(cancellation));
+        dispatch(
+          _ReaderAnnotationCreateFinished(cancellation, succeeded: succeeded),
+        );
       }
     }());
   }
@@ -1750,7 +1774,10 @@ final class ReaderController implements Listenable {
     );
   }
 
-  Future<void> _updateAnnotation(ReaderAnnotationUpdated message) async {
+  Future<void> _updateAnnotation(
+    ReaderAnnotationUpdated message, {
+    bool fromNote = false,
+  }) async {
     final document = _model.document;
     if (document == null ||
         !_model.annotationsReady ||
@@ -1776,6 +1803,7 @@ final class ReaderController implements Listenable {
     }
     final revision = ++_annotationRevision;
     final operationId = 'update:${message.id}:${++_nextOperationId}';
+    if (fromNote) _noteUpdateOperations.add(operationId);
     _annotationCancellations.add(cancellation);
     _activeBridgeOperations += 1;
     _emit(
@@ -1967,15 +1995,19 @@ final class ReaderController implements Listenable {
           annotation.color,
           message.body.isEmpty ? null : message.body,
         ),
+        fromNote: true,
       ),
     );
   }
 
   void _annotationsChanged(_ReaderAnnotationsChanged message) {
+    final operation = message.operationId;
+    if (operation != null && message.error != null) {
+      _recordNoteUpdateOutcome(operation, succeeded: false);
+    }
     if (!_isCurrent(message.generation)) {
       return;
     }
-    final operation = message.operationId;
     if (operation != null) {
       final pending = {..._model.annotationOperations}..remove(operation);
       _emit(_model.copyWith(annotationOperations: pending));
@@ -2143,6 +2175,8 @@ final class ReaderController implements Listenable {
     _cancelActiveNoteEditor();
     _releaseForRecovery = true;
     _reopenForRecovery = true;
+    _interruptedNoteCreates.addAll(_noteCreateCancellations);
+    _interruptedNoteUpdates.addAll(_noteUpdateOperations);
     final cancellation = _activeCancellation;
     if (cancellation != null) _bridge.cancel(id: cancellation);
     for (final cancellation in _annotationCancellations) {
@@ -2327,6 +2361,15 @@ final class ReaderController implements Listenable {
           ),
         ),
       );
+    }
+  }
+
+  void _recordNoteUpdateOutcome(String operationId, {required bool succeeded}) {
+    _noteUpdateOperations.remove(operationId);
+    final interrupted = _interruptedNoteUpdates.remove(operationId);
+    if (interrupted && !succeeded) {
+      _recoveryAnnotationNotice =
+          'The note could not be saved while the app was suspended. Try again.';
     }
   }
 

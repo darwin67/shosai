@@ -911,12 +911,20 @@ void main() {
     expect(controller.model.document, isNull);
     expect(controller.model.pageImage, isNull);
     expect(controller.model.error, 'too many cancellation tokens');
+    expect(controller.model.openPath, '/tmp/second.pdf');
     expect(image.debugDisposed, isTrue);
     expect(bridge.releasedDocuments, [_documentHandle]);
 
+    bridge.failCancellationCreation = false;
+    controller.dispatch(const ReaderSuspended());
+    controller.dispatch(const ReaderMemoryPressureReceived());
+    controller.dispatch(const ReaderResumed());
+    await _waitUntil(() => bridge.openRequests.length == 2);
+    expect(bridge.openRequests.last.pathKey, controller.model.openPath);
+
     controller.dispose();
     await bridge.disposed.future;
-    expect(bridge.releasedDocuments, [_documentHandle]);
+    expect(bridge.releasedDocuments, [_documentHandle, _documentHandle]);
     expect(bridge.disposeCount, 1);
   });
 
@@ -2582,6 +2590,121 @@ void main() {
       await bridge.disposed.future;
     },
   );
+
+  for (final createSucceeds in [false, true]) {
+    test(
+      'recovery reports an interrupted note create when it ${createSucceeds ? 'succeeds' : 'fails'}',
+      () async {
+        final bridge = _ControlledBridge(immediateLists: true);
+        final pendingCreate = Completer<FlutterAnnotation>();
+        bridge.createCompleter = pendingCreate;
+        final controller = ReaderController(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+          noteEditor: (_) async => 'draft',
+        );
+        await _openControlled(controller, bridge, '/tmp/a.epub');
+        controller.dispatch(const ReaderSelectionStarted(1));
+        controller.dispatch(const ReaderSelectionExtended(3));
+        controller.dispatch(const ReaderSelectionEnded());
+        controller.dispatch(const ReaderSelectionNoteRequested());
+        await _waitUntil(() => bridge.createCalls == 1);
+        await Future<void>.delayed(Duration.zero);
+
+        controller.dispatch(const ReaderSuspended());
+        controller.dispatch(const ReaderResumed());
+        if (createSucceeds) {
+          pendingCreate.complete(
+            FlutterAnnotation(
+              id: 'accepted-note',
+              unit: BigInt.zero,
+              resolution: FlutterAnnotationResolution.exact,
+              textRange: FlutterAnnotationTextRange(
+                start: BigInt.one,
+                end: BigInt.from(3),
+              ),
+              color: FlutterHighlightColor.yellow,
+              body: 'draft',
+            ),
+          );
+        } else {
+          pendingCreate.completeError(
+            const FlutterBridgeError(
+              kind: FlutterBridgeErrorKind.cancelled,
+              message: 'operation was cancelled',
+            ),
+          );
+        }
+        await bridge.waitForOp(3);
+
+        if (createSucceeds) {
+          expect(controller.model.selectionActionError, isNull);
+          expect(
+            controller.model.annotations.map((item) => item.id),
+            contains('accepted-note'),
+          );
+        } else {
+          expect(
+            controller.model.selectionActionError,
+            'The note could not be saved while the app was suspended. Try again.',
+          );
+          expect(controller.model.annotations, isEmpty);
+        }
+
+        controller.dispose();
+        await bridge.disposed.future;
+      },
+    );
+  }
+
+  for (final updateSucceeds in [false, true]) {
+    test(
+      'recovery handles an interrupted note update when it ${updateSucceeds ? 'succeeds' : 'fails'}',
+      () async {
+        final bridge = _ControlledBridge(
+          initialAnnotations: [_annotation('one')],
+          immediateLists: true,
+        );
+        final controller = ReaderController(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+          noteEditor: (_) async => 'updated draft',
+        );
+        await _openControlled(controller, bridge, '/tmp/a.epub');
+        controller.dispatch(const ReaderAnnotationNoteRequested('one'));
+        await _waitUntil(() => bridge.updateCalls == 1);
+        await Future<void>.delayed(Duration.zero);
+
+        controller.dispatch(const ReaderSuspended());
+        controller.dispatch(const ReaderResumed());
+        if (updateSucceeds) {
+          bridge.updateCompleter!.complete(true);
+        } else {
+          bridge.updateCompleter!.completeError(
+            const FlutterBridgeError(
+              kind: FlutterBridgeErrorKind.cancelled,
+              message: 'operation was cancelled',
+            ),
+          );
+        }
+        await bridge.waitForOp(3);
+
+        if (updateSucceeds) {
+          expect(controller.model.annotationError, isNull);
+          expect(controller.model.annotations.single.body, 'updated draft');
+        } else {
+          expect(
+            controller.model.annotationError,
+            'The note could not be saved while the app was suspended. Try again.',
+          );
+          expect(controller.model.annotations.single.body, isNull);
+        }
+
+        controller.dispose();
+        await bridge.disposed.future;
+      },
+    );
+  }
 
   for (final unavailable in [
     (FlutterBridgeErrorKind.notFound, 'document was not found'),
