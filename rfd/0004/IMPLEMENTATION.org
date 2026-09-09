@@ -133,8 +133,18 @@ coordinates.
     and distinguish temporary and saved highlights without color alone.
   - [ ] Validate the automated semantics, focus, text-scaling, and non-color
     evidence with the named screen reader on each claimed physical target.
-- [ ] Exercise suspend/resume, process death, cancellation, memory pressure,
+- [-] Exercise suspend/resume, process death, cancellation, memory pressure,
   renderer recovery, missing files, and revoked file capabilities.
+  - [X] Map lifecycle and memory-pressure callbacks to typed controller messages;
+    cancel and drain in-flight work, release native resources, reopen the latest
+    accepted locator, and reject reader mutations until recovery completes.
+  - [X] Restore accepted document locators with a fresh bridge after process
+    death, preserve queued relayout inputs, retry missing and inaccessible
+    locators, and surface interrupted note outcomes through automated widget
+    and controller race regressions.
+  - [ ] Validate suspend/resume, process death, memory pressure, renderer loss,
+    missing files, and revoked document-provider capabilities on each claimed
+    physical desktop and mobile target.
 - [ ] Measure the M0 budgets on Linux, macOS, Windows, and physical Android/iOS
   hardware available for the first release decision.
 
@@ -146,9 +156,11 @@ re-entering layout during interaction.  Native and widget regressions cover both
 formats, mouse/touch ownership, keyboard-only operation, cancellation and stale
 completion races, annotation reopen/update/delete, geometry bounds, compact
 large-text action layout, responsive composition, visible focus, non-color
-selection state, and cross-platform announcement policy.  Changed-fingerprint
-relayout, manual screen-reader validation, lifecycle, multi-platform
-measurement, and physical-mobile exit gates remain explicitly unclaimed.
+selection state, cross-platform announcement policy, lifecycle draining,
+resource recovery, process restoration, and unavailable-locator retry.
+Changed-fingerprint relayout, manual screen-reader and physical lifecycle
+validation, multi-platform measurement, and physical-mobile exit gates remain
+explicitly unclaimed.
 
 The first relayout increment now recomputes PDF geometry at the active display
 scale and EPUB geometry at the active viewport, font size, and display scale,
