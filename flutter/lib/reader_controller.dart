@@ -633,6 +633,8 @@ final class ReaderController implements Listenable {
 
   ReaderModel get model => _model;
 
+  bool get _recovering => _releaseForRecovery || _reopenForRecovery;
+
   @override
   void addListener(VoidCallback listener) {
     if (!_listenersDisposed) _listeners.add(listener);
@@ -644,6 +646,30 @@ final class ReaderController implements Listenable {
   }
 
   void dispatch(ReaderMessage message) {
+    if (_recovering &&
+        switch (message) {
+          ReaderSelectionStarted() ||
+          ReaderSelectionExtended() ||
+          ReaderSelectionPointerStarted() ||
+          ReaderSelectionPointerPressedOutside() ||
+          ReaderSelectionPointerMoved() ||
+          ReaderSelectionPointerEnded() ||
+          ReaderSelectionPointerCancelled() ||
+          ReaderSelectionKeyboardExtended() ||
+          ReaderSelectionEnded() ||
+          ReaderSelectionActionsRequested() ||
+          ReaderSelectionCommitted() ||
+          ReaderSelectionNoteRequested() ||
+          ReaderSelectionCopyRequested() ||
+          ReaderSelectionCancelled() ||
+          ReaderAnnotationUpdated() ||
+          ReaderAnnotationNoteRequested() ||
+          ReaderAnnotationDeleted() ||
+          ReaderAnnotationNavigated() => true,
+          _ => false,
+        }) {
+      return;
+    }
     switch (message) {
       case ReaderOpenRequested():
         _openRequested(message);
@@ -831,11 +857,12 @@ final class ReaderController implements Listenable {
 
   void _openRequested(ReaderOpenRequested message) {
     final path = message.path.trim();
-    if (path.isEmpty ||
-        _model.busy ||
-        _model.annotationOperations.isNotEmpty ||
-        _suspended ||
-        _closing) {
+    if (path.isEmpty || _closing) return;
+    if (_recovering) {
+      _recoveryPath = path;
+      return;
+    }
+    if (_model.busy || _model.annotationOperations.isNotEmpty || _suspended) {
       return;
     }
 
@@ -1080,7 +1107,12 @@ final class ReaderController implements Listenable {
   }
 
   void _layoutChanged(ReaderLayout layout) {
-    if (!layout.isValid || _suspended || _closing) return;
+    if (!layout.isValid || _closing) return;
+    if (_suspended || _recovering) {
+      _requestedLayout = layout;
+      _failedLayout = null;
+      return;
+    }
     if (_model.busy) {
       _requestedLayout = layout;
       _failedLayout = null;
@@ -2060,7 +2092,7 @@ final class ReaderController implements Listenable {
     _noteRevision += 1;
     _emit(
       _model.copyWith(
-        busy: false,
+        busy: true,
         relayoutBusy: false,
         annotationOperations: const {},
         selectionPhase: ReaderSelectionPhase.idle,
@@ -2085,7 +2117,7 @@ final class ReaderController implements Listenable {
   void _memoryPressureReceived() {
     if (_closing || _recoveryPath == null) return;
     if (_suspended) {
-      _releaseForRecovery = true;
+      _reopenForRecovery = true;
       _recoverIfIdle();
       return;
     }
@@ -2108,6 +2140,7 @@ final class ReaderController implements Listenable {
           annotationsReady: false,
           contentState: ReaderContentState.loading,
           error: null,
+          busy: false,
         ),
       );
     }

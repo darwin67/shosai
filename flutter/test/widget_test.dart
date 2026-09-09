@@ -2447,7 +2447,10 @@ void main() {
   test(
     'resume waits for suspended relayout cleanup before reopening',
     () async {
-      final bridge = _ControlledBridge(immediateLists: true);
+      final bridge = _ControlledBridge(
+        initialAnnotations: [_annotation('one')],
+        immediateLists: true,
+      )..updateCompleter = null;
       final controller = _epubController(bridge);
       await _openControlled(controller, bridge, '/tmp/a.epub');
       final firstDocument = controller.model.document!.handle;
@@ -2463,16 +2466,22 @@ void main() {
       final relayoutCancellation = bridge.createdCancellations.last;
       controller.dispatch(const ReaderSuspended());
       controller.dispatch(const ReaderResumed());
+      controller.dispatch(const ReaderOpenRequested('/tmp/b.epub'));
+      controller.dispatch(
+        const ReaderAnnotationUpdated('one', FlutterHighlightColor.green, null),
+      );
 
       expect(bridge.cancelled, contains(relayoutCancellation));
       expect(bridge.releasedDocuments, isEmpty);
       expect(bridge.openCalls, 1);
+      expect(bridge.updateCalls, 0);
 
       staleSelection.complete(_surface(BigInt.from(20), raster: true));
       await bridge.waitForOp(3);
 
       expect(bridge.releasedDocuments, [firstDocument]);
       expect(bridge.openCalls, 2);
+      expect(bridge.openRequests.last.pathKey, '/tmp/b.epub');
       expect(controller.model.document, isNotNull);
       expect(controller.model.contentState, ReaderContentState.ready);
 
@@ -2480,6 +2489,55 @@ void main() {
       await bridge.disposed.future;
     },
   );
+
+  test('suspended layout changes apply to the recovered reader', () async {
+    final bridge = _ControlledBridge(immediateLists: true);
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/a.epub');
+    const resumedLayout = ReaderLayout(scale: 2, width: 320, fontSize: 24);
+
+    controller.dispatch(const ReaderSuspended());
+    controller.dispatch(const ReaderLayoutChanged(resumedLayout));
+    controller.dispatch(const ReaderResumed());
+    await bridge.waitForOp(2);
+
+    expect(bridge.selectionLayouts.last, resumedLayout);
+    expect(controller.model.layout, resumedLayout);
+
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
+  for (final unavailable in [
+    (FlutterBridgeErrorKind.notFound, 'document was not found'),
+    (FlutterBridgeErrorKind.inaccessible, 'document is inaccessible'),
+  ]) {
+    test(
+      '${unavailable.$1} retries after background memory pressure',
+      () async {
+        final error = FlutterBridgeError(
+          kind: unavailable.$1,
+          message: unavailable.$2,
+        );
+        final bridge = _SequentialBridge(Queue<Object>.of([error, error]));
+        final controller = _epubController(bridge);
+        controller.dispatch(const ReaderOpenRequested('/tmp/missing.epub'));
+        await bridge.waitForFinishedOperations(1);
+        expect(controller.model.error, unavailable.$2);
+
+        controller.dispatch(const ReaderSuspended());
+        controller.dispatch(const ReaderMemoryPressureReceived());
+        expect(controller.model.error, unavailable.$2);
+        controller.dispatch(const ReaderResumed());
+        await bridge.waitForFinishedOperations(2);
+
+        expect(controller.model.error, unavailable.$2);
+        expect(bridge.openResults, isEmpty);
+        controller.dispose();
+        expect(bridge.disposeCount, 1);
+      },
+    );
+  }
 
   testWidgets('reader maps platform lifecycle events to recovery messages', (
     tester,
@@ -4221,6 +4279,7 @@ final class _ControlledBridge implements FlutterBridge {
   final selectionLayouts = <ReaderLayout>[];
   final renderScales = <double>[];
   final listScales = <double>[];
+  final openRequests = <FlutterOpenRequest>[];
 
   Future<void> waitForOp(int count) async {
     while (finishedOperations < count) {
@@ -4257,6 +4316,7 @@ final class _ControlledBridge implements FlutterBridge {
     required BigInt cancellationId,
   }) async {
     openCalls += 1;
+    openRequests.add(request);
     return FlutterDocumentSummary(
       handle: FlutterDocumentHandle(registry: BigInt.one, id: cancellationId),
       format: format,
@@ -4870,7 +4930,7 @@ final class _SequentialBridge implements FlutterBridge {
       currentFormat = summary.format;
       return summary;
     }
-    throw StateError(result as String);
+    throw result;
   }
 
   @override
