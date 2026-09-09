@@ -14,6 +14,7 @@ typedef PageDecoder =
     });
 
 typedef NoteEditor = Future<String?> Function(String? initialValue);
+typedef NoteEditorCanceller = void Function();
 typedef ReaderFocusAdapter = void Function(ReaderFocusTarget target);
 typedef SelectionCopier = Future<void> Function(String text);
 typedef ReaderSelectionAnnouncer = Future<void> Function(String description);
@@ -50,6 +51,7 @@ final class ReaderLayout {
 
 final class ReaderModel {
   ReaderModel({
+    this.openPath,
     this.document,
     this.pageImage,
     FlutterSelectionSurface? selectionSurface,
@@ -80,6 +82,7 @@ final class ReaderModel {
        annotations = List.unmodifiable(annotations.map(_freezeAnnotation)),
        annotationOperations = Set.unmodifiable(annotationOperations);
 
+  final String? openPath;
   final FlutterDocumentSummary? document;
   final ui.Image? pageImage;
   final FlutterSelectionSurface? selectionSurface;
@@ -135,6 +138,7 @@ final class ReaderModel {
   }
 
   ReaderModel copyWith({
+    Object? openPath = _unchanged,
     Object? document = _unchanged,
     Object? pageImage = _unchanged,
     Object? selectionSurface = _unchanged,
@@ -160,6 +164,9 @@ final class ReaderModel {
     int? generation,
   }) {
     return ReaderModel(
+      openPath: identical(openPath, _unchanged)
+          ? this.openPath
+          : openPath as String?,
       document: identical(document, _unchanged)
           ? this.document
           : document as FlutterDocumentSummary?,
@@ -217,6 +224,8 @@ enum ReaderSelectionPhase { idle, selecting, selected, committing }
 enum ReaderContentState { loading, ready, failed }
 
 enum ReaderFocusTarget { surface, actions }
+
+enum _ReaderNoteTarget { selection, annotation }
 
 enum ReaderSelectionMovement {
   previousGrapheme,
@@ -583,6 +592,11 @@ final class _ReaderAnnotationOperationFinished extends ReaderMessage {
   const _ReaderAnnotationOperationFinished();
 }
 
+final class _ReaderNoteEditorFinished extends ReaderMessage {
+  const _ReaderNoteEditorFinished(this.revision);
+  final int revision;
+}
+
 final class _ReaderDisposeRequested extends ReaderMessage {
   const _ReaderDisposeRequested();
 }
@@ -592,12 +606,14 @@ final class ReaderController implements Listenable {
     required FlutterBridge bridge,
     required PageDecoder decoder,
     NoteEditor? noteEditor,
+    NoteEditorCanceller? noteEditorCanceller,
     ReaderFocusAdapter? focusAdapter,
     SelectionCopier? selectionCopier,
     ReaderSelectionAnnouncer? selectionAnnouncer,
   }) : _bridge = bridge,
        _decoder = decoder,
        _noteEditor = noteEditor ?? ((_) async => null),
+       _noteEditorCanceller = noteEditorCanceller ?? (() {}),
        _focusAdapter = focusAdapter ?? ((_) {}),
        _selectionCopier = selectionCopier ?? ((_) async {}),
        _selectionAnnouncer = selectionAnnouncer;
@@ -605,6 +621,7 @@ final class ReaderController implements Listenable {
   final FlutterBridge _bridge;
   final PageDecoder _decoder;
   final NoteEditor _noteEditor;
+  final NoteEditorCanceller _noteEditorCanceller;
   final ReaderFocusAdapter _focusAdapter;
   final SelectionCopier _selectionCopier;
   final ReaderSelectionAnnouncer? _selectionAnnouncer;
@@ -621,6 +638,10 @@ final class ReaderController implements Listenable {
   int _selectionRevision = 0;
   int _nextOperationId = 0;
   int _noteRevision = 0;
+  _ReaderNoteTarget? _activeNoteEditor;
+  int? _activeNoteEditorRevision;
+  String? _recoverySelectionNotice;
+  String? _recoveryAnnotationNotice;
   ReaderLayout _requestedLayout = const ReaderLayout();
   ReaderLayout? _failedLayout;
   String? _recoveryPath;
@@ -848,6 +869,11 @@ final class ReaderController implements Listenable {
         _activeBridgeOperations -= 1;
         _recoverIfIdle();
         _disposeBridgeIfIdle();
+      case _ReaderNoteEditorFinished():
+        if (message.revision == _activeNoteEditorRevision) {
+          _activeNoteEditor = null;
+          _activeNoteEditorRevision = null;
+        }
       case _ReaderAnnotationUpdateCompleted():
         _annotationUpdateCompleted(message);
       case _ReaderDisposeRequested():
@@ -860,6 +886,7 @@ final class ReaderController implements Listenable {
     if (path.isEmpty || _closing) return;
     if (_recovering) {
       _recoveryPath = path;
+      _emit(_model.copyWith(openPath: path));
       return;
     }
     if (_model.busy || _model.annotationOperations.isNotEmpty || _suspended) {
@@ -902,6 +929,7 @@ final class ReaderController implements Listenable {
     _activeBridgeOperations += 1;
     _emit(
       _model.copyWith(
+        openPath: path,
         document: null,
         pageImage: null,
         error: null,
@@ -1566,6 +1594,8 @@ final class ReaderController implements Listenable {
     final generation = _model.generation;
     final revision = ++_noteRevision;
     final selectionRevision = _selectionRevision;
+    _activeNoteEditor = _ReaderNoteTarget.selection;
+    _activeNoteEditorRevision = revision;
     unawaited(() async {
       try {
         final body = await _noteEditor(null);
@@ -1588,6 +1618,8 @@ final class ReaderController implements Listenable {
             error.toString(),
           ),
         );
+      } finally {
+        dispatch(_ReaderNoteEditorFinished(revision));
       }
     }());
   }
@@ -1874,6 +1906,8 @@ final class ReaderController implements Listenable {
     if (annotation == null) return;
     final generation = _model.generation;
     final revision = ++_noteRevision;
+    _activeNoteEditor = _ReaderNoteTarget.annotation;
+    _activeNoteEditorRevision = revision;
     unawaited(() async {
       try {
         final body = await _noteEditor(annotation.body);
@@ -1886,6 +1920,8 @@ final class ReaderController implements Listenable {
         dispatch(
           _ReaderAnnotationNoteFailed(generation, revision, error.toString()),
         );
+      } finally {
+        dispatch(_ReaderNoteEditorFinished(revision));
       }
     }());
   }
@@ -2064,7 +2100,17 @@ final class ReaderController implements Listenable {
       _activeCancellation = null;
     }
     if (_isCurrent(message.generation)) {
-      _emit(_model.copyWith(busy: false));
+      final selectionNotice = _recoverySelectionNotice;
+      final annotationNotice = _recoveryAnnotationNotice;
+      _recoverySelectionNotice = null;
+      _recoveryAnnotationNotice = null;
+      _emit(
+        _model.copyWith(
+          busy: false,
+          selectionActionError: selectionNotice ?? _model.selectionActionError,
+          annotationError: annotationNotice ?? _model.annotationError,
+        ),
+      );
       _startRequestedRelayoutIfReady();
     }
     _activeBridgeOperations -= 1;
@@ -2076,6 +2122,20 @@ final class ReaderController implements Listenable {
     if (_suspended || _closing) return;
     _suspended = true;
     if (_model.document == null && !_model.busy) return;
+    switch (_activeNoteEditor) {
+      case _ReaderNoteTarget.selection:
+        _recoverySelectionNotice =
+            'The note was not saved because the app was suspended. Try again.';
+        _noteEditorCanceller();
+      case _ReaderNoteTarget.annotation:
+        _recoveryAnnotationNotice =
+            'The note was not saved because the app was suspended. Try again.';
+        _noteEditorCanceller();
+      case null:
+        break;
+    }
+    _activeNoteEditor = null;
+    _activeNoteEditorRevision = null;
     _releaseForRecovery = true;
     _reopenForRecovery = true;
     final cancellation = _activeCancellation;
@@ -2231,6 +2291,11 @@ final class ReaderController implements Listenable {
   void _disposeRequested() {
     if (_closing) return;
     _closing = true;
+    if (_activeNoteEditor != null) {
+      _activeNoteEditor = null;
+      _activeNoteEditorRevision = null;
+      _noteEditorCanceller();
+    }
     final cancellation = _activeCancellation;
     if (cancellation != null) {
       _bridge.cancel(id: cancellation);

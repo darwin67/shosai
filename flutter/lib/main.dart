@@ -15,6 +15,7 @@ import 'package:shosai_flutter/src/rust/frb_generated.dart';
 export 'package:shosai_flutter/reader_controller.dart'
     show
         PageDecoder,
+        NoteEditorCanceller,
         ReaderController,
         ReaderAnnotationDeleted,
         ReaderAnnotationNavigated,
@@ -134,10 +135,8 @@ class _ReaderScreenState extends State<ReaderScreen>
       bridge: widget.bridge ?? widget.bridgeFactory?.call() ?? FlutterBridge(),
       decoder: (pixels, {required width, required height}) =>
           widget.decoder(pixels, width: width, height: height),
-      noteEditor: (initialValue) => showDialog<String>(
-        context: context,
-        builder: (context) => _NoteDialog(initialValue: initialValue),
-      ),
+      noteEditor: _editNote,
+      noteEditorCanceller: _cancelNoteEditor,
       focusAdapter: (target) => switch (target) {
         ReaderFocusTarget.surface => _readerFocus.requestFocus(),
         ReaderFocusTarget.actions => _actionFocus.requestFocus(),
@@ -166,7 +165,26 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
-  void _modelChanged() => setState(() {});
+  Future<String?> _editNote(String? initialValue) async {
+    return showDialog<String>(
+      context: context,
+      builder: (context) => _NoteDialog(initialValue: initialValue),
+    );
+  }
+
+  void _cancelNoteEditor() {
+    if (mounted) {
+      Navigator.of(context, rootNavigator: true).pop();
+    }
+  }
+
+  void _modelChanged() {
+    final openPath = _controller.model.openPath;
+    if (openPath != null && _openDocumentPath.value != openPath) {
+      _openDocumentPath.value = openPath;
+    }
+    setState(() {});
+  }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -202,7 +220,6 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _open() {
     final path = _path.value.text.trim();
-    if (path.isNotEmpty) _openDocumentPath.value = path;
     _controller.dispatch(ReaderOpenRequested(path));
   }
 

@@ -2508,6 +2508,68 @@ void main() {
     await bridge.disposed.future;
   });
 
+  test(
+    'suspension cancels a note editor and reports the unsaved draft',
+    () async {
+      final bridge = _ControlledBridge(
+        initialAnnotations: [_annotation('one')],
+        immediateLists: true,
+      );
+      final editor = Completer<String?>();
+      var cancellations = 0;
+      final controller = ReaderController(
+        bridge: bridge,
+        decoder: (pixels, {required width, required height}) => _testImage(),
+        noteEditor: (_) => editor.future,
+        noteEditorCanceller: () {
+          cancellations += 1;
+          editor.complete(null);
+        },
+      );
+      await _openControlled(controller, bridge, '/tmp/a.epub');
+
+      controller.dispatch(const ReaderAnnotationNoteRequested('one'));
+      controller.dispatch(const ReaderSuspended());
+      expect(cancellations, 1);
+      controller.dispatch(const ReaderResumed());
+      await bridge.waitForOp(2);
+
+      expect(
+        controller.model.annotationError,
+        'The note was not saved because the app was suspended. Try again.',
+      );
+      expect(bridge.updateCalls, 0);
+
+      controller.dispose();
+      await bridge.disposed.future;
+    },
+  );
+
+  test(
+    'rejected replacement does not change the restorable open path',
+    () async {
+      final bridge = _ControlledBridge(
+        initialAnnotations: [_annotation('one')],
+        immediateLists: true,
+      );
+      final controller = _epubController(bridge);
+      await _openControlled(controller, bridge, '/tmp/a.epub');
+
+      controller.dispatch(
+        const ReaderAnnotationUpdated('one', FlutterHighlightColor.green, null),
+      );
+      controller.dispatch(const ReaderOpenRequested('/tmp/b.epub'));
+
+      expect(controller.model.openPath, '/tmp/a.epub');
+      expect(bridge.openCalls, 1);
+
+      bridge.updateCompleter!.complete(true);
+      await _waitUntil(() => controller.model.annotationOperations.isEmpty);
+      controller.dispose();
+      await bridge.disposed.future;
+    },
+  );
+
   for (final unavailable in [
     (FlutterBridgeErrorKind.notFound, 'document was not found'),
     (FlutterBridgeErrorKind.inaccessible, 'document is inaccessible'),
@@ -4145,6 +4207,58 @@ void main() {
 
     expect(bridge.storedAnnotations.single.body, 'Remember this');
     expect(bridge.storedAnnotations.single.color, FlutterHighlightColor.yellow);
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
+  testWidgets('suspension dismisses a note draft with actionable feedback', (
+    tester,
+  ) async {
+    final bridge = _ControlledBridge(format: FlutterBookFormat.epub);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    final surface = find.byKey(const ValueKey('reader-selection-surface'));
+    final rect = tester.getRect(surface);
+    final side = rect.shortestSide;
+    final topLeft = rect.center - Offset(side / 2, side / 2);
+    final gesture = await tester.createGesture(
+      kind: ui.PointerDeviceKind.mouse,
+    );
+    await gesture.down(topLeft + Offset(side * .2, side * .2));
+    await gesture.moveBy(Offset(side * .5, side * .5));
+    await gesture.up();
+    await tester.pump();
+    await tester.tap(find.text('Add note'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'Unsaved draft');
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    expect(bridge.releasedDocuments, hasLength(1));
+    expect(bridge.createCalls, 0);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+    expect(find.text('Save'), findsNothing);
+    expect(
+      find.text(
+        'Selection action failed: The note was not saved because the app was suspended. Try again.',
+      ),
+      findsOneWidget,
+    );
+    expect(bridge.createCalls, 0);
+
     await tester.pumpWidget(const SizedBox());
     await bridge.disposed.future;
   });
