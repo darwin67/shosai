@@ -1,8 +1,11 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart'
     show ExternalLibrary;
@@ -13,6 +16,7 @@ import 'package:shosai_flutter/src/rust/frb_generated.dart';
 export 'package:shosai_flutter/reader_controller.dart'
     show
         PageDecoder,
+        NoteEditorCanceller,
         ReaderController,
         ReaderAnnotationDeleted,
         ReaderAnnotationNavigated,
@@ -21,10 +25,13 @@ export 'package:shosai_flutter/reader_controller.dart'
         ReaderFocusTarget,
         ReaderLayout,
         ReaderLayoutChanged,
+        ReaderMemoryPressureReceived,
         ReaderMessage,
         ReaderModel,
         ReaderOpenRequested,
+        ReaderResumed,
         ReaderSelection,
+        ReaderSelectionAnnouncer,
         ReaderSelectionActionsRequested,
         ReaderSelectionCancelled,
         ReaderSelectionCommitted,
@@ -42,6 +49,7 @@ export 'package:shosai_flutter/reader_controller.dart'
         ReaderSelectionPointerStarted,
         ReaderContentState,
         ReaderSelectionStarted,
+        ReaderSuspended,
         premultiplyRgba;
 
 Future<void> main() async {
@@ -86,155 +94,390 @@ class ShosaiApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
+      restorationScopeId: 'shosai',
       home: const ReaderScreen(),
     );
   }
 }
 
 class ReaderScreen extends StatefulWidget {
-  const ReaderScreen({super.key, this.bridge, this.decoder = _decodeRgba});
+  const ReaderScreen({
+    super.key,
+    this.bridge,
+    this.bridgeFactory,
+    this.decoder = _decodeRgba,
+  }) : assert(bridge == null || bridgeFactory == null);
 
   final FlutterBridge? bridge;
+  final FlutterBridge Function()? bridgeFactory;
   final PageDecoder decoder;
 
   @override
   State<ReaderScreen> createState() => _ReaderScreenState();
 }
 
-class _ReaderScreenState extends State<ReaderScreen> {
-  final TextEditingController _path = TextEditingController();
+class _ReaderScreenState extends State<ReaderScreen>
+    with WidgetsBindingObserver, RestorationMixin {
+  final RestorableTextEditingController _path =
+      RestorableTextEditingController();
+  final RestorableStringN _openDocumentPath = RestorableStringN(null);
+  final GlobalKey _pathFieldKey = GlobalKey(debugLabel: 'document path');
+  final GlobalKey _contentKey = GlobalKey(debugLabel: 'reader content');
+  final FocusNode _openFocus = FocusNode(debugLabel: 'open document');
   final FocusNode _readerFocus = FocusNode(debugLabel: 'reader surface');
   final FocusNode _actionFocus = FocusNode(debugLabel: 'selection actions');
+  DialogRoute<String>? _noteDialogRoute;
   late final ReaderController _controller;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _controller = ReaderController(
-      bridge: widget.bridge ?? FlutterBridge(),
+      bridge: widget.bridge ?? widget.bridgeFactory?.call() ?? FlutterBridge(),
       decoder: (pixels, {required width, required height}) =>
           widget.decoder(pixels, width: width, height: height),
-      noteEditor: (initialValue) => showDialog<String>(
-        context: context,
-        builder: (context) => _NoteDialog(initialValue: initialValue),
-      ),
+      noteEditor: _editNote,
+      noteEditorCanceller: _cancelNoteEditor,
       focusAdapter: (target) => switch (target) {
         ReaderFocusTarget.surface => _readerFocus.requestFocus(),
         ReaderFocusTarget.actions => _actionFocus.requestFocus(),
       },
       selectionCopier: (text) => Clipboard.setData(ClipboardData(text: text)),
+      selectionAnnouncer:
+          usesExplicitSelectionAnnouncements(defaultTargetPlatform)
+          ? (description) => SemanticsService.sendAnnouncement(
+              View.of(context),
+              description,
+              Directionality.of(context),
+            )
+          : null,
     )..addListener(_modelChanged);
   }
 
-  void _modelChanged() => setState(() {});
+  @override
+  String get restorationId => 'reader';
+
+  @override
+  void restoreState(RestorationBucket? oldBucket, bool initialRestore) {
+    registerForRestoration(_path, 'document_path');
+    registerForRestoration(_openDocumentPath, 'open_document_path');
+    if (_openDocumentPath.value case final path?) {
+      _controller.dispatch(ReaderOpenRequested(path));
+    }
+  }
+
+  Future<String?> _editNote(String? initialValue) async {
+    final navigator = Navigator.of(context, rootNavigator: true);
+    final route = DialogRoute<String>(
+      context: context,
+      builder: (context) => _NoteDialog(initialValue: initialValue),
+    );
+    _noteDialogRoute = route;
+    try {
+      return await navigator.push(route);
+    } finally {
+      if (identical(_noteDialogRoute, route)) _noteDialogRoute = null;
+    }
+  }
+
+  void _cancelNoteEditor() {
+    final route = _noteDialogRoute;
+    _noteDialogRoute = null;
+    if (route == null) return;
+    scheduleMicrotask(() {
+      final navigator = route.navigator;
+      if (route.isActive && navigator != null) navigator.removeRoute(route);
+    });
+  }
+
+  void _modelChanged() {
+    final openPath = _controller.model.openPath;
+    if (openPath != null && _openDocumentPath.value != openPath) {
+      _openDocumentPath.value = openPath;
+    }
+    setState(() {});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _controller.dispatch(const ReaderResumed());
+      case AppLifecycleState.hidden ||
+          AppLifecycleState.paused ||
+          AppLifecycleState.detached:
+        _controller.dispatch(const ReaderSuspended());
+      case AppLifecycleState.inactive:
+        break;
+    }
+  }
+
+  @override
+  void didHaveMemoryPressure() {
+    _controller.dispatch(const ReaderMemoryPressureReceived());
+  }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _controller.removeListener(_modelChanged);
     _controller.dispose();
     _path.dispose();
+    _openDocumentPath.dispose();
+    _openFocus.dispose();
     _readerFocus.dispose();
     _actionFocus.dispose();
     super.dispose();
   }
 
-  void _open() => _controller.dispatch(ReaderOpenRequested(_path.text));
+  void _open() {
+    final path = _path.value.text.trim();
+    _controller.dispatch(ReaderOpenRequested(path));
+  }
 
   @override
   Widget build(BuildContext context) {
     final model = _controller.model;
-    final document = model.document;
-    return _ReaderLayoutReporter(
-      model: model,
-      dispatch: _controller.dispatch,
-      child: Scaffold(
-        appBar: AppBar(title: const Text('Shōsai Flutter feasibility slice')),
-        body: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Semantics(
-                  textField: true,
-                  label: 'Document path',
-                  child: TextField(
-                    controller: _path,
-                    enabled: !model.busy,
-                    onSubmitted: (_) => _open(),
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      hintText: '/path/to/book.pdf',
-                      labelText: 'PDF, EPUB, or CBZ path',
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: FilledButton.icon(
-                    onPressed: model.busy ? null : _open,
-                    icon: const Icon(Icons.menu_book),
-                    label: Text(model.busy ? 'Opening…' : 'Open document'),
-                  ),
-                ),
-                if (model.error != null) ...[
-                  const SizedBox(height: 12),
-                  Semantics(
-                    liveRegion: true,
-                    child: Text(
-                      model.error!,
-                      style: TextStyle(
-                        color: Theme.of(context).colorScheme.error,
-                      ),
-                    ),
-                  ),
-                ],
-                if (model.selectionError != null && model.document != null)
-                  Semantics(
-                    liveRegion: true,
-                    child: Text(
-                      'Selection unavailable: ${model.selectionError}',
-                    ),
-                  ),
-                if (model.selectionActionError != null &&
-                    model.document != null)
-                  Semantics(
-                    liveRegion: true,
-                    child: Text(
-                      'Selection action failed: ${model.selectionActionError}',
-                    ),
-                  ),
-                if (model.annotationError != null && model.document != null)
-                  Semantics(
-                    liveRegion: true,
-                    child: Text(
-                      model.annotationsReady
-                          ? 'Highlight action failed: ${model.annotationError}'
-                          : 'Highlights unavailable: ${model.annotationError}',
-                    ),
-                  ),
-                if (model.relayoutBusy) const LinearProgressIndicator(),
-                const SizedBox(height: 20),
-                Expanded(
-                  child: document == null
-                      ? const WelcomePanel()
-                      : _DocumentView(
-                          document: document,
-                          image: model.pageImage,
-                          model: model,
-                          dispatch: _controller.dispatch,
-                          readerFocus: _readerFocus,
-                          actionFocus: _actionFocus,
-                        ),
-                ),
-              ],
-            ),
-          ),
+    final compact = MediaQuery.sizeOf(context).width < 600;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(compact ? 'Shōsai' : 'Shōsai Flutter feasibility slice'),
+      ),
+      body: SafeArea(
+        child: _ResponsiveReaderBody(
+          model: model,
+          path: _path.value,
+          pathFieldKey: _pathFieldKey,
+          contentKey: _contentKey,
+          openFocus: _openFocus,
+          open: _open,
+          dispatch: _controller.dispatch,
+          readerFocus: _readerFocus,
+          actionFocus: _actionFocus,
         ),
       ),
     );
   }
+}
+
+enum _ReaderComposition { compact, medium, expanded }
+
+class _ResponsiveReaderBody extends StatelessWidget {
+  const _ResponsiveReaderBody({
+    required this.model,
+    required this.path,
+    required this.pathFieldKey,
+    required this.contentKey,
+    required this.openFocus,
+    required this.open,
+    required this.dispatch,
+    required this.readerFocus,
+    required this.actionFocus,
+  });
+
+  final ReaderModel model;
+  final TextEditingController path;
+  final GlobalKey pathFieldKey;
+  final GlobalKey contentKey;
+  final FocusNode openFocus;
+  final VoidCallback open;
+  final void Function(ReaderMessage) dispatch;
+  final FocusNode readerFocus;
+  final FocusNode actionFocus;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final composition = constraints.maxWidth >= 1024
+          ? _ReaderComposition.expanded
+          : constraints.maxWidth >= 600
+          ? _ReaderComposition.medium
+          : _ReaderComposition.compact;
+      final controls = _ReaderControls(
+        model: model,
+        path: path,
+        pathFieldKey: pathFieldKey,
+        openFocus: openFocus,
+        open: open,
+        horizontal: composition == _ReaderComposition.medium,
+      );
+      final content = _ReaderContentPane(
+        key: contentKey,
+        model: model,
+        dispatch: dispatch,
+        readerFocus: readerFocus,
+        actionFocus: actionFocus,
+      );
+      final key = ValueKey('reader-composition-${composition.name}');
+      if (composition == _ReaderComposition.expanded) {
+        return Padding(
+          key: key,
+          padding: const EdgeInsets.all(24),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                width: 320,
+                child: SingleChildScrollView(child: controls),
+              ),
+              const SizedBox(width: 24),
+              Expanded(child: content),
+            ],
+          ),
+        );
+      }
+      return Padding(
+        key: key,
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            controls,
+            const SizedBox(height: 20),
+            Expanded(child: content),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+class _ReaderControls extends StatelessWidget {
+  const _ReaderControls({
+    required this.model,
+    required this.path,
+    required this.pathFieldKey,
+    required this.openFocus,
+    required this.open,
+    required this.horizontal,
+  });
+
+  final ReaderModel model;
+  final TextEditingController path;
+  final GlobalKey pathFieldKey;
+  final FocusNode openFocus;
+  final VoidCallback open;
+  final bool horizontal;
+
+  @override
+  Widget build(BuildContext context) {
+    final field = Semantics(
+      textField: true,
+      label: 'Document path',
+      child: TextField(
+        key: pathFieldKey,
+        controller: path,
+        enabled: !model.busy,
+        onSubmitted: (_) => open(),
+        decoration: const InputDecoration(
+          border: OutlineInputBorder(),
+          hintText: '/path/to/book.pdf',
+          labelText: 'PDF, EPUB, or CBZ path',
+        ),
+      ),
+    );
+    final button = FilledButton.icon(
+      focusNode: openFocus,
+      onPressed: model.busy ? null : open,
+      icon: const Icon(Icons.menu_book),
+      label: Text(model.busy ? 'Opening…' : 'Open document'),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (horizontal)
+          Row(
+            children: [
+              Expanded(child: field),
+              const SizedBox(width: 12),
+              button,
+            ],
+          )
+        else ...[
+          field,
+          const SizedBox(height: 12),
+          Align(alignment: Alignment.centerLeft, child: button),
+        ],
+        if (model.error != null) ...[
+          const SizedBox(height: 12),
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              model.error!,
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+          ),
+        ],
+        if (model.selectionError != null && model.document != null)
+          Semantics(
+            liveRegion: true,
+            child: Text('Selection unavailable: ${model.selectionError}'),
+          ),
+        if (model.selectionActionError != null && model.document != null)
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              'Selection action failed: ${model.selectionActionError}',
+            ),
+          ),
+        if (model.annotationError != null && model.document != null)
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              model.annotationsReady
+                  ? 'Highlight action failed: ${model.annotationError}'
+                  : 'Highlights unavailable: ${model.annotationError}',
+            ),
+          ),
+        if (model.relayoutBusy) const LinearProgressIndicator(),
+      ],
+    );
+  }
+}
+
+class _ReaderContentPane extends StatelessWidget {
+  const _ReaderContentPane({
+    super.key,
+    required this.model,
+    required this.dispatch,
+    required this.readerFocus,
+    required this.actionFocus,
+  });
+
+  final ReaderModel model;
+  final void Function(ReaderMessage) dispatch;
+  final FocusNode readerFocus;
+  final FocusNode actionFocus;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    children: [
+      Expanded(
+        child: _ReaderLayoutReporter(
+          model: model,
+          dispatch: dispatch,
+          child: model.document == null
+              ? const WelcomePanel()
+              : _DocumentView(
+                  document: model.document!,
+                  image: model.pageImage,
+                  model: model,
+                  dispatch: dispatch,
+                  readerFocus: readerFocus,
+                  actionFocus: actionFocus,
+                ),
+        ),
+      ),
+      Semantics(
+        key: const ValueKey('reader-selection-status'),
+        container: true,
+        liveRegion: true,
+        label: model.selectionDescription,
+        child: const SizedBox(width: double.infinity, height: 1),
+      ),
+    ],
+  );
 }
 
 class _ReaderLayoutReporter extends StatefulWidget {
@@ -261,7 +504,7 @@ class _ReaderLayoutReporterState extends State<_ReaderLayoutReporter> {
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
       final availableWidth = constraints.maxWidth.isFinite
-          ? math.max(1.0, constraints.maxWidth - 48).roundToDouble()
+          ? math.max(1.0, constraints.maxWidth).roundToDouble()
           : widget.model.layout.width;
       final layout = ReaderLayout(
         scale: MediaQuery.devicePixelRatioOf(context),
@@ -339,22 +582,25 @@ class _DocumentView extends StatelessWidget {
         ),
       );
     }
-    return Semantics(
-      label: document.format == FlutterBookFormat.epub
-          ? '$title, EPUB chapter 1 of ${document.logicalUnitCount}. Selectable text.'
-          : '$title, page 1 of ${document.logicalUnitCount}. Selectable text.',
-      child: CallbackShortcuts(
-        bindings: {
-          const SingleActivator(LogicalKeyboardKey.escape): () =>
-              dispatch(const ReaderSelectionCancelled()),
-          const SingleActivator(LogicalKeyboardKey.keyC, control: true): () =>
-              dispatch(const ReaderSelectionCopyRequested()),
-          const SingleActivator(LogicalKeyboardKey.keyC, meta: true): () =>
-              dispatch(const ReaderSelectionCopyRequested()),
-        },
-        child: Column(
-          children: [
-            Expanded(
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.escape): () =>
+            dispatch(const ReaderSelectionCancelled()),
+        const SingleActivator(LogicalKeyboardKey.keyC, control: true): () =>
+            dispatch(const ReaderSelectionCopyRequested()),
+        const SingleActivator(LogicalKeyboardKey.keyC, meta: true): () =>
+            dispatch(const ReaderSelectionCopyRequested()),
+      },
+      child: Column(
+        children: [
+          Expanded(
+            child: Semantics(
+              key: const ValueKey('reader-document-semantics'),
+              container: true,
+              explicitChildNodes: true,
+              label: document.format == FlutterBookFormat.epub
+                  ? '$title, EPUB chapter 1 of ${document.logicalUnitCount}. Selectable text.'
+                  : '$title, page 1 of ${document.logicalUnitCount}. Selectable text.',
               child: TapRegion(
                 onTapOutside: (event) => dispatch(
                   ReaderSelectionPointerPressedOutside(event.pointer),
@@ -491,11 +737,34 @@ class _DocumentView extends StatelessWidget {
                             key: const ValueKey('reader-selection-focus'),
                             focusNode: readerFocus,
                             autofocus: true,
-                            child: _SelectableSurface(
-                              surface: surface,
-                              image: page,
-                              model: model,
-                              dispatch: dispatch,
+                            child: AnimatedBuilder(
+                              animation: readerFocus,
+                              builder: (context, child) => Semantics(
+                                key: const ValueKey('reader-content-semantics'),
+                                readOnly: true,
+                                label: 'Document text: ${surface.text}',
+                                child: DecoratedBox(
+                                  key: const ValueKey('reader-focus-indicator'),
+                                  position: DecorationPosition.foreground,
+                                  decoration: BoxDecoration(
+                                    border: readerFocus.hasFocus
+                                        ? Border.all(
+                                            color: Theme.of(
+                                              context,
+                                            ).colorScheme.primary,
+                                            width: 3,
+                                          )
+                                        : null,
+                                  ),
+                                  child: child,
+                                ),
+                              ),
+                              child: _SelectableSurface(
+                                surface: surface,
+                                image: page,
+                                model: model,
+                                dispatch: dispatch,
+                              ),
                             ),
                           ),
                         ),
@@ -522,74 +791,74 @@ class _DocumentView extends StatelessWidget {
                 ),
               ),
             ),
-            if (model.annotations.isNotEmpty)
-              SizedBox(
-                height: 64,
-                child: ListView(
-                  scrollDirection: Axis.horizontal,
-                  children: model.annotations
-                      .map(
-                        (annotation) => Card(
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              TextButton(
-                                onPressed: () => dispatch(
-                                  ReaderAnnotationNavigated(annotation.id),
-                                ),
-                                child: Text(
-                                  'Highlight ${annotation.unit.toInt() + 1}'
-                                  '${_annotationResolutionSuffix(annotation.resolution)}',
-                                ),
+          ),
+          if (model.annotations.isNotEmpty)
+            SizedBox(
+              height: 64,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                children: model.annotations
+                    .map(
+                      (annotation) => Card(
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            TextButton(
+                              onPressed: () => dispatch(
+                                ReaderAnnotationNavigated(annotation.id),
                               ),
-                              IconButton(
-                                tooltip: 'Change color',
-                                onPressed:
-                                    model.annotationOperations.isNotEmpty ||
-                                        model.relayoutBusy
-                                    ? null
-                                    : () => dispatch(
-                                        ReaderAnnotationUpdated(
-                                          annotation.id,
-                                          _nextColor(annotation.color),
-                                          annotation.body,
-                                        ),
+                              child: Text(
+                                'Highlight ${annotation.unit.toInt() + 1}'
+                                '${_annotationResolutionSuffix(annotation.resolution)}',
+                              ),
+                            ),
+                            IconButton(
+                              tooltip: 'Change color',
+                              onPressed:
+                                  model.annotationOperations.isNotEmpty ||
+                                      model.relayoutBusy
+                                  ? null
+                                  : () => dispatch(
+                                      ReaderAnnotationUpdated(
+                                        annotation.id,
+                                        _nextColor(annotation.color),
+                                        annotation.body,
                                       ),
-                                icon: const Icon(Icons.palette_outlined),
-                              ),
-                              IconButton(
-                                tooltip: 'Edit note',
-                                onPressed:
-                                    model.annotationOperations.isNotEmpty ||
-                                        model.relayoutBusy
-                                    ? null
-                                    : () => dispatch(
-                                        ReaderAnnotationNoteRequested(
-                                          annotation.id,
-                                        ),
+                                    ),
+                              icon: const Icon(Icons.palette_outlined),
+                            ),
+                            IconButton(
+                              tooltip: 'Edit note',
+                              onPressed:
+                                  model.annotationOperations.isNotEmpty ||
+                                      model.relayoutBusy
+                                  ? null
+                                  : () => dispatch(
+                                      ReaderAnnotationNoteRequested(
+                                        annotation.id,
                                       ),
-                                icon: const Icon(Icons.note_alt_outlined),
-                              ),
-                              IconButton(
-                                tooltip: 'Delete highlight',
-                                onPressed:
-                                    model.annotationOperations.isNotEmpty ||
-                                        model.relayoutBusy
-                                    ? null
-                                    : () => dispatch(
-                                        ReaderAnnotationDeleted(annotation.id),
-                                      ),
-                                icon: const Icon(Icons.delete_outline),
-                              ),
-                            ],
-                          ),
+                                    ),
+                              icon: const Icon(Icons.note_alt_outlined),
+                            ),
+                            IconButton(
+                              tooltip: 'Delete highlight',
+                              onPressed:
+                                  model.annotationOperations.isNotEmpty ||
+                                      model.relayoutBusy
+                                  ? null
+                                  : () => dispatch(
+                                      ReaderAnnotationDeleted(annotation.id),
+                                    ),
+                              icon: const Icon(Icons.delete_outline),
+                            ),
+                          ],
                         ),
-                      )
-                      .toList(),
-                ),
+                      ),
+                    )
+                    .toList(),
               ),
-          ],
-        ),
+            ),
+        ],
       ),
     );
   }
@@ -1034,7 +1303,11 @@ class PagePainter extends CustomPainter {
       final rect = endpoint.rect;
       final area = Rect.fromLTRB(rect.left, rect.top, rect.right, rect.bottom);
       canvas.drawRect(area, paint);
-      if (saved) canvas.drawLine(area.bottomLeft, area.bottomRight, border);
+      if (saved) {
+        canvas.drawLine(area.bottomLeft, area.bottomRight, border);
+      } else {
+        canvas.drawRect(area, border);
+      }
     }
   }
 
@@ -1082,6 +1355,11 @@ Color _highlightColor(FlutterHighlightColor? color) => switch (color) {
   FlutterHighlightColor.purple => const Color(0x668876c5),
   FlutterHighlightColor.yellow || null => const Color(0x66e2bd54),
 };
+
+bool usesExplicitSelectionAnnouncements(TargetPlatform platform) =>
+    platform == TargetPlatform.linux ||
+    platform == TargetPlatform.macOS ||
+    platform == TargetPlatform.windows;
 
 Future<ui.Image> _decodeRgba(
   Uint8List pixels, {

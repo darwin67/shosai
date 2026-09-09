@@ -14,8 +14,10 @@ typedef PageDecoder =
     });
 
 typedef NoteEditor = Future<String?> Function(String? initialValue);
+typedef NoteEditorCanceller = void Function();
 typedef ReaderFocusAdapter = void Function(ReaderFocusTarget target);
 typedef SelectionCopier = Future<void> Function(String text);
+typedef ReaderSelectionAnnouncer = Future<void> Function(String description);
 
 const _unchanged = Object();
 final _frozenSurfaces = Expando<bool>();
@@ -49,6 +51,7 @@ final class ReaderLayout {
 
 final class ReaderModel {
   ReaderModel({
+    this.openPath,
     this.document,
     this.pageImage,
     FlutterSelectionSurface? selectionSurface,
@@ -79,6 +82,7 @@ final class ReaderModel {
        annotations = List.unmodifiable(annotations.map(_freezeAnnotation)),
        annotationOperations = Set.unmodifiable(annotationOperations);
 
+  final String? openPath;
   final FlutterDocumentSummary? document;
   final ui.Image? pageImage;
   final FlutterSelectionSurface? selectionSurface;
@@ -121,7 +125,20 @@ final class ReaderModel {
     return String.fromCharCodes(scalars.sublist(start, end));
   }
 
+  String get selectionDescription {
+    final selected = selectedText;
+    return switch (selectionPhase) {
+      ReaderSelectionPhase.idle => 'No text selected',
+      ReaderSelectionPhase.selecting =>
+        selected == null ? 'Selecting text' : 'Selecting text: $selected',
+      ReaderSelectionPhase.selected =>
+        selected == null ? 'Text selection ready' : 'Selected text: $selected',
+      ReaderSelectionPhase.committing => 'Saving selected text',
+    };
+  }
+
   ReaderModel copyWith({
+    Object? openPath = _unchanged,
     Object? document = _unchanged,
     Object? pageImage = _unchanged,
     Object? selectionSurface = _unchanged,
@@ -147,6 +164,9 @@ final class ReaderModel {
     int? generation,
   }) {
     return ReaderModel(
+      openPath: identical(openPath, _unchanged)
+          ? this.openPath
+          : openPath as String?,
       document: identical(document, _unchanged)
           ? this.document
           : document as FlutterDocumentSummary?,
@@ -205,6 +225,8 @@ enum ReaderContentState { loading, ready, failed }
 
 enum ReaderFocusTarget { surface, actions }
 
+enum _ReaderNoteTarget { selection, annotation }
+
 enum ReaderSelectionMovement {
   previousGrapheme,
   nextGrapheme,
@@ -240,6 +262,18 @@ final class ReaderLayoutChanged extends ReaderMessage {
   const ReaderLayoutChanged(this.layout);
 
   final ReaderLayout layout;
+}
+
+final class ReaderSuspended extends ReaderMessage {
+  const ReaderSuspended();
+}
+
+final class ReaderResumed extends ReaderMessage {
+  const ReaderResumed();
+}
+
+final class ReaderMemoryPressureReceived extends ReaderMessage {
+  const ReaderMemoryPressureReceived();
 }
 
 final class ReaderSelectionStarted extends ReaderMessage {
@@ -550,12 +584,21 @@ final class _ReaderOperationFinished extends ReaderMessage {
 }
 
 final class _ReaderAnnotationCreateFinished extends ReaderMessage {
-  const _ReaderAnnotationCreateFinished(this.cancellation);
+  const _ReaderAnnotationCreateFinished(
+    this.cancellation, {
+    required this.succeeded,
+  });
   final BigInt cancellation;
+  final bool succeeded;
 }
 
 final class _ReaderAnnotationOperationFinished extends ReaderMessage {
   const _ReaderAnnotationOperationFinished();
+}
+
+final class _ReaderNoteEditorFinished extends ReaderMessage {
+  const _ReaderNoteEditorFinished(this.revision);
+  final int revision;
 }
 
 final class _ReaderDisposeRequested extends ReaderMessage {
@@ -567,24 +610,34 @@ final class ReaderController implements Listenable {
     required FlutterBridge bridge,
     required PageDecoder decoder,
     NoteEditor? noteEditor,
+    NoteEditorCanceller? noteEditorCanceller,
     ReaderFocusAdapter? focusAdapter,
     SelectionCopier? selectionCopier,
+    ReaderSelectionAnnouncer? selectionAnnouncer,
   }) : _bridge = bridge,
        _decoder = decoder,
        _noteEditor = noteEditor ?? ((_) async => null),
+       _noteEditorCanceller = noteEditorCanceller ?? (() {}),
        _focusAdapter = focusAdapter ?? ((_) {}),
-       _selectionCopier = selectionCopier ?? ((_) async {});
+       _selectionCopier = selectionCopier ?? ((_) async {}),
+       _selectionAnnouncer = selectionAnnouncer;
 
   final FlutterBridge _bridge;
   final PageDecoder _decoder;
   final NoteEditor _noteEditor;
+  final NoteEditorCanceller _noteEditorCanceller;
   final ReaderFocusAdapter _focusAdapter;
   final SelectionCopier _selectionCopier;
+  final ReaderSelectionAnnouncer? _selectionAnnouncer;
 
   ReaderModel _model = ReaderModel();
   BigInt? _activeCancellation;
   final Set<BigInt> _relayoutCancellations = {};
   final Set<BigInt> _annotationCancellations = {};
+  final Set<BigInt> _noteCreateCancellations = {};
+  final Set<BigInt> _interruptedNoteCreates = {};
+  final Set<String> _noteUpdateOperations = {};
+  final Set<String> _interruptedNoteUpdates = {};
   final Map<BigInt, int> _selectionCancellations = {};
   final Set<int> _cancelledSelectionCreates = {};
   int _activeBridgeOperations = 0;
@@ -593,13 +646,23 @@ final class ReaderController implements Listenable {
   int _selectionRevision = 0;
   int _nextOperationId = 0;
   int _noteRevision = 0;
+  _ReaderNoteTarget? _activeNoteEditor;
+  int? _activeNoteEditorRevision;
+  String? _recoverySelectionNotice;
+  String? _recoveryAnnotationNotice;
   ReaderLayout _requestedLayout = const ReaderLayout();
   ReaderLayout? _failedLayout;
+  String? _recoveryPath;
+  bool _suspended = false;
+  bool _releaseForRecovery = false;
+  bool _reopenForRecovery = false;
   bool _closing = false;
   bool _listenersDisposed = false;
   final Set<VoidCallback> _listeners = {};
 
   ReaderModel get model => _model;
+
+  bool get _recovering => _releaseForRecovery || _reopenForRecovery;
 
   @override
   void addListener(VoidCallback listener) {
@@ -612,11 +675,41 @@ final class ReaderController implements Listenable {
   }
 
   void dispatch(ReaderMessage message) {
+    if (_recovering &&
+        switch (message) {
+          ReaderSelectionStarted() ||
+          ReaderSelectionExtended() ||
+          ReaderSelectionPointerStarted() ||
+          ReaderSelectionPointerPressedOutside() ||
+          ReaderSelectionPointerMoved() ||
+          ReaderSelectionPointerEnded() ||
+          ReaderSelectionPointerCancelled() ||
+          ReaderSelectionKeyboardExtended() ||
+          ReaderSelectionEnded() ||
+          ReaderSelectionActionsRequested() ||
+          ReaderSelectionCommitted() ||
+          ReaderSelectionNoteRequested() ||
+          ReaderSelectionCopyRequested() ||
+          ReaderSelectionCancelled() ||
+          ReaderAnnotationUpdated() ||
+          ReaderAnnotationNoteRequested() ||
+          ReaderAnnotationDeleted() ||
+          ReaderAnnotationNavigated() => true,
+          _ => false,
+        }) {
+      return;
+    }
     switch (message) {
       case ReaderOpenRequested():
         _openRequested(message);
       case ReaderLayoutChanged():
         _layoutChanged(message.layout);
+      case ReaderSuspended():
+        _suspendRequested();
+      case ReaderResumed():
+        _resumeRequested();
+      case ReaderMemoryPressureReceived():
+        _memoryPressureReceived();
       case ReaderSelectionStarted():
         _selectionStarted(message.offset);
       case ReaderSelectionExtended():
@@ -755,6 +848,7 @@ final class ReaderController implements Listenable {
         _relayoutCancellations.remove(message.cancellation);
         _bridge.releaseCancellation(id: message.cancellation);
         _activeBridgeOperations -= 1;
+        _recoverIfIdle();
         _disposeBridgeIfIdle();
       case _ReaderAnnotationListFailed():
         if (_isCurrent(message.generation) &&
@@ -768,6 +862,14 @@ final class ReaderController implements Listenable {
       case _ReaderOperationFinished():
         _operationFinished(message);
       case _ReaderAnnotationCreateFinished():
+        final interruptedNote = _interruptedNoteCreates.remove(
+          message.cancellation,
+        );
+        _noteCreateCancellations.remove(message.cancellation);
+        if (interruptedNote && !message.succeeded) {
+          _recoverySelectionNotice =
+              'The note could not be saved while the app was suspended. Try again.';
+        }
         final selectionRevision = _selectionCancellations[message.cancellation];
         _annotationCancellations.remove(message.cancellation);
         _selectionCancellations.remove(message.cancellation);
@@ -777,11 +879,22 @@ final class ReaderController implements Listenable {
         }
         _bridge.releaseCancellation(id: message.cancellation);
         _activeBridgeOperations -= 1;
+        _recoverIfIdle();
         _disposeBridgeIfIdle();
       case _ReaderAnnotationOperationFinished():
         _activeBridgeOperations -= 1;
+        _recoverIfIdle();
         _disposeBridgeIfIdle();
+      case _ReaderNoteEditorFinished():
+        if (message.revision == _activeNoteEditorRevision) {
+          _activeNoteEditor = null;
+          _activeNoteEditorRevision = null;
+        }
       case _ReaderAnnotationUpdateCompleted():
+        _recordNoteUpdateOutcome(
+          message.operationId,
+          succeeded: message.changed,
+        );
         _annotationUpdateCompleted(message);
       case _ReaderDisposeRequested():
         _disposeRequested();
@@ -790,13 +903,17 @@ final class ReaderController implements Listenable {
 
   void _openRequested(ReaderOpenRequested message) {
     final path = message.path.trim();
-    if (path.isEmpty ||
-        _model.busy ||
-        _model.annotationOperations.isNotEmpty ||
-        _closing) {
+    if (path.isEmpty || _closing) return;
+    if (_recovering) {
+      _recoveryPath = path;
+      _emit(_model.copyWith(openPath: path));
+      return;
+    }
+    if (_model.busy || _model.annotationOperations.isNotEmpty || _suspended) {
       return;
     }
 
+    _recoveryPath = path;
     final generation = _model.generation + 1;
     for (final cancellation in _relayoutCancellations) {
       _bridge.cancel(id: cancellation);
@@ -805,14 +922,15 @@ final class ReaderController implements Listenable {
     final openLayout = _requestedLayout;
     _failedLayout = null;
     _annotationRevision += 1;
-    _releaseModelResources();
+    _releaseModelResources(publish: true);
     late final BigInt cancellation;
     try {
       cancellation = _bridge.createCancellation();
     } on FlutterBridgeError catch (error) {
       _emit(
         _model.copyWith(
-          error: error.message,
+          openPath: path,
+          error: _consumeRecoveryNotices(error.message),
           generation: generation,
           relayoutBusy: false,
         ),
@@ -821,7 +939,8 @@ final class ReaderController implements Listenable {
     } catch (error) {
       _emit(
         _model.copyWith(
-          error: error.toString(),
+          openPath: path,
+          error: _consumeRecoveryNotices(error.toString()),
           generation: generation,
           relayoutBusy: false,
         ),
@@ -832,6 +951,7 @@ final class ReaderController implements Listenable {
     _activeBridgeOperations += 1;
     _emit(
       _model.copyWith(
+        openPath: path,
         document: null,
         pageImage: null,
         error: null,
@@ -1038,6 +1158,11 @@ final class ReaderController implements Listenable {
 
   void _layoutChanged(ReaderLayout layout) {
     if (!layout.isValid || _closing) return;
+    if (_suspended || _recovering) {
+      _requestedLayout = layout;
+      _failedLayout = null;
+      return;
+    }
     if (_model.busy) {
       _requestedLayout = layout;
       _failedLayout = null;
@@ -1096,8 +1221,15 @@ final class ReaderController implements Listenable {
     final revision = ++_layoutRevision;
     _relayoutCancellations.add(cancellation);
     _activeBridgeOperations += 1;
+    final selectionActionError = _model.selectionActionError;
     _selectionCancelled();
-    _emit(_model.copyWith(relayoutBusy: true, selectionError: null));
+    _emit(
+      _model.copyWith(
+        relayoutBusy: true,
+        selectionError: null,
+        selectionActionError: selectionActionError,
+      ),
+    );
     unawaited(
       _relayoutEffect(document, generation, revision, cancellation, layout),
     );
@@ -1484,13 +1616,16 @@ final class ReaderController implements Listenable {
 
   void _selectionNoteRequested() {
     if (_model.selectionPhase != ReaderSelectionPhase.selected ||
-        _model.relayoutBusy) {
+        _model.relayoutBusy ||
+        _activeNoteEditor != null) {
       return;
     }
     _emit(_model.copyWith(selectionActionError: null));
     final generation = _model.generation;
     final revision = ++_noteRevision;
     final selectionRevision = _selectionRevision;
+    _activeNoteEditor = _ReaderNoteTarget.selection;
+    _activeNoteEditorRevision = revision;
     unawaited(() async {
       try {
         final body = await _noteEditor(null);
@@ -1513,6 +1648,8 @@ final class ReaderController implements Listenable {
             error.toString(),
           ),
         );
+      } finally {
+        dispatch(_ReaderNoteEditorFinished(revision));
       }
     }());
   }
@@ -1574,6 +1711,7 @@ final class ReaderController implements Listenable {
       return;
     }
     _annotationCancellations.add(cancellation);
+    if (body != null) _noteCreateCancellations.add(cancellation);
     _selectionCancellations[cancellation] = selectionRevision;
     _activeBridgeOperations += 1;
     _emit(
@@ -1584,6 +1722,7 @@ final class ReaderController implements Listenable {
       ),
     );
     unawaited(() async {
+      var succeeded = false;
       try {
         final created = await _bridge.createAnnotation(
           document: document.handle,
@@ -1595,6 +1734,7 @@ final class ReaderController implements Listenable {
           body: body,
           cancellationId: cancellation,
         );
+        succeeded = true;
         if (!_isCurrent(generation)) return;
         dispatch(
           _ReaderAnnotationsChanged(
@@ -1617,7 +1757,9 @@ final class ReaderController implements Listenable {
           ),
         );
       } finally {
-        dispatch(_ReaderAnnotationCreateFinished(cancellation));
+        dispatch(
+          _ReaderAnnotationCreateFinished(cancellation, succeeded: succeeded),
+        );
       }
     }());
   }
@@ -1635,7 +1777,10 @@ final class ReaderController implements Listenable {
     );
   }
 
-  Future<void> _updateAnnotation(ReaderAnnotationUpdated message) async {
+  Future<void> _updateAnnotation(
+    ReaderAnnotationUpdated message, {
+    bool fromNote = false,
+  }) async {
     final document = _model.document;
     if (document == null ||
         !_model.annotationsReady ||
@@ -1661,6 +1806,7 @@ final class ReaderController implements Listenable {
     }
     final revision = ++_annotationRevision;
     final operationId = 'update:${message.id}:${++_nextOperationId}';
+    if (fromNote) _noteUpdateOperations.add(operationId);
     _annotationCancellations.add(cancellation);
     _activeBridgeOperations += 1;
     _emit(
@@ -1676,7 +1822,6 @@ final class ReaderController implements Listenable {
         color: message.color,
         body: message.body,
       );
-      if (!_isCurrent(generation)) return;
       dispatch(
         _ReaderAnnotationUpdateCompleted(
           generation: generation,
@@ -1792,13 +1937,15 @@ final class ReaderController implements Listenable {
   }
 
   void _noteRequested(String id) {
-    if (_closing) return;
+    if (_closing || _activeNoteEditor != null) return;
     final annotation = _model.annotations
         .where((item) => item.id == id)
         .firstOrNull;
     if (annotation == null) return;
     final generation = _model.generation;
     final revision = ++_noteRevision;
+    _activeNoteEditor = _ReaderNoteTarget.annotation;
+    _activeNoteEditorRevision = revision;
     unawaited(() async {
       try {
         final body = await _noteEditor(annotation.body);
@@ -1811,6 +1958,8 @@ final class ReaderController implements Listenable {
         dispatch(
           _ReaderAnnotationNoteFailed(generation, revision, error.toString()),
         );
+      } finally {
+        dispatch(_ReaderNoteEditorFinished(revision));
       }
     }());
   }
@@ -1848,15 +1997,19 @@ final class ReaderController implements Listenable {
           annotation.color,
           message.body.isEmpty ? null : message.body,
         ),
+        fromNote: true,
       ),
     );
   }
 
   void _annotationsChanged(_ReaderAnnotationsChanged message) {
+    final operation = message.operationId;
+    if (operation != null && message.error != null) {
+      _recordNoteUpdateOutcome(operation, succeeded: false);
+    }
     if (!_isCurrent(message.generation)) {
       return;
     }
-    final operation = message.operationId;
     if (operation != null) {
       final pending = {..._model.annotationOperations}..remove(operation);
       _emit(_model.copyWith(annotationOperations: pending));
@@ -1978,7 +2131,7 @@ final class ReaderController implements Listenable {
           document: null,
           pageImage: null,
           contentState: ReaderContentState.failed,
-          error: message.error,
+          error: _consumeRecoveryNotices(message.error),
         ),
       );
     }
@@ -1989,20 +2142,140 @@ final class ReaderController implements Listenable {
       _activeCancellation = null;
     }
     if (_isCurrent(message.generation)) {
-      _emit(_model.copyWith(busy: false));
+      final recovered = _model.document != null;
+      final selectionNotice = recovered ? _recoverySelectionNotice : null;
+      final annotationsRecovered = recovered && _model.annotationsReady;
+      final annotationNotice = annotationsRecovered
+          ? _recoveryAnnotationNotice
+          : null;
+      final recoveryError = recovered && !annotationsRecovered
+          ? _recoveryAnnotationNotice
+          : null;
+      if (recovered) {
+        _recoverySelectionNotice = null;
+        _recoveryAnnotationNotice = null;
+      }
+      _emit(
+        _model.copyWith(
+          busy: false,
+          selectionActionError: selectionNotice ?? _model.selectionActionError,
+          annotationError: annotationNotice ?? _model.annotationError,
+          error: recoveryError == null
+              ? _unchanged
+              : [?_model.error, recoveryError].join('\n'),
+        ),
+      );
       _startRequestedRelayoutIfReady();
     }
     _activeBridgeOperations -= 1;
+    _recoverIfIdle();
     _disposeBridgeIfIdle();
+  }
+
+  void _suspendRequested() {
+    if (_suspended || _closing) return;
+    _suspended = true;
+    if (_model.document == null && !_model.busy) return;
+    switch (_activeNoteEditor) {
+      case _ReaderNoteTarget.selection:
+        _recoverySelectionNotice =
+            'The note was not saved because the app was suspended. Try again.';
+      case _ReaderNoteTarget.annotation:
+        _recoveryAnnotationNotice =
+            'The note was not saved because the app was suspended. Try again.';
+      case null:
+        break;
+    }
+    _cancelActiveNoteEditor();
+    _releaseForRecovery = true;
+    _reopenForRecovery = true;
+    _interruptedNoteCreates.addAll(_noteCreateCancellations);
+    _interruptedNoteUpdates.addAll(_noteUpdateOperations);
+    final cancellation = _activeCancellation;
+    if (cancellation != null) _bridge.cancel(id: cancellation);
+    for (final cancellation in _annotationCancellations) {
+      _bridge.cancel(id: cancellation);
+    }
+    for (final cancellation in _relayoutCancellations) {
+      _bridge.cancel(id: cancellation);
+    }
+    _layoutRevision += 1;
+    _annotationRevision += 1;
+    _selectionRevision += 1;
+    _noteRevision += 1;
+    _emit(
+      _model.copyWith(
+        busy: true,
+        relayoutBusy: false,
+        annotationOperations: const {},
+        selectionPhase: ReaderSelectionPhase.idle,
+        anchor: null,
+        focus: null,
+        selectionPointer: null,
+        selectionVisualLine: null,
+        selectionPreferredX: null,
+        keyboardActionInvocation: false,
+        generation: _model.generation + 1,
+      ),
+    );
+    _recoverIfIdle();
+  }
+
+  void _resumeRequested() {
+    if (!_suspended || _closing) return;
+    _suspended = false;
+    _recoverIfIdle();
+  }
+
+  void _memoryPressureReceived() {
+    if (_closing || _recoveryPath == null) return;
+    if (_suspended) {
+      _reopenForRecovery = true;
+      _recoverIfIdle();
+      return;
+    }
+    _suspendRequested();
+    _resumeRequested();
+  }
+
+  void _recoverIfIdle() {
+    if (_activeBridgeOperations != 0 || _closing) return;
+    if (_releaseForRecovery) {
+      _releaseForRecovery = false;
+      _releaseModelResources(publish: true);
+      _emit(
+        _model.copyWith(
+          document: null,
+          pageImage: null,
+          selectionSurface: null,
+          savedSelections: const [],
+          annotations: const [],
+          annotationsReady: false,
+          contentState: ReaderContentState.loading,
+          error: null,
+          busy: false,
+        ),
+      );
+    }
+    final path = _recoveryPath;
+    if (!_suspended && _reopenForRecovery && path != null) {
+      _reopenForRecovery = false;
+      _openRequested(ReaderOpenRequested(path));
+    }
   }
 
   bool _isCurrent(int generation) {
     return !_closing && generation == _model.generation;
   }
 
-  void _emit(ReaderModel model) {
+  void _emit(ReaderModel model, {bool notifyListeners = true}) {
+    final selectionChanged =
+        _model.selectionDescription != model.selectionDescription;
     _model = model;
-    if (!_listenersDisposed) {
+    if (!_closing && selectionChanged && _selectionAnnouncer != null) {
+      unawaited(_announceSelection(model.selectionDescription));
+    }
+    if (notifyListeners && !_listenersDisposed) {
       for (final listener in _listeners.toList(growable: false)) {
         try {
           listener();
@@ -2021,11 +2294,27 @@ final class ReaderController implements Listenable {
     }
   }
 
-  void _releaseModelResources() {
+  Future<void> _announceSelection(String description) async {
+    try {
+      await _selectionAnnouncer!(description);
+    } catch (error, stackTrace) {
+      if (!_closing) {
+        FlutterError.reportError(
+          FlutterErrorDetails(
+            exception: error,
+            stack: stackTrace,
+            library: 'shosai_flutter',
+          ),
+        );
+      }
+    }
+  }
+
+  void _releaseModelResources({bool publish = false}) {
     final pageImage = _model.pageImage;
     final document = _model.document;
     final surface = _model.selectionSurface;
-    _model = _model.copyWith(
+    final released = _model.copyWith(
       document: null,
       pageImage: null,
       selectionSurface: null,
@@ -2036,6 +2325,11 @@ final class ReaderController implements Listenable {
       selectionVisualLine: null,
       selectionPreferredX: null,
     );
+    if (publish) {
+      _emit(released, notifyListeners: false);
+    } else {
+      _model = released;
+    }
     pageImage?.dispose();
     if (surface != null) _releaseSurface(surface);
     if (document != null) {
@@ -2050,6 +2344,7 @@ final class ReaderController implements Listenable {
   void _disposeRequested() {
     if (_closing) return;
     _closing = true;
+    _cancelActiveNoteEditor();
     final cancellation = _activeCancellation;
     if (cancellation != null) {
       _bridge.cancel(id: cancellation);
@@ -2062,6 +2357,41 @@ final class ReaderController implements Listenable {
     }
     _model = _model.copyWith(busy: false, generation: _model.generation + 1);
     _disposeBridgeIfIdle();
+  }
+
+  void _cancelActiveNoteEditor() {
+    if (_activeNoteEditor == null) return;
+    _activeNoteEditor = null;
+    _activeNoteEditorRevision = null;
+    try {
+      _noteEditorCanceller();
+    } catch (error, stackTrace) {
+      scheduleMicrotask(
+        () => FlutterError.reportError(
+          FlutterErrorDetails(
+            exception: error,
+            stack: stackTrace,
+            library: 'shosai_flutter',
+          ),
+        ),
+      );
+    }
+  }
+
+  void _recordNoteUpdateOutcome(String operationId, {required bool succeeded}) {
+    _noteUpdateOperations.remove(operationId);
+    final interrupted = _interruptedNoteUpdates.remove(operationId);
+    if (interrupted && !succeeded) {
+      _recoveryAnnotationNotice =
+          'The note could not be saved while the app was suspended. Try again.';
+    }
+  }
+
+  String _consumeRecoveryNotices(String error) {
+    final notices = [?_recoverySelectionNotice, ?_recoveryAnnotationNotice];
+    _recoverySelectionNotice = null;
+    _recoveryAnnotationNotice = null;
+    return notices.isEmpty ? error : '$error\n${notices.join('\n')}';
   }
 
   void _disposeBridgeIfIdle() {

@@ -121,11 +121,30 @@ coordinates.
     the same fingerprint.
   - [ ] Define stable document association, then recover anchors after document
     bytes and fingerprints change without treating path equality as identity.
-- [ ] Implement responsive reader compositions for desktop, phone, and tablet,
+- [-] Implement responsive reader compositions for desktop, phone, and tablet,
   including rotation, safe areas, text scaling, visible focus, screen-reader
   semantics, and non-color highlight indication.
-- [ ] Exercise suspend/resume, process death, cancellation, memory pressure,
+  - [X] Adapt compact, medium, and expanded compositions across rotation and
+    safe-area-constrained widths without losing path editing, control focus,
+    reader focus, or highlight-list position.
+  - [X] Scale EPUB layout inputs with system text size, expose document and
+    selection semantics, announce selection changes through supported mobile
+    live regions and explicit desktop adapters, draw visible keyboard focus,
+    and distinguish temporary and saved highlights without color alone.
+  - [ ] Validate the automated semantics, focus, text-scaling, and non-color
+    evidence with the named screen reader on each claimed physical target.
+- [-] Exercise suspend/resume, process death, cancellation, memory pressure,
   renderer recovery, missing files, and revoked file capabilities.
+  - [X] Map lifecycle and memory-pressure callbacks to typed controller messages;
+    cancel and drain in-flight work, release native resources, reopen the latest
+    accepted locator, and reject reader mutations until recovery completes.
+  - [X] Restore accepted document locators with a fresh bridge after process
+    death, preserve queued relayout inputs, retry missing and inaccessible
+    locators, and surface interrupted note outcomes through automated widget
+    and controller race regressions.
+  - [ ] Validate suspend/resume, process death, memory pressure, renderer loss,
+    missing files, and revoked document-provider capabilities on each claimed
+    physical desktop and mobile target.
 - [ ] Measure the M0 budgets on Linux, macOS, Windows, and physical Android/iOS
   hardware available for the first release decision.
 
@@ -135,9 +154,12 @@ Rust exports grapheme, word, visual-line, bidi, and oriented-caret metadata;
 Flutter dispatches typed pointer, keyboard, focus, and action messages without
 re-entering layout during interaction.  Native and widget regressions cover both
 formats, mouse/touch ownership, keyboard-only operation, cancellation and stale
-completion races, annotation reopen/update/delete, geometry bounds, and compact
-large-text action layout.  The unchecked relayout, responsive/screen-reader,
-lifecycle, multi-platform measurement, and physical-mobile exit gates remain
+completion races, annotation reopen/update/delete, geometry bounds, compact
+large-text action layout, responsive composition, visible focus, non-color
+selection state, cross-platform announcement policy, lifecycle draining,
+resource recovery, process restoration, and unavailable-locator retry.
+Changed-fingerprint relayout, manual screen-reader and physical lifecycle
+validation, multi-platform measurement, and physical-mobile exit gates remain
 explicitly unclaimed.
 
 The first relayout increment now recomputes PDF geometry at the active display
