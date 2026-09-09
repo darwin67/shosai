@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -125,6 +126,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   final FocusNode _openFocus = FocusNode(debugLabel: 'open document');
   final FocusNode _readerFocus = FocusNode(debugLabel: 'reader surface');
   final FocusNode _actionFocus = FocusNode(debugLabel: 'selection actions');
+  DialogRoute<String>? _noteDialogRoute;
   late final ReaderController _controller;
 
   @override
@@ -166,16 +168,27 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   Future<String?> _editNote(String? initialValue) async {
-    return showDialog<String>(
+    final navigator = Navigator.of(context, rootNavigator: true);
+    final route = DialogRoute<String>(
       context: context,
       builder: (context) => _NoteDialog(initialValue: initialValue),
     );
+    _noteDialogRoute = route;
+    try {
+      return await navigator.push(route);
+    } finally {
+      if (identical(_noteDialogRoute, route)) _noteDialogRoute = null;
+    }
   }
 
   void _cancelNoteEditor() {
-    if (mounted) {
-      Navigator.of(context, rootNavigator: true).pop();
-    }
+    final route = _noteDialogRoute;
+    _noteDialogRoute = null;
+    if (route == null) return;
+    scheduleMicrotask(() {
+      final navigator = route.navigator;
+      if (route.isActive && navigator != null) navigator.removeRoute(route);
+    });
   }
 
   void _modelChanged() {

@@ -1199,8 +1199,15 @@ final class ReaderController implements Listenable {
     final revision = ++_layoutRevision;
     _relayoutCancellations.add(cancellation);
     _activeBridgeOperations += 1;
+    final selectionActionError = _model.selectionActionError;
     _selectionCancelled();
-    _emit(_model.copyWith(relayoutBusy: true, selectionError: null));
+    _emit(
+      _model.copyWith(
+        relayoutBusy: true,
+        selectionError: null,
+        selectionActionError: selectionActionError,
+      ),
+    );
     unawaited(
       _relayoutEffect(document, generation, revision, cancellation, layout),
     );
@@ -1587,7 +1594,8 @@ final class ReaderController implements Listenable {
 
   void _selectionNoteRequested() {
     if (_model.selectionPhase != ReaderSelectionPhase.selected ||
-        _model.relayoutBusy) {
+        _model.relayoutBusy ||
+        _activeNoteEditor != null) {
       return;
     }
     _emit(_model.copyWith(selectionActionError: null));
@@ -1899,7 +1907,7 @@ final class ReaderController implements Listenable {
   }
 
   void _noteRequested(String id) {
-    if (_closing) return;
+    if (_closing || _activeNoteEditor != null) return;
     final annotation = _model.annotations
         .where((item) => item.id == id)
         .firstOrNull;
@@ -2126,16 +2134,13 @@ final class ReaderController implements Listenable {
       case _ReaderNoteTarget.selection:
         _recoverySelectionNotice =
             'The note was not saved because the app was suspended. Try again.';
-        _noteEditorCanceller();
       case _ReaderNoteTarget.annotation:
         _recoveryAnnotationNotice =
             'The note was not saved because the app was suspended. Try again.';
-        _noteEditorCanceller();
       case null:
         break;
     }
-    _activeNoteEditor = null;
-    _activeNoteEditorRevision = null;
+    _cancelActiveNoteEditor();
     _releaseForRecovery = true;
     _reopenForRecovery = true;
     final cancellation = _activeCancellation;
@@ -2291,11 +2296,7 @@ final class ReaderController implements Listenable {
   void _disposeRequested() {
     if (_closing) return;
     _closing = true;
-    if (_activeNoteEditor != null) {
-      _activeNoteEditor = null;
-      _activeNoteEditorRevision = null;
-      _noteEditorCanceller();
-    }
+    _cancelActiveNoteEditor();
     final cancellation = _activeCancellation;
     if (cancellation != null) {
       _bridge.cancel(id: cancellation);
@@ -2308,6 +2309,25 @@ final class ReaderController implements Listenable {
     }
     _model = _model.copyWith(busy: false, generation: _model.generation + 1);
     _disposeBridgeIfIdle();
+  }
+
+  void _cancelActiveNoteEditor() {
+    if (_activeNoteEditor == null) return;
+    _activeNoteEditor = null;
+    _activeNoteEditorRevision = null;
+    try {
+      _noteEditorCanceller();
+    } catch (error, stackTrace) {
+      scheduleMicrotask(
+        () => FlutterError.reportError(
+          FlutterErrorDetails(
+            exception: error,
+            stack: stackTrace,
+            library: 'shosai_flutter',
+          ),
+        ),
+      );
+    }
   }
 
   void _disposeBridgeIfIdle() {

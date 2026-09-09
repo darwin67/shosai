@@ -2397,10 +2397,8 @@ void main() {
 
       controller.dispatch(const ReaderAnnotationNoteRequested('one'));
       controller.dispatch(const ReaderAnnotationNoteRequested('one'));
-      editors[1].complete('stale note');
-      await Future<void>.delayed(Duration.zero);
-      expect(controller.model.annotations.single.body, 'current note');
-      editors[2].complete('new note');
+      expect(editors, hasLength(2));
+      editors[1].complete('new note');
       await Future<void>.delayed(Duration.zero);
       await Future<void>.delayed(Duration.zero);
       expect(controller.model.annotations.single.body, 'new note');
@@ -2408,14 +2406,14 @@ void main() {
       final updatesBeforeReplacement = bridge.updateCalls;
       controller.dispatch(const ReaderAnnotationNoteRequested('one'));
       await _openControlled(controller, bridge, '/tmp/b.epub');
-      editors[3].complete('old document note');
+      editors[2].complete('old document note');
       await Future<void>.delayed(Duration.zero);
       expect(bridge.updateCalls, updatesBeforeReplacement);
 
       controller.dispatch(const ReaderAnnotationNoteRequested('one'));
       controller.dispatch(const ReaderAnnotationDeleted('one'));
       await Future<void>.delayed(Duration.zero);
-      editors[4].complete('after delete');
+      editors[3].complete('after delete');
       await Future<void>.delayed(Duration.zero);
       expect(controller.model.annotations, isEmpty);
 
@@ -2511,16 +2509,17 @@ void main() {
   test(
     'suspension cancels a note editor and reports the unsaved draft',
     () async {
-      final bridge = _ControlledBridge(
-        initialAnnotations: [_annotation('one')],
-        immediateLists: true,
-      );
+      final bridge = _ControlledBridge(immediateLists: true);
       final editor = Completer<String?>();
+      var editorCalls = 0;
       var cancellations = 0;
       final controller = ReaderController(
         bridge: bridge,
         decoder: (pixels, {required width, required height}) => _testImage(),
-        noteEditor: (_) => editor.future,
+        noteEditor: (_) {
+          editorCalls += 1;
+          return editor.future;
+        },
         noteEditorCanceller: () {
           cancellations += 1;
           editor.complete(null);
@@ -2528,17 +2527,31 @@ void main() {
       );
       await _openControlled(controller, bridge, '/tmp/a.epub');
 
-      controller.dispatch(const ReaderAnnotationNoteRequested('one'));
+      controller.dispatch(const ReaderSelectionStarted(1));
+      controller.dispatch(const ReaderSelectionExtended(3));
+      controller.dispatch(const ReaderSelectionEnded());
+      controller.dispatch(const ReaderSelectionNoteRequested());
+      controller.dispatch(const ReaderSelectionNoteRequested());
+      expect(editorCalls, 1);
       controller.dispatch(const ReaderSuspended());
       expect(cancellations, 1);
+      final recoverySurface = Completer<FlutterSelectionSurface>();
+      bridge.selectionCompleters.add(recoverySurface);
       controller.dispatch(const ReaderResumed());
-      await bridge.waitForOp(2);
+      await _waitUntil(() => bridge.selectionCalls == 2);
+      controller.dispatch(
+        const ReaderLayoutChanged(
+          ReaderLayout(scale: 2, width: 320, fontSize: 24),
+        ),
+      );
+      recoverySurface.complete(_surface(BigInt.from(20), raster: true));
+      await bridge.waitForOp(3);
 
       expect(
-        controller.model.annotationError,
+        controller.model.selectionActionError,
         'The note was not saved because the app was suspended. Try again.',
       );
-      expect(bridge.updateCalls, 0);
+      expect(bridge.createCalls, 0);
 
       controller.dispose();
       await bridge.disposed.future;
@@ -4261,6 +4274,34 @@ void main() {
 
     await tester.pumpWidget(const SizedBox());
     await bridge.disposed.future;
+  });
+
+  testWidgets('disposing an open note dialog remains teardown safe', (
+    tester,
+  ) async {
+    final bridge = _ControlledBridge(
+      initialAnnotations: [_annotation('one')],
+      immediateLists: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Edit note'));
+    await tester.pumpAndSettle();
+    expect(find.text('Save'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+    await bridge.disposed.future;
+    expect(tester.takeException(), isNull);
   });
 }
 
