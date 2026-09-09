@@ -2361,6 +2361,93 @@ void main() {
     },
   );
 
+  test('memory pressure releases and reopens the active reader', () async {
+    final bridge = _ControlledBridge(immediateLists: true);
+    final controller = _epubController(bridge);
+    await _openControlled(controller, bridge, '/tmp/a.epub');
+    final firstDocument = controller.model.document!.handle;
+    final firstSurface = controller.model.selectionSurface!.handle;
+
+    controller.dispatch(const ReaderMemoryPressureReceived());
+    await bridge.waitForOp(2);
+
+    expect(bridge.openCalls, 2);
+    expect(bridge.releasedDocuments, [firstDocument]);
+    expect(bridge.releasedSelections, contains(firstSurface));
+    expect(controller.model.document, isNotNull);
+    expect(controller.model.contentState, ReaderContentState.ready);
+
+    controller.dispose();
+    await bridge.disposed.future;
+  });
+
+  test(
+    'resume waits for suspended relayout cleanup before reopening',
+    () async {
+      final bridge = _ControlledBridge(immediateLists: true);
+      final controller = _epubController(bridge);
+      await _openControlled(controller, bridge, '/tmp/a.epub');
+      final firstDocument = controller.model.document!.handle;
+      final staleSelection = Completer<FlutterSelectionSurface>();
+      bridge.selectionCompleters.add(staleSelection);
+
+      controller.dispatch(
+        const ReaderLayoutChanged(
+          ReaderLayout(scale: 2, width: 300, fontSize: 20),
+        ),
+      );
+      await _waitUntil(() => bridge.selectionCalls == 2);
+      final relayoutCancellation = bridge.createdCancellations.last;
+      controller.dispatch(const ReaderSuspended());
+      controller.dispatch(const ReaderResumed());
+
+      expect(bridge.cancelled, contains(relayoutCancellation));
+      expect(bridge.releasedDocuments, isEmpty);
+      expect(bridge.openCalls, 1);
+
+      staleSelection.complete(_surface(BigInt.from(20), raster: true));
+      await bridge.waitForOp(3);
+
+      expect(bridge.releasedDocuments, [firstDocument]);
+      expect(bridge.openCalls, 2);
+      expect(controller.model.document, isNotNull);
+      expect(controller.model.contentState, ReaderContentState.ready);
+
+      controller.dispose();
+      await bridge.disposed.future;
+    },
+  );
+
+  testWidgets('reader maps platform lifecycle events to recovery messages', (
+    tester,
+  ) async {
+    final bridge = _FakeBridge();
+    await tester.pumpWidget(MaterialApp(home: ReaderScreen(bridge: bridge)));
+    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pump();
+    expect(bridge.openRequests, hasLength(1));
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    expect(bridge.events, contains('cancel'));
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(bridge.openRequests, hasLength(1));
+
+    await tester.pumpWidget(const SizedBox());
+    bridge.openCompleter.completeError(
+      const FlutterBridgeError(
+        kind: FlutterBridgeErrorKind.cancelled,
+        message: 'cancelled',
+      ),
+    );
+    await bridge.disposed.future;
+  });
+
   test(
     'disposal cancels and releases an in-flight annotation create',
     () async {
@@ -4046,6 +4133,7 @@ final class _ControlledBridge implements FlutterBridge {
   final listCompleters = Queue<Completer<List<FlutterAnnotation>>>();
   final takenBuffers = <FlutterBufferHandle>[];
   final releasedBuffers = <FlutterBufferHandle>[];
+  final releasedDocuments = <FlutterDocumentHandle>[];
   final releasedSelections = <FlutterSelectionHandle>[];
   final events = <String>[];
   Completer<bool>? updateCompleter = Completer<bool>();
@@ -4377,7 +4465,10 @@ final class _ControlledBridge implements FlutterBridge {
   }
 
   @override
-  bool releaseDocument({required FlutterDocumentHandle handle}) => true;
+  bool releaseDocument({required FlutterDocumentHandle handle}) {
+    releasedDocuments.add(handle);
+    return true;
+  }
 
   @override
   bool releaseCancellation({required BigInt id}) {

@@ -255,6 +255,18 @@ final class ReaderLayoutChanged extends ReaderMessage {
   final ReaderLayout layout;
 }
 
+final class ReaderSuspended extends ReaderMessage {
+  const ReaderSuspended();
+}
+
+final class ReaderResumed extends ReaderMessage {
+  const ReaderResumed();
+}
+
+final class ReaderMemoryPressureReceived extends ReaderMessage {
+  const ReaderMemoryPressureReceived();
+}
+
 final class ReaderSelectionStarted extends ReaderMessage {
   const ReaderSelectionStarted(this.offset);
   final int offset;
@@ -611,6 +623,10 @@ final class ReaderController implements Listenable {
   int _noteRevision = 0;
   ReaderLayout _requestedLayout = const ReaderLayout();
   ReaderLayout? _failedLayout;
+  String? _recoveryPath;
+  bool _suspended = false;
+  bool _releaseForRecovery = false;
+  bool _reopenForRecovery = false;
   bool _closing = false;
   bool _listenersDisposed = false;
   final Set<VoidCallback> _listeners = {};
@@ -633,6 +649,12 @@ final class ReaderController implements Listenable {
         _openRequested(message);
       case ReaderLayoutChanged():
         _layoutChanged(message.layout);
+      case ReaderSuspended():
+        _suspendRequested();
+      case ReaderResumed():
+        _resumeRequested();
+      case ReaderMemoryPressureReceived():
+        _memoryPressureReceived();
       case ReaderSelectionStarted():
         _selectionStarted(message.offset);
       case ReaderSelectionExtended():
@@ -771,6 +793,7 @@ final class ReaderController implements Listenable {
         _relayoutCancellations.remove(message.cancellation);
         _bridge.releaseCancellation(id: message.cancellation);
         _activeBridgeOperations -= 1;
+        _recoverIfIdle();
         _disposeBridgeIfIdle();
       case _ReaderAnnotationListFailed():
         if (_isCurrent(message.generation) &&
@@ -793,9 +816,11 @@ final class ReaderController implements Listenable {
         }
         _bridge.releaseCancellation(id: message.cancellation);
         _activeBridgeOperations -= 1;
+        _recoverIfIdle();
         _disposeBridgeIfIdle();
       case _ReaderAnnotationOperationFinished():
         _activeBridgeOperations -= 1;
+        _recoverIfIdle();
         _disposeBridgeIfIdle();
       case _ReaderAnnotationUpdateCompleted():
         _annotationUpdateCompleted(message);
@@ -809,10 +834,12 @@ final class ReaderController implements Listenable {
     if (path.isEmpty ||
         _model.busy ||
         _model.annotationOperations.isNotEmpty ||
+        _suspended ||
         _closing) {
       return;
     }
 
+    _recoveryPath = path;
     final generation = _model.generation + 1;
     for (final cancellation in _relayoutCancellations) {
       _bridge.cancel(id: cancellation);
@@ -1053,7 +1080,7 @@ final class ReaderController implements Listenable {
   }
 
   void _layoutChanged(ReaderLayout layout) {
-    if (!layout.isValid || _closing) return;
+    if (!layout.isValid || _suspended || _closing) return;
     if (_model.busy) {
       _requestedLayout = layout;
       _failedLayout = null;
@@ -2009,7 +2036,86 @@ final class ReaderController implements Listenable {
       _startRequestedRelayoutIfReady();
     }
     _activeBridgeOperations -= 1;
+    _recoverIfIdle();
     _disposeBridgeIfIdle();
+  }
+
+  void _suspendRequested() {
+    if (_suspended || _closing) return;
+    _suspended = true;
+    if (_model.document == null && !_model.busy) return;
+    _releaseForRecovery = true;
+    _reopenForRecovery = true;
+    final cancellation = _activeCancellation;
+    if (cancellation != null) _bridge.cancel(id: cancellation);
+    for (final cancellation in _annotationCancellations) {
+      _bridge.cancel(id: cancellation);
+    }
+    for (final cancellation in _relayoutCancellations) {
+      _bridge.cancel(id: cancellation);
+    }
+    _layoutRevision += 1;
+    _annotationRevision += 1;
+    _selectionRevision += 1;
+    _noteRevision += 1;
+    _emit(
+      _model.copyWith(
+        busy: false,
+        relayoutBusy: false,
+        annotationOperations: const {},
+        selectionPhase: ReaderSelectionPhase.idle,
+        anchor: null,
+        focus: null,
+        selectionPointer: null,
+        selectionVisualLine: null,
+        selectionPreferredX: null,
+        keyboardActionInvocation: false,
+        generation: _model.generation + 1,
+      ),
+    );
+    _recoverIfIdle();
+  }
+
+  void _resumeRequested() {
+    if (!_suspended || _closing) return;
+    _suspended = false;
+    _recoverIfIdle();
+  }
+
+  void _memoryPressureReceived() {
+    if (_closing || _recoveryPath == null) return;
+    if (_suspended) {
+      _releaseForRecovery = true;
+      _recoverIfIdle();
+      return;
+    }
+    _suspendRequested();
+    _resumeRequested();
+  }
+
+  void _recoverIfIdle() {
+    if (_activeBridgeOperations != 0 || _closing) return;
+    if (_releaseForRecovery) {
+      _releaseForRecovery = false;
+      _releaseModelResources(publish: true);
+      _emit(
+        _model.copyWith(
+          document: null,
+          pageImage: null,
+          selectionSurface: null,
+          savedSelections: const [],
+          annotations: const [],
+          annotationsReady: false,
+          contentState: ReaderContentState.loading,
+          error: null,
+        ),
+      );
+    }
+    final path = _recoveryPath;
+    if (!_suspended && _reopenForRecovery && path != null) {
+      _reopenForRecovery = false;
+      _openRequested(ReaderOpenRequested(path));
+    }
   }
 
   bool _isCurrent(int generation) {

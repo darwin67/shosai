@@ -23,9 +23,11 @@ export 'package:shosai_flutter/reader_controller.dart'
         ReaderFocusTarget,
         ReaderLayout,
         ReaderLayoutChanged,
+        ReaderMemoryPressureReceived,
         ReaderMessage,
         ReaderModel,
         ReaderOpenRequested,
+        ReaderResumed,
         ReaderSelection,
         ReaderSelectionAnnouncer,
         ReaderSelectionActionsRequested,
@@ -45,6 +47,7 @@ export 'package:shosai_flutter/reader_controller.dart'
         ReaderSelectionPointerStarted,
         ReaderContentState,
         ReaderSelectionStarted,
+        ReaderSuspended,
         premultiplyRgba;
 
 Future<void> main() async {
@@ -104,7 +107,8 @@ class ReaderScreen extends StatefulWidget {
   State<ReaderScreen> createState() => _ReaderScreenState();
 }
 
-class _ReaderScreenState extends State<ReaderScreen> {
+class _ReaderScreenState extends State<ReaderScreen>
+    with WidgetsBindingObserver {
   final TextEditingController _path = TextEditingController();
   final GlobalKey _pathFieldKey = GlobalKey(debugLabel: 'document path');
   final GlobalKey _contentKey = GlobalKey(debugLabel: 'reader content');
@@ -116,6 +120,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _controller = ReaderController(
       bridge: widget.bridge ?? FlutterBridge(),
       decoder: (pixels, {required width, required height}) =>
@@ -143,7 +148,27 @@ class _ReaderScreenState extends State<ReaderScreen> {
   void _modelChanged() => setState(() {});
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _controller.dispatch(const ReaderResumed());
+      case AppLifecycleState.hidden ||
+          AppLifecycleState.paused ||
+          AppLifecycleState.detached:
+        _controller.dispatch(const ReaderSuspended());
+      case AppLifecycleState.inactive:
+        break;
+    }
+  }
+
+  @override
+  void didHaveMemoryPressure() {
+    _controller.dispatch(const ReaderMemoryPressureReceived());
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _controller.removeListener(_modelChanged);
     _controller.dispose();
     _path.dispose();
