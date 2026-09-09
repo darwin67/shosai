@@ -932,6 +932,24 @@ void main() {
       expect(bridge.releasedBuffers, isEmpty);
     });
 
+    for (final unavailable in [
+      (FlutterBridgeErrorKind.notFound, 'document was not found'),
+      (FlutterBridgeErrorKind.inaccessible, 'document is inaccessible'),
+    ]) {
+      test('${unavailable.$1} locator failure remains actionable', () async {
+        final bridge = _FakeBridge();
+        final controller = _epubController(bridge);
+        controller.dispatch(const ReaderOpenRequested('/tmp/book.epub'));
+        bridge.openCompleter.completeError(
+          FlutterBridgeError(kind: unavailable.$1, message: unavailable.$2),
+        );
+
+        await _expectFailedOperation(controller, bridge, unavailable.$2);
+        expect(bridge.releasedDocuments, isEmpty);
+        expect(bridge.releasedBuffers, isEmpty);
+      });
+    }
+
     test('render failure releases the document', () async {
       final bridge = _FakeBridge()..completeOpen(FlutterBookFormat.pdf);
       final controller = _epubController(bridge);
