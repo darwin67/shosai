@@ -3405,6 +3405,81 @@ void main() {
     }
   });
 
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    testWidgets(
+      '$platform retains cleared selection status during replacement',
+      (tester) async {
+        final semantics = tester.ensureSemantics();
+        debugDefaultTargetPlatformOverride = platform;
+        try {
+          final bridge = _ControlledBridge(format: FlutterBookFormat.epub);
+          await tester.pumpWidget(
+            MaterialApp(
+              home: ReaderScreen(
+                bridge: bridge,
+                decoder: (pixels, {required width, required height}) =>
+                    _testImage(),
+              ),
+            ),
+          );
+          await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+          await tester.tap(find.text('Open document'));
+          await tester.pumpAndSettle();
+          final statusFinder = find.byKey(
+            const ValueKey('reader-selection-status'),
+          );
+          final statusNode = tester.getSemantics(statusFinder);
+
+          await tester.tap(
+            find.byKey(const ValueKey('reader-selection-surface')),
+          );
+          await tester.pump();
+          await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+          await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+          await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+          await tester.pump();
+          expect(statusNode.getSemanticsData().label, 'Selected text: e');
+
+          final editable = tester.state<EditableTextState>(
+            find.byType(EditableText),
+          );
+          for (
+            var tabs = 0;
+            tabs < 5 && !editable.widget.focusNode.hasFocus;
+            tabs += 1
+          ) {
+            await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+            await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+            await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+            await tester.pump();
+          }
+          expect(editable.widget.focusNode.hasFocus, isTrue);
+          tester.testTextInput.enterText('/tmp/replacement.epub');
+          bridge.failCancellationCreation = true;
+          await tester.testTextInput.receiveAction(TextInputAction.done);
+          await tester.pump();
+
+          expect(tester.getSemantics(statusFinder), same(statusNode));
+          expect(statusNode.getSemanticsData().label, 'No text selected');
+          expect(
+            statusNode.getSemanticsData().flagsCollection.isLiveRegion,
+            isTrue,
+          );
+          expect(
+            find.textContaining('too many cancellation tokens'),
+            findsOneWidget,
+          );
+
+          await tester.pumpWidget(const SizedBox());
+          await bridge.disposed.future;
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+          semantics.dispose();
+        }
+      },
+    );
+  }
+
   for (final format in [FlutterBookFormat.pdf, FlutterBookFormat.epub]) {
     for (final device in [
       ui.PointerDeviceKind.mouse,

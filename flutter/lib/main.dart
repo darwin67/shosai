@@ -370,19 +370,32 @@ class _ReaderContentPane extends StatelessWidget {
   final FocusNode actionFocus;
 
   @override
-  Widget build(BuildContext context) => _ReaderLayoutReporter(
-    model: model,
-    dispatch: dispatch,
-    child: model.document == null
-        ? const WelcomePanel()
-        : _DocumentView(
-            document: model.document!,
-            image: model.pageImage,
-            model: model,
-            dispatch: dispatch,
-            readerFocus: readerFocus,
-            actionFocus: actionFocus,
-          ),
+  Widget build(BuildContext context) => Column(
+    children: [
+      Expanded(
+        child: _ReaderLayoutReporter(
+          model: model,
+          dispatch: dispatch,
+          child: model.document == null
+              ? const WelcomePanel()
+              : _DocumentView(
+                  document: model.document!,
+                  image: model.pageImage,
+                  model: model,
+                  dispatch: dispatch,
+                  readerFocus: readerFocus,
+                  actionFocus: actionFocus,
+                ),
+        ),
+      ),
+      Semantics(
+        key: const ValueKey('reader-selection-status'),
+        container: true,
+        liveRegion: true,
+        label: model.selectionDescription,
+        child: const SizedBox(width: double.infinity, height: 1),
+      ),
+    ],
   );
 }
 
@@ -697,13 +710,6 @@ class _DocumentView extends StatelessWidget {
                 ),
               ),
             ),
-          ),
-          Semantics(
-            key: const ValueKey('reader-selection-status'),
-            container: true,
-            liveRegion: true,
-            label: model.selectionDescription,
-            child: const SizedBox(width: double.infinity, height: 1),
           ),
           if (model.annotations.isNotEmpty)
             SizedBox(
