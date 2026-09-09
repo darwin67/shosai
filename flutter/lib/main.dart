@@ -92,15 +92,22 @@ class ShosaiApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
+      restorationScopeId: 'shosai',
       home: const ReaderScreen(),
     );
   }
 }
 
 class ReaderScreen extends StatefulWidget {
-  const ReaderScreen({super.key, this.bridge, this.decoder = _decodeRgba});
+  const ReaderScreen({
+    super.key,
+    this.bridge,
+    this.bridgeFactory,
+    this.decoder = _decodeRgba,
+  }) : assert(bridge == null || bridgeFactory == null);
 
   final FlutterBridge? bridge;
+  final FlutterBridge Function()? bridgeFactory;
   final PageDecoder decoder;
 
   @override
@@ -108,8 +115,10 @@ class ReaderScreen extends StatefulWidget {
 }
 
 class _ReaderScreenState extends State<ReaderScreen>
-    with WidgetsBindingObserver {
-  final TextEditingController _path = TextEditingController();
+    with WidgetsBindingObserver, RestorationMixin {
+  final RestorableTextEditingController _path =
+      RestorableTextEditingController();
+  final RestorableStringN _openDocumentPath = RestorableStringN(null);
   final GlobalKey _pathFieldKey = GlobalKey(debugLabel: 'document path');
   final GlobalKey _contentKey = GlobalKey(debugLabel: 'reader content');
   final FocusNode _openFocus = FocusNode(debugLabel: 'open document');
@@ -122,7 +131,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _controller = ReaderController(
-      bridge: widget.bridge ?? FlutterBridge(),
+      bridge: widget.bridge ?? widget.bridgeFactory?.call() ?? FlutterBridge(),
       decoder: (pixels, {required width, required height}) =>
           widget.decoder(pixels, width: width, height: height),
       noteEditor: (initialValue) => showDialog<String>(
@@ -143,6 +152,18 @@ class _ReaderScreenState extends State<ReaderScreen>
             )
           : null,
     )..addListener(_modelChanged);
+  }
+
+  @override
+  String get restorationId => 'reader';
+
+  @override
+  void restoreState(RestorationBucket? oldBucket, bool initialRestore) {
+    registerForRestoration(_path, 'document_path');
+    registerForRestoration(_openDocumentPath, 'open_document_path');
+    if (_openDocumentPath.value case final path?) {
+      _controller.dispatch(ReaderOpenRequested(path));
+    }
   }
 
   void _modelChanged() => setState(() {});
@@ -172,13 +193,18 @@ class _ReaderScreenState extends State<ReaderScreen>
     _controller.removeListener(_modelChanged);
     _controller.dispose();
     _path.dispose();
+    _openDocumentPath.dispose();
     _openFocus.dispose();
     _readerFocus.dispose();
     _actionFocus.dispose();
     super.dispose();
   }
 
-  void _open() => _controller.dispatch(ReaderOpenRequested(_path.text));
+  void _open() {
+    final path = _path.value.text.trim();
+    if (path.isNotEmpty) _openDocumentPath.value = path;
+    _controller.dispatch(ReaderOpenRequested(path));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -191,7 +217,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       body: SafeArea(
         child: _ResponsiveReaderBody(
           model: model,
-          path: _path,
+          path: _path.value,
           pathFieldKey: _pathFieldKey,
           contentKey: _contentKey,
           openFocus: _openFocus,

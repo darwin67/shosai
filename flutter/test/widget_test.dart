@@ -36,6 +36,51 @@ void main() {
     expect(app.onGenerateTitle, isNull);
   });
 
+  testWidgets('process restoration reopens the persisted document locator', (
+    tester,
+  ) async {
+    final bridges = <_FakeBridge>[];
+    FlutterBridge bridgeFactory() {
+      final bridge = _FakeBridge();
+      bridges.add(bridge);
+      return bridge;
+    }
+
+    await tester.pumpWidget(
+      MaterialApp(
+        restorationScopeId: 'test',
+        home: ReaderScreen(bridgeFactory: bridgeFactory),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book.epub');
+    await tester.tap(find.text('Open document'));
+    await tester.pump();
+    expect(bridges, hasLength(1));
+    expect(bridges.single.openRequests, hasLength(1));
+
+    await tester.restartAndRestore();
+    await tester.pump();
+
+    expect(bridges, hasLength(2));
+    expect(bridges.last.openRequests, hasLength(1));
+    expect(bridges.last.openRequests.single.pathKey, '/tmp/book.epub');
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      '/tmp/book.epub',
+    );
+
+    await tester.pumpWidget(const SizedBox());
+    for (final bridge in bridges) {
+      bridge.openCompleter.completeError(
+        const FlutterBridgeError(
+          kind: FlutterBridgeErrorKind.cancelled,
+          message: 'cancelled',
+        ),
+      );
+    }
+    await Future.wait(bridges.map((bridge) => bridge.disposed.future));
+  });
+
   testWidgets('welcome panel describes the native bridge action', (
     tester,
   ) async {
