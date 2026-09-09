@@ -4417,6 +4417,64 @@ void main() {
     await bridge.disposed.future;
   });
 
+  testWidgets('relayout preserves an interrupted annotation note warning', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final bridge = _ControlledBridge(
+      format: FlutterBookFormat.epub,
+      initialAnnotations: [_annotation('one')],
+      immediateLists: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ReaderScreen(
+          bridge: bridge,
+          decoder: (pixels, {required width, required height}) => _testImage(),
+        ),
+      ),
+    );
+    await tester.enterText(find.byType(TextField), '/tmp/book');
+    await tester.tap(find.text('Open document'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Edit note'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'Updated note');
+    await tester.tap(find.text('Save'));
+    await _waitUntil(() => bridge.updateCalls == 1);
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    final recoveryList = Completer<List<FlutterAnnotation>>();
+    bridge.listCompleters.add(recoveryList);
+    bridge.updateCompleter!.complete(false);
+    await tester.pump();
+    await tester.pump();
+    expect(bridge.listCalls, 2);
+    tester.view.physicalSize = const Size(900, 700);
+    await tester.pump();
+    recoveryList.completeError(StateError('annotation list failed'));
+    await tester.pumpAndSettle();
+
+    expect(bridge.listCalls, 3);
+    expect(find.text('Highlight 1'), findsOneWidget);
+    expect(find.textContaining('annotation list failed'), findsNothing);
+    expect(
+      find.text(
+        'The note could not be saved while the app was suspended. Try again.',
+      ),
+      findsOneWidget,
+    );
+
+    await tester.pumpWidget(const SizedBox());
+    await bridge.disposed.future;
+  });
+
   testWidgets('suspension dismisses a note draft with actionable feedback', (
     tester,
   ) async {

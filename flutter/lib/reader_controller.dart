@@ -2144,7 +2144,13 @@ final class ReaderController implements Listenable {
     if (_isCurrent(message.generation)) {
       final recovered = _model.document != null;
       final selectionNotice = recovered ? _recoverySelectionNotice : null;
-      final annotationNotice = recovered ? _recoveryAnnotationNotice : null;
+      final annotationsRecovered = recovered && _model.annotationsReady;
+      final annotationNotice = annotationsRecovered
+          ? _recoveryAnnotationNotice
+          : null;
+      final recoveryError = recovered && !annotationsRecovered
+          ? _recoveryAnnotationNotice
+          : null;
       if (recovered) {
         _recoverySelectionNotice = null;
         _recoveryAnnotationNotice = null;
@@ -2154,6 +2160,9 @@ final class ReaderController implements Listenable {
           busy: false,
           selectionActionError: selectionNotice ?? _model.selectionActionError,
           annotationError: annotationNotice ?? _model.annotationError,
+          error: recoveryError == null
+              ? _unchanged
+              : [?_model.error, recoveryError].join('\n'),
         ),
       );
       _startRequestedRelayoutIfReady();
